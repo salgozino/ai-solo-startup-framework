@@ -1,0 +1,61 @@
+# openspec/config.yaml
+# SDD configuration for: ai-solo-startup-framework
+# Initialized: 2026-08-28
+# Mode: hybrid (OpenSpec files + Engram)
+schema: spec-driven
+
+context: |
+  Project: ai-solo-startup-framework
+  Stack: UNDECIDED — no language, framework, or runtime chosen yet
+  Architecture: UNDECIDED — multi-agent framework (CEO, CTO, engineer, designer roles)
+  Testing: UNAVAILABLE — no test runner detected (empty directory)
+  Git: NOT INITIALIZED — pending prerequisite
+  Delivery: auto-chain | review_budget_lines: 400
+
+testing:
+  strict_tdd: false
+  reason: "No test runner detected. Directory is empty and no stack has been chosen."
+  test_runner: ~
+  unit: false
+  integration: false
+  e2e: false
+  coverage: false
+  linter: false
+  type_checker: false
+  formatter: false
+
+sdd:
+  execution_mode: interactive
+  artifact_store: both
+  delivery_strategy: auto-chain
+  review_budget_lines: 400
+  initialized: 2026-08-28
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+    - State which agent roles are affected by the change
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+    - Reference agent role(s) and protocol(s) in each requirement
+  design:
+    - Include sequence diagrams for agent communication flows
+    - Document protocol choices (AMP, AAP, AgentIDs) with rationale
+    - Document architecture decisions with rationale
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+    - Flag tasks that require stack decision before they can start
+  apply:
+    guidelines:
+      - Follow existing code patterns once a stack is chosen
+      - Do not invent stack choices during apply — consult the proposal
+    tdd: false
+    test_command: ""
+  verify:
+    test_command: ""
+    build_command: ""
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas
