@@ -335,5 +335,6 @@ adapter; (6) Telegram gateway + contract test; (7) embedded UI; (8) E2E loop inc
   flow was corrected to `INPUT_REQUIRED` only, and the challenge payload is ours to define.
 - [ ] `RECOVERING` store: stdlib (JSON files keyed by address) vs embedded KV. Lean stdlib per
   `ponytail` unless recovery needs transactions — decide in slice 1.
-- [ ] **Go toolchain is not installed on the development machine.** `a2a-go` v2 requires Go ≥1.25.0.
-  Blocks implementation, not spec or task planning.
+- [x] **RESOLVED** — Go toolchain present: `go1.27.0` at `/usr/local/go`, above the `a2a-go` v2 minimum
+  of 1.25.0, verified compiling and running. Non-interactive shells do not read `~/.zshrc`, so automated
+  tooling must prepend `export PATH=$PATH:/usr/local/go/bin`.
