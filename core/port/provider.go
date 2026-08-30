@@ -9,6 +9,24 @@ import (
 	"github.com/salgozino/ai-solo-startup-framework/core/address"
 )
 
+// ActionIntent is an action a provider wants to perform (e.g. "telegram_send").
+// The policy engine classifies each intent before any external effect occurs.
+type ActionIntent struct {
+	// Kind is the action identifier declared in risk_policy (e.g. "telegram_send").
+	Kind string
+	// Payload carries action-specific data (e.g. message body, recipient hint).
+	Payload map[string]any
+}
+
+// ProviderResult is the outcome of a RunTask call.
+// It carries the task output and any action intents the provider wants to perform.
+type ProviderResult struct {
+	// Output is the human-readable or structured result from the task.
+	Output string
+	// ActionIntents lists any actions the provider requests; classified by the policy engine.
+	ActionIntents []ActionIntent
+}
+
 // TaskResult holds the outcome of a completed task.
 type TaskResult struct {
 	// Output is the human-readable or structured result from the task.
@@ -72,6 +90,11 @@ type Provider interface {
 	// SendTask dispatches a capability task to target with the given input and options.
 	// Returns the assigned taskID. opts may be nil.
 	SendTask(ctx context.Context, target address.A2AAddress, capability string, input map[string]any, opts *TaskOptions) (taskID string, err error)
+
+	// RunTask executes the task locally (e.g. by spawning a Claude Code subprocess).
+	// Returns a ProviderResult that may include action intents for policy classification.
+	// The supervisor calls this when it is acting as the executing agent, not as a router.
+	RunTask(ctx context.Context, taskID string, input string) (ProviderResult, error)
 }
 
 // BoundedContext carries the assembled context passed into a task invocation.
