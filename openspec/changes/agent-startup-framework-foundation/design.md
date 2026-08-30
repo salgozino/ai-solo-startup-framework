@@ -132,25 +132,29 @@ a dead child is re-invoked from last persisted task state, not resumed in place.
 invocation and **capped by a declared `context_budget`** on the `Provider` port; over-budget truncates
 oldest-first with a marker, never silent.
 
-## Provider Adapter Contract (BEFORE the Claude Code adapter)
+## Provider Port — A2A network client (BEFORE the Claude Code adapter)
+
+The `Provider` port is the high-level client the supervisor/core uses to **dispatch work to peer agents
+over the A2A network** and to report terminal outcomes back to its own A2A infrastructure. It is the
+transport-agnostic seam; `transport/a2a` (PR 3) is the JSON-RPC implementation it delegates to. The
+ephemeral AI execution (Claude Code) is a *separate* concern — the per-agent runtime on the A2A
+**server** side, not this client port.
 
 ```go
-// core depends on THIS, never on any adapter package
+// core/port/provider.go — the interface the framework depends on, never any adapter package
 type Provider interface {
-    Invoke(ctx context.Context, in TaskInvocation) (ProviderResult, error)
-    ExecuteAction(ctx context.Context, act Action) (ActionOutcome, error) // policy-approved effects only
-    Capabilities() ProviderCapabilities                                    // context_budget + action kinds
-}
-type TaskInvocation struct {
-    Address A2AAddress      // full address, never agent-name alone
-    Input   []a2a.Part
-    Context BoundedContext  // pre-capped
-    Resume  *ResumePoint    // set when resuming from INPUT_REQUIRED
-}
-type ProviderResult struct {
-    Parts         []a2a.Part
-    ActionIntents []ActionIntent // "wants to send X" — classified by policy, NOT executed here
-    Status        TerminalOrEscalated
+    // Complete reports taskID finished successfully; idempotent on already-complete.
+    Complete(taskID string, result TaskResult) error
+    // CompleteError reports taskID failed; idempotent on already-failed.
+    CompleteError(taskID string, agentErr error) error
+    // SendMessage sends text to target; wait=true blocks until terminal state, returns taskID.
+    SendMessage(ctx context.Context, target address.A2AAddress, text string, wait bool) (string, error)
+    // SendMessageStream returns a channel of incremental events; caller drains and closes it.
+    SendMessageStream(ctx context.Context, target address.A2AAddress, text string) (<-chan StreamEvent, error)
+    // ResolveAgent returns the address for role; error if role is not in the company topology.
+    ResolveAgent(ctx context.Context, role string) (address.A2AAddress, error)
+    // SendTask dispatches a capability task to target with input+opts; returns taskID. opts may be nil.
+    SendTask(ctx context.Context, target address.A2AAddress, capability string, input map[string]any, opts *TaskOptions) (taskID string, err error)
 }
 ```
 
@@ -158,17 +162,18 @@ type ProviderResult struct {
 
 | Leak | Guard |
 |---|---|
-| Session | Provider stateless; continuity in framework `Context`/`ResumePoint`. No session id in port. |
-| Tool permissions | Provider never self-authorizes; returns `ActionIntent`, policy decides, only approved `Action` returns via `ExecuteAction`. |
-| Output format | Port speaks A2A `Part`, not CLI stdout; adapter parses internally. |
-| Streaming | Optional sub-updates on adapter's type, not a required port method. |
-| Exit codes | Adapter maps non-zero → `error`; core sees `FAILED`. |
-| Context injection | Supervisor assembles `BoundedContext`; adapter receives, never builds. |
-| Cost/limits | `context_budget`+`Capabilities()` on port; provider rate limits stay inside adapter as `error`. |
+| Session | Provider stateless from the caller's view; continuity in framework `BoundedContext`/`ResumePoint`. No session id in port. |
+| Address | Every method takes a full `address.A2AAddress` (name+tenant); agent-name-only keying is unrepresentable. |
+| Idempotency | `Complete`/`CompleteError` are idempotent; re-reporting a terminal task returns `nil`. |
+| Streaming | `SendMessageStream` returns a channel the caller owns (drain + close). |
+| Cost/limits | `TaskOptions.BudgetTokens` is set by the supervisor, never by the adapter. |
+| Output format | Port speaks framework types (`TaskResult`, `StreamEvent`), not CLI stdout. |
 
-**Claude Code adapter** (satisfies port): wraps `claude` CLI via `os/exec`, fresh child per `Invoke`;
-injects `BoundedContext`; parses output → `[]a2a.Part`; maps exit codes; emits `ActionIntent`. In
-`adapters/claudecode/`, imported only by the composition root, never by `core/`.
+**Claude Code adapter** (PR 5, the A2A **server** side): the per-agent runtime that, when the supervisor
+receives a task for an agent, spawns a fresh `claude` child via `os/exec` per task; injects
+`BoundedContext`; parses the child output into the A2A task result; reports back via
+`Provider.Complete`/`CompleteError`. In `adapters/claudecode/`, imported only by the composition root,
+never by `core/`. The `Provider` *client* port above is fulfilled by `transport/a2a`, not by this adapter.
 
 ## Risk Policy — Enforcement, not Notification
 
