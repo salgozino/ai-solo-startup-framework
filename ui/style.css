@@ -1,0 +1,84 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: system-ui, sans-serif;
+  background: #0f0f0f;
+  color: #e0e0e0;
+  padding: 1.5rem;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+h1 { font-size: 1.4rem; font-weight: 600; }
+h2 { font-size: 1rem; font-weight: 500; margin-bottom: 0.75rem; color: #aaa; }
+
+.indicator {
+  font-size: 0.75rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+}
+.indicator.connecting { background: #555; color: #ccc; }
+.indicator.live        { background: #1a5c1a; color: #6fc96f; }
+.indicator.error       { background: #5c1a1a; color: #c96f6f; }
+
+section { margin-bottom: 2rem; }
+
+.state-badge {
+  display: inline-block;
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.25rem 0.75rem;
+  border-radius: 4px;
+  background: #222;
+  color: #e0e0e0;
+}
+
+.task-list { display: flex; flex-direction: column; gap: 0.75rem; }
+
+.task-card {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+}
+
+.task-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.task-id { font-size: 0.75rem; color: #888; font-family: monospace; }
+.task-state { font-size: 0.75rem; font-weight: 600; padding: 0.15rem 0.5rem; border-radius: 3px; }
+
+.task-state-WORKING           { background: #1a3a5c; color: #6ab4f5; }
+.task-state-COMPLETED         { background: #1a4a1a; color: #6fc96f; }
+.task-state-FAILED            { background: #4a1a1a; color: #c96f6f; }
+.task-state-INPUT_REQUIRED    { background: #4a3a00; color: #f5c842; }
+.task-state-SUBMITTED         { background: #2a2a2a; color: #aaa; }
+
+.task-input { font-size: 0.8rem; color: #bbb; white-space: pre-wrap; word-break: break-word; }
+
+.task-actions { margin-top: 0.75rem; display: flex; gap: 0.5rem; }
+
+.btn {
+  cursor: pointer;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.35rem 0.9rem;
+}
+.btn-approve { background: #1a5c1a; color: #6fc96f; }
+.btn-approve:hover { background: #226022; }
+.btn-reject  { background: #5c1a1a; color: #c96f6f; }
+.btn-reject:hover  { background: #622222; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.empty { font-size: 0.85rem; color: #555; }
