@@ -1,0 +1,13 @@
+tenant: acme
+agents:
+  - name: ceo
+    role: ceo
+    provider: claude-code
+gateways:
+  telegram:
+    token_env: TELEGRAM_BOT_TOKEN
+    recipient_env: "123456789"
+risk_policy:
+  telegram_send:
+    risk: risky
+    allowed_roles: [ceo]

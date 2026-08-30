@@ -1,0 +1,14 @@
+# Agent tooling caches — machine-specific, contain absolute local paths
+.atl/
+.codegraph/
+
+# Go build output
+/company
+*.exe
+*.test
+*.out
+
+# Local environment — gateway tokens are read from the environment, never committed
+.env
+.env.*
+!.env.example

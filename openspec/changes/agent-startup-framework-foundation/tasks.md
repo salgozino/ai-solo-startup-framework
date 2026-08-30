@@ -40,13 +40,13 @@ Chain strategy: stacked-to-main
 **Rollback**: delete `go.mod`, `go.sum`, `core/address/`, `config/`, `cmd/company/` stub.
 
 - [x] 1.1 Install Go ≥1.25.0 on the development machine (prerequisite — blocks all compile tasks). **DONE** — `go1.27.0` at `/usr/local/go`, verified compiling and running. **Caveat for automated runs**: `~/.zshrc` exports the PATH correctly for interactive shells, but non-interactive shells do not read `.zshrc`. Any tooling or sub-agent must prepend `export PATH=$PATH:/usr/local/go/bin` or invoke `/usr/local/go/bin/go` directly.
-- [ ] 1.2 Create `go.mod` (`module github.com/.../ai-solo-startup-framework`, `go 1.25`) and run `go get github.com/a2aproject/a2a-go/v2` to pin it; commit `go.sum`.
-- [ ] 1.3 Create `core/address/address.go`: define `A2AAddress` as `"{agent-name}/{tenant}"` string type; add `New(name, tenant string) (A2AAddress, error)` rejecting empty tenant; add `Parse(s string) (A2AAddress, error)`.
-- [ ] 1.4 Write `core/address/address_test.go`: table-driven tests — valid address roundtrips, empty-tenant rejected, missing-slash rejected, agent-name-only rejected.
-- [ ] 1.5 Create `config/schema.go`: define `CompanyConfig`, `AgentConfig`, `GatewayConfig`, `TelegramGatewayConfig`, `RiskPolicyEntry`, `PolicyConfig` structs matching the `company.yaml` schema; add `Load(path string) (*CompanyConfig, error)` that YAML-parses and validates.
-- [ ] 1.6 Add inline-secret guard in `config/schema.go`: `Load` must reject any `company.yaml` whose `gateways.telegram.token_env` value looks like a raw token (non-env-var string); fails with a descriptive error.
-- [ ] 1.7 Write `config/schema_test.go`: valid file accepted; inline token rejected; missing `token_env` field rejected; agent-level gateway field rejected or produces validation error (satisfies `company-as-code` scenario "Agent-level gateway field is rejected or ignored").
-- [ ] 1.8 Create empty `cmd/company/main.go` stub (`package main; func main() {}`) so `go build ./...` compiles from day 1.
+- [x] 1.2 Create `go.mod` (`module github.com/.../ai-solo-startup-framework`, `go 1.25`) and run `go get github.com/a2aproject/a2a-go/v2` to pin it; commit `go.sum`.
+- [x] 1.3 Create `core/address/address.go`: define `A2AAddress` as `"{agent-name}/{tenant}"` string type; add `New(name, tenant string) (A2AAddress, error)` rejecting empty tenant; add `Parse(s string) (A2AAddress, error)`.
+- [x] 1.4 Write `core/address/address_test.go`: table-driven tests — valid address roundtrips, empty-tenant rejected, missing-slash rejected, agent-name-only rejected.
+- [x] 1.5 Create `config/schema.go`: define `CompanyConfig`, `AgentConfig`, `GatewayConfig`, `TelegramGatewayConfig`, `RiskPolicyEntry`, `PolicyConfig` structs matching the `company.yaml` schema; add `Load(path string) (*CompanyConfig, error)` that YAML-parses and validates.
+- [x] 1.6 Add inline-secret guard in `config/schema.go`: `Load` must reject any `company.yaml` whose `gateways.telegram.token_env` value looks like a raw token (non-env-var string); fails with a descriptive error.
+- [x] 1.7 Write `config/schema_test.go`: valid file accepted; inline token rejected; missing `token_env` field rejected; agent-level gateway field rejected or produces validation error (satisfies `company-as-code` scenario "Agent-level gateway field is rejected or ignored").
+- [x] 1.8 Create empty `cmd/company/main.go` stub (`package main; func main() {}`) so `go build ./...` compiles from day 1.
 
 ---
 
