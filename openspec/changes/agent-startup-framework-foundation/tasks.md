@@ -112,11 +112,11 @@ Chain strategy: stacked-to-main
 **DoD**: `go test ./adapters/claudecode/...` green; contract suite from PR 2 runs against this adapter and passes (no adapter-specific changes to the suite).
 **Rollback**: delete `adapters/claudecode/`; framework still builds with `fakeProvider`.
 
-- [ ] 5.1 **RED** — `adapters/claudecode/adapter_test.go`: write failing tests FIRST for threat-matrix provider-subprocess cases — (a) argv-as-slice with shell metacharacters in input → metacharacters are literal, no injection; (b) hung child killed after deadline → `FAILED`; (c) oversized output truncated with marker before parse; (d) non-zero exit → failure outcome, not success. Required before production code per threat matrix.
-- [ ] 5.2 Create `adapters/claudecode/adapter.go`: `ClaudeCodeAdapter` implementing `Provider`; uses `os/exec.CommandContext` with argv slice (never `sh -c`); injects `BoundedContext` as stdin/flags; parses stdout → `[]a2a.Part`; maps non-zero exit → `error`; enforces `ctx` deadline (kills child on expiry).
-- [ ] 5.3 Add output size cap in `adapters/claudecode/adapter.go`: read output via `io.LimitReader`; if limit hit, truncate and prepend marker before parsing (threat-matrix case c).
-- [ ] 5.4 Write `adapters/claudecode/contract_test.go`: import and run the contract test suite from `core/port/contract_test.go` against `ClaudeCodeAdapter` (integration-tagged, `testing.Short()` skip for real process; unit-level cases run against a test double that simulates `claude` exit behavior).
-- [ ] 5.5 Write `adapters/claudecode/invocation_test.go` (unit, table-driven): two invocations for same agent use separate `exec.Cmd` instances (no shared state); non-zero exit returns failure; raw output never exposed through port (all results are parsed `Part` values).
+- [x] 5.1 **RED** — `adapters/claudecode/adapter_test.go`: write failing tests FIRST for threat-matrix provider-subprocess cases — (a) argv-as-slice with shell metacharacters in input → metacharacters are literal, no injection; (b) hung child killed after deadline → `FAILED`; (c) oversized output truncated with marker before parse; (d) non-zero exit → failure outcome, not success. Required before production code per threat matrix.
+- [x] 5.2 Create `adapters/claudecode/adapter.go`: `ClaudeCodeAdapter` implementing `Provider`; uses `os/exec.CommandContext` with argv slice (never `sh -c`); injects `BoundedContext` as stdin/flags; parses stdout → `[]a2a.Part`; maps non-zero exit → `error`; enforces `ctx` deadline (kills child on expiry).
+- [x] 5.3 Add output size cap in `adapters/claudecode/adapter.go`: read output via `io.LimitReader`; if limit hit, truncate and prepend marker before parsing (threat-matrix case c).
+- [x] 5.4 Write `adapters/claudecode/contract_test.go`: import and run the contract test suite from `core/port/contract_test.go` against `ClaudeCodeAdapter` (integration-tagged, `testing.Short()` skip for real process; unit-level cases run against a test double that simulates `claude` exit behavior).
+- [x] 5.5 Write `adapters/claudecode/invocation_test.go` (unit, table-driven): two invocations for same agent use separate `exec.Cmd` instances (no shared state); non-zero exit returns failure; raw output never exposed through port (all results are parsed `Part` values).
 
 ---
 
