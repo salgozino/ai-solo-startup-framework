@@ -58,11 +58,11 @@ Chain strategy: stacked-to-main
 **DoD**: `go test ./core/port/...` green; `fakeProvider` passes every contract scenario.
 **Rollback**: delete `core/port/`; `cmd/company` stub stays.
 
-- [ ] 2.1 Create `core/port/provider.go`: define `Provider` interface (`Invoke`, `ExecuteAction`, `Capabilities`), `TaskInvocation`, `ProviderResult`, `ActionIntent`, `ActionOutcome`, `ProviderCapabilities`, `BoundedContext`, `ResumePoint` types exactly as in `design.md`; no adapter imports.
-- [ ] 2.2 Create `core/port/gateway.go`: define `Gateway` interface (`Send(ctx, msg) (Receipt, error)`); `Receipt` and `GatewayMessage` types; no gateway-concrete imports.
-- [ ] 2.3 Create `core/port/fake/fake_provider.go`: `fakeProvider` struct implementing `Provider` — configurable return values; records calls for assertions.
-- [ ] 2.4 Write `core/port/contract_test.go`: contract test suite run against `fakeProvider`; covers all `provider-adapter` spec scenarios: full-address invocation, action-intent-only effects (no side effects), capability declaration, stateless resume (resume via input data not session), failure mapping. Tag as the canonical conformance suite that PR 5 will also run against the real adapter.
-- [ ] 2.5 Write `core/port/fake/fake_gateway.go`: `fakeGateway` implementing `Gateway`; records `Send` calls; configurable error return. Used by PR 6 contract tests and E2E tests.
+- [x] 2.1 Create `core/port/provider.go`: define `Provider` interface (`Complete`, `CompleteError`, `SendMessage`, `SendMessageStream`, `ResolveAgent`, `SendTask`), `TaskResult`, `TaskOptions`, `StreamEvent`, `BoundedContext`, `ResumePoint` types as per orchestrator spec; no adapter imports.
+- [x] 2.2 Create `core/port/gateway.go`: define `Gateway` interface (`Send(ctx, msg OutboundMessage) error`); `OutboundMessage`, `Receipt` types; `ValidateChannel` enforces allow-list (telegram, email); no gateway-concrete imports.
+- [x] 2.3 Create `core/port/fake/fake_provider.go`: `fake.Provider` struct implementing `port.Provider` — configurable return values; records calls for assertions; thread-safe.
+- [x] 2.4 Write `core/port/contract_test.go`: contract test suite run against `fake.Provider` and `fake.Gateway`; covers all `provider-adapter` spec scenarios: full-address invocation, Complete/CompleteError idempotency, SendMessage wait/nowait, SendMessageStream, ResolveAgent known/unknown, SendTask with full-address preservation, Gateway allow-list enforcement, non-invocation assertion foundation.
+- [x] 2.5 Write `core/port/fake/fake_gateway.go`: `fake.Gateway` implementing `port.Gateway`; validates channel allow-list; records `Send` calls; `CallCount`/`LastCall`/`WasCalled` helpers for negative assertions. Used by PR 6 contract tests and E2E tests.
 
 ---
 
