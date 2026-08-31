@@ -143,11 +143,11 @@ Chain strategy: stacked-to-main
 **DoD**: `go test ./ui/...` (embed compiles, handler unit tests pass); manual check: two-agent company visible, approve/reject only on pending escalations.
 **Rollback**: delete `ui/`; supervisor still starts; no UI served.
 
-- [ ] 7.1 Create `ui/index.html` + `ui/style.css` + `ui/app.js`: state list showing all agents (supervisor state + task states); `EventSource` connecting to SSE endpoint; approve/reject buttons rendered only for tasks in `INPUT_REQUIRED`; no other write actions (satisfies `monitoring-ui` "No control to stop running agent").
-- [ ] 7.2 Create `ui/embed.go`: `//go:embed index.html style.css app.js` directive; export `FS embed.FS`.
-- [ ] 7.3 Create `ui/handler.go`: `UIHandler` serves `ui.FS` on the CEO supervisor's HTTP mux; exposes `/api/tasks` (proxies `ListTasks`), `/api/approve` and `/api/reject` endpoints that post verdict to the supervisor (only valid for `INPUT_REQUIRED` tasks).
-- [ ] 7.4 Write `ui/handler_test.go`: `UIHandler` returns 200 on `GET /`; `/api/approve` on a non-`INPUT_REQUIRED` task returns 409 (satisfies "completed task offers no approve/reject control"); `/api/approve` on `INPUT_REQUIRED` task returns 200.
-- [ ] 7.5 Write `ui/handler_test.go` SSE test: connect to SSE endpoint with `httptest`; inject a state-change event; assert client receives it without polling (satisfies `monitoring-ui` "Escalation appears live without manual refresh").
+- [x] 7.1 Create `ui/index.html` + `ui/style.css` + `ui/app.js`: state list showing all agents (supervisor state + task states); `EventSource` connecting to SSE endpoint; approve/reject buttons rendered only for tasks in `INPUT_REQUIRED`; no other write actions (satisfies `monitoring-ui` "No control to stop running agent").
+- [x] 7.2 Create `ui/embed.go`: `//go:embed index.html style.css app.js` directive; export `FS embed.FS`.
+- [x] 7.3 Create `ui/handler.go`: `UIHandler` serves `ui.FS` on the CEO supervisor's HTTP mux; exposes `/api/tasks` (proxies `ListTasks`), `/api/approve` and `/api/reject` endpoints that post verdict to the supervisor (only valid for `INPUT_REQUIRED` tasks).
+- [x] 7.4 Write `ui/handler_test.go`: `UIHandler` returns 200 on `GET /`; `/api/approve` on a non-`INPUT_REQUIRED` task returns 409 (satisfies "completed task offers no approve/reject control"); `/api/approve` on `INPUT_REQUIRED` task returns 200.
+- [x] 7.5 Write `ui/handler_test.go` SSE test: connect to SSE endpoint with `httptest`; inject a state-change event; assert client receives it without polling (satisfies `monitoring-ui` "Escalation appears live without manual refresh").
 
 ---
 

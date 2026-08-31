@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Monitor</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>Agent Monitor</h1>
+    <span id="status-indicator" class="indicator connecting">Connecting…</span>
+  </header>
+
+  <main>
+    <section id="supervisor-section">
+      <h2>Supervisor</h2>
+      <div id="supervisor-state" class="state-badge">—</div>
+    </section>
+
+    <section id="tasks-section">
+      <h2>Tasks</h2>
+      <div id="task-list" class="task-list">
+        <p class="empty">No tasks.</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

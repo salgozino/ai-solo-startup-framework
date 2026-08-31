@@ -358,6 +358,12 @@ func (s *Supervisor) Addr() address.A2AAddress {
 	return s.cfg.Addr
 }
 
+// ListTasks returns all persisted task records for this supervisor.
+// The UI handler uses this to populate /api/tasks.
+func (s *Supervisor) ListTasks() ([]TaskRecord, error) {
+	return s.cfg.Store.LoadAll(s.cfg.Addr)
+}
+
 // helpers
 
 func (s *Supervisor) markFailed(rec TaskRecord) {
