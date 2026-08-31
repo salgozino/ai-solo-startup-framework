@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	sdka2a "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -92,7 +93,9 @@ func (a *supervisorUIAdapter) PostVerdict(taskID string, approve bool) error {
 	msg := sdka2a.NewMessage(sdka2a.MessageRoleUser, sdka2a.NewTextPart(body))
 	msg.TaskID = sdka2a.TaskID(taskID)
 
-	_, err = a.handler.SendMessage(context.Background(), &sdka2a.SendMessageRequest{
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err = a.handler.SendMessage(ctx, &sdka2a.SendMessageRequest{
 		Tenant:  a.tenant,
 		Message: msg,
 	})

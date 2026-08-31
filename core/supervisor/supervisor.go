@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"os"
 
 	a2a "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -121,6 +122,19 @@ func (s *Supervisor) Status() Status {
 // It is called by the a2asrv runtime in a dedicated goroutine per task.
 func (s *Supervisor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
+		// Panic recovery: if yield() or the provider panics, mark the task as FAILED.
+		// The existing defer s.fsm.taskDone() handles the FSM transition.
+		// Nested recover() swallows secondary panics from yield() itself.
+		defer func() {
+			if r := recover(); r != nil {
+				func() {
+					defer func() { recover() }() // swallow secondary panic from yield
+					yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed,
+						errorMessage(fmt.Errorf("panic: %v", r))), nil) //nolint
+				}()
+			}
+		}()
+
 		isResume := execCtx.StoredTask != nil
 
 		// Announce SUBMITTED if this is a new task (StoredTask == nil = no prior state).
@@ -425,9 +439,12 @@ func roleOf(addr address.A2AAddress) string {
 }
 
 // errorMessage wraps err into an a2a.Message for inclusion in a status event.
+// Returns a generic message to avoid leaking internal details (file paths, env vars).
+// The real error is logged to stderr for operator debugging.
 func errorMessage(err error) *a2a.Message {
 	if err == nil {
 		return nil
 	}
-	return a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(err.Error()))
+	fmt.Fprintf(os.Stderr, "supervisor: task error: %v\n", err)
+	return a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("task execution failed"))
 }
