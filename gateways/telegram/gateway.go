@@ -10,11 +10,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/salgozino/ai-solo-startup-framework/core/port"
 )
@@ -29,6 +31,10 @@ var envVarName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // defaultBase is the Telegram Bot API base URL, overridable in tests via NewWithBase.
 const defaultBase = "https://api.telegram.org"
+
+// httpClient is the HTTP client used for all Telegram API calls.
+// A 10-second timeout prevents goroutine leaks if the API hangs.
+var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 // TelegramGateway implements port.Gateway via the Telegram Bot API.
 // Construct via New or NewWithBase; zero value is invalid.
@@ -98,7 +104,7 @@ func (g *TelegramGateway) Send(ctx context.Context, msg port.OutboundMessage) er
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("telegram: HTTP request failed: %w", err)
 	}
@@ -108,7 +114,7 @@ func (g *TelegramGateway) Send(ctx context.Context, msg port.OutboundMessage) er
 		OK          bool   `json:"ok"`
 		Description string `json:"description"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
 		return fmt.Errorf("telegram: decode response (HTTP %d): %w", resp.StatusCode, err)
 	}
 	if !result.OK {
