@@ -24,6 +24,9 @@ type TaskRecord struct {
 	Input string `json:"input"`
 	// Owner is the full A2AAddress of the supervisor that owns this task.
 	Owner string `json:"owner"`
+	// PendingIntentKind is set when the task is parked in INPUT_REQUIRED awaiting
+	// a human verdict for a specific action kind. Empty for normal tasks.
+	PendingIntentKind string `json:"pending_intent_kind,omitempty"`
 }
 
 // ErrTaskNotFound is returned by Store.Load when the task does not exist.

@@ -36,6 +36,12 @@ type SendTaskCall struct {
 	Opts       *port.TaskOptions
 }
 
+// RunTaskCall records a single call to RunTask.
+type RunTaskCall struct {
+	TaskID string
+	Input  string
+}
+
 // Provider is a fake implementation of port.Provider.
 // All fields are exported so tests can configure returns and inspect records.
 //
@@ -44,17 +50,20 @@ type Provider struct {
 	mu sync.Mutex
 
 	// Configurable returns —— set before calling the fake.
-	ReturnTaskID   string
-	ReturnErr      error // returned by SendMessage, SendTask, ResolveAgent
-	ReturnAddress  address.A2AAddress
-	ReturnStream   []port.StreamEvent // events emitted by SendMessageStream (Done appended automatically)
-	CompleteErr    error              // error returned by Complete (not CompleteError)
-	CompleteErrErr error              // error returned by CompleteError
+	ReturnTaskID     string
+	ReturnErr        error // returned by SendMessage, SendTask, ResolveAgent
+	ReturnAddress    address.A2AAddress
+	ReturnStream     []port.StreamEvent  // events emitted by SendMessageStream (Done appended automatically)
+	CompleteErr      error               // error returned by Complete (not CompleteError)
+	CompleteErrErr   error               // error returned by CompleteError
+	ReturnRunResult  port.ProviderResult // returned by RunTask
+	ReturnRunErr     error               // error returned by RunTask
 
 	// Recorded calls — read after exercising the fake.
 	Calls     []CompletedCall
 	MsgCalls  []SendMessageCall
 	TaskCalls []SendTaskCall
+	RunCalls  []RunTaskCall
 }
 
 var _ port.Provider = (*Provider)(nil)
@@ -141,6 +150,21 @@ func (f *Provider) SendMessageCallCount() int {
 	return len(f.MsgCalls)
 }
 
+// RunTask records the call and returns (ReturnRunResult, ReturnRunErr).
+func (f *Provider) RunTask(_ context.Context, taskID string, input string) (port.ProviderResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.RunCalls = append(f.RunCalls, RunTaskCall{TaskID: taskID, Input: input})
+	return f.ReturnRunResult, f.ReturnRunErr
+}
+
+// RunTaskCallCount returns the number of RunTask calls recorded.
+func (f *Provider) RunTaskCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.RunCalls)
+}
+
 // Reset clears all recorded calls and resets configurable return values.
 func (f *Provider) Reset() {
 	f.mu.Lock()
@@ -148,10 +172,13 @@ func (f *Provider) Reset() {
 	f.Calls = nil
 	f.MsgCalls = nil
 	f.TaskCalls = nil
+	f.RunCalls = nil
 	f.ReturnTaskID = ""
 	f.ReturnErr = nil
 	f.ReturnAddress = ""
 	f.ReturnStream = nil
 	f.CompleteErr = nil
 	f.CompleteErrErr = nil
+	f.ReturnRunResult = port.ProviderResult{}
+	f.ReturnRunErr = nil
 }
