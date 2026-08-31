@@ -95,9 +95,19 @@ func TestE2E_MultiTenantIsolation(t *testing.T) {
 		t.Fatalf("acme SendMessage: %v", err)
 	}
 
-	// Give the supervisor a moment to process.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for acme task to land before checking beta isolation.
+	acmeAdap := acmeRuntimes[0].uiAdap
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		tasks, _ := acmeAdap.ListTasks()
+		if len(tasks) > 0 {
+			goto acmeReady
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("acme task never appeared — cannot validate isolation")
 
+acmeReady:
 	// List tasks on beta's CEO — must be empty (no acme tasks).
 	betaCEOAdap := betaRuntimes[0].uiAdap
 	betaTasks, err := betaCEOAdap.ListTasks()

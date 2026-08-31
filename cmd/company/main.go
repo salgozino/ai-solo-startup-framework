@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/salgozino/ai-solo-startup-framework/config"
 	"github.com/salgozino/ai-solo-startup-framework/ui"
@@ -59,7 +60,10 @@ func runMaterialize(yamlPath string) error {
 
 	// Wire monitoring UI on the CEO's (first) supervisor mux.
 	// The CEO is always first; company.yaml convention puts ceo first.
-	ceoBind := ":8080"
+	ceoBind := os.Getenv("COMPANY_UI_ADDR")
+	if ceoBind == "" {
+		ceoBind = "127.0.0.1:8080"
+	}
 	ceoHandler := ui.NewUIHandler(runtimes[0].uiAdap)
 	uiMux := http.NewServeMux()
 	ceoHandler.Register(uiMux)
@@ -78,7 +82,8 @@ func runMaterialize(yamlPath string) error {
 	<-sig
 
 	fmt.Fprintf(os.Stderr, "shutting down...\n")
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 	_ = uiSrv.Shutdown(ctx)
 	for _, rt := range runtimes {
 		_ = rt.srv.Shutdown(ctx)

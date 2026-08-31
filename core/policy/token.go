@@ -35,12 +35,14 @@ func (ts *tokenStore) mint() string {
 }
 
 // validate returns nil if token was minted by this store, otherwise an error.
+// On success, the token is consumed (deleted) to prevent replay.
 func (ts *tokenStore) validate(token string) error {
 	ts.mu.Lock()
+	defer ts.mu.Unlock()
 	_, ok := ts.issued[token]
-	ts.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("policy: invalid approval token")
 	}
+	delete(ts.issued, token)
 	return nil
 }
