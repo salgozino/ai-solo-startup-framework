@@ -205,7 +205,7 @@ func (s *Supervisor) executeResume(
 
 	// This is an approval for a pending escalation. Check the approval input.
 	// Convention: the approval message body is "approve" or "reject".
-	isApproved := approvalInput != "reject"
+	isApproved := approvalInput == "approve"
 
 	if !isApproved {
 		// Human rejected → REJECTED.
