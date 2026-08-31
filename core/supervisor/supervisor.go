@@ -2,7 +2,6 @@ package supervisor
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"iter"
 
@@ -211,7 +210,6 @@ func (s *Supervisor) executeResume(
 		// Human rejected → REJECTED.
 		rec.State = string(a2a.TaskStateRejected)
 		_ = s.cfg.Store.Save(s.cfg.Addr, rec)
-		_ = s.cfg.Store.Delete(s.cfg.Addr, taskID)
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateRejected, nil), nil) //nolint
 		return
 	}
@@ -228,7 +226,6 @@ func (s *Supervisor) executeResume(
 
 	rec.State = string(a2a.TaskStateCompleted)
 	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
-	_ = s.cfg.Store.Delete(s.cfg.Addr, taskID)
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil) //nolint
 }
 
@@ -257,7 +254,6 @@ func (s *Supervisor) executeWithPolicy(
 			// REJECTED — not FAILED. Terminal, no escalation, no send, no token.
 			rec.State = string(a2a.TaskStateRejected)
 			_ = s.cfg.Store.Save(s.cfg.Addr, rec)
-			_ = s.cfg.Store.Delete(s.cfg.Addr, rec.TaskID)
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateRejected, nil), nil) //nolint
 			return
 
@@ -272,7 +268,10 @@ func (s *Supervisor) executeWithPolicy(
 			})
 			_ = s.cfg.Store.Save(s.cfg.Addr, rec)
 
-			msg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewDataPart(json.RawMessage(payload)))
+			// Use a text part instead of a data part so that the a2asrv in-memory
+			// task store (gob-encoded) can serialize the message without needing to
+			// register json.RawMessage / jsontext.Value with gob.
+			msg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(string(payload)))
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateInputRequired, msg), nil) //nolint
 			return
 
@@ -288,7 +287,6 @@ func (s *Supervisor) executeWithPolicy(
 	// All intents handled (or none) → COMPLETED.
 	rec.State = string(a2a.TaskStateCompleted)
 	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
-	_ = s.cfg.Store.Delete(s.cfg.Addr, rec.TaskID)
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil) //nolint
 }
 
@@ -322,10 +320,9 @@ func (s *Supervisor) executeDelegation(
 		return
 	}
 
-	// Success — mark COMPLETED and clean up the store.
+	// Success — mark COMPLETED.
 	rec.State = string(a2a.TaskStateCompleted)
 	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
-	_ = s.cfg.Store.Delete(s.cfg.Addr, rec.TaskID)
 
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil) //nolint
 }
@@ -362,6 +359,11 @@ func (s *Supervisor) Addr() address.A2AAddress {
 // The UI handler uses this to populate /api/tasks.
 func (s *Supervisor) ListTasks() ([]TaskRecord, error) {
 	return s.cfg.Store.LoadAll(s.cfg.Addr)
+}
+
+// StatusStr returns the current supervisor lifecycle state as a string (e.g. "IDLE", "WORKING").
+func (s *Supervisor) StatusStr() string {
+	return string(s.fsm.current())
 }
 
 // helpers
