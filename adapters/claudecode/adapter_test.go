@@ -50,7 +50,7 @@ func helperBinary(t *testing.T) string {
 // it as-is on a single line. No newline within the output means no command was interpreted.
 func TestArgvSlice_ShellMetacharactersAreLiteral(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20})
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "")
 
 	ctx := context.Background()
 	// This input would produce a second output line ("INJECTED") if run through sh -c.
@@ -75,7 +75,7 @@ func TestArgvSlice_ShellMetacharactersAreLiteral(t *testing.T) {
 // a hung claude process is killed when the context deadline elapses; outcome is FAILED.
 func TestHungChild_KilledOnDeadline(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20})
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "")
 
 	// Very short deadline — fakeclaude in "hang" mode sleeps indefinitely.
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
@@ -92,7 +92,7 @@ func TestHungChild_KilledOnDeadline(t *testing.T) {
 func TestOversizedOutput_TruncatedWithMarker(t *testing.T) {
 	bin := helperBinary(t)
 	// Tiny limit so the fakeclaude "large" output exceeds it.
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 10})
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 10}, "")
 
 	ctx := context.Background()
 	result, err := adapter.RunTask(ctx, "task-large", "large")
@@ -109,7 +109,7 @@ func TestOversizedOutput_TruncatedWithMarker(t *testing.T) {
 // a non-zero exit from the claude process results in an error, not a success result.
 func TestNonZeroExit_MapsToError(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20})
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "")
 
 	ctx := context.Background()
 	// fakeclaude exits with code 1 when input is "fail".

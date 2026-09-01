@@ -3,9 +3,11 @@ agents:
   - name: ceo
     role: ceo
     provider: claude-code
+    model: anthropic/claude-sonnet-4-20250514
   - name: worker
     role: engineer
-    provider: claude-code
+    provider: opencode
+    model: openai/gpt-4o
 gateways:
   telegram:
     token_env: TELEGRAM_BOT_TOKEN

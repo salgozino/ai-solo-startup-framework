@@ -15,6 +15,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
 	"github.com/salgozino/ai-solo-startup-framework/adapters/claudecode"
+	"github.com/salgozino/ai-solo-startup-framework/adapters/opencode"
 	"github.com/salgozino/ai-solo-startup-framework/config"
 	"github.com/salgozino/ai-solo-startup-framework/core/address"
 	"github.com/salgozino/ai-solo-startup-framework/core/policy"
@@ -165,11 +166,14 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) ([]*agentRun
 		if opts.providerOverride != nil {
 			prov = opts.providerOverride
 		} else {
-			// Only claude-code provider is supported in v1.
-			if agCfg.Provider != "claude-code" {
+			switch agCfg.Provider {
+			case "claude-code":
+				prov = claudecode.New("claude", claudecode.Options{}, agCfg.Model)
+			case "opencode":
+				prov = opencode.New("opencode", opencode.Options{}, agCfg.Model)
+			default:
 				return nil, fmt.Errorf("wire: unknown provider %q for agent %q", agCfg.Provider, agCfg.Name)
 			}
-			prov = claudecode.New("claude", claudecode.Options{})
 		}
 
 		sup := supervisor.New(supervisor.Config{
