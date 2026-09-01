@@ -27,6 +27,8 @@ type TaskRecord struct {
 	// PendingIntentKind is set when the task is parked in INPUT_REQUIRED awaiting
 	// a human verdict for a specific action kind. Empty for normal tasks.
 	PendingIntentKind string `json:"pending_intent_kind,omitempty"`
+	// Output is the result produced by the provider when the task completes.
+	Output string `json:"output,omitempty"`
 }
 
 // ErrTaskNotFound is returned by Store.Load when the task does not exist.
