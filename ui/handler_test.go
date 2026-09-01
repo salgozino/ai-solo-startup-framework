@@ -15,9 +15,11 @@ import (
 
 // stubSupervisor implements ui.Supervisor for tests.
 type stubSupervisor struct {
-	state   string
-	tasks   []ui.TaskRecord
-	verdErr error // if non-nil, PostVerdict returns this error
+	state       string
+	tasks       []ui.TaskRecord
+	verdErr     error // if non-nil, PostVerdict returns this error
+	sendErr     error // if non-nil, SendTask returns this error
+	sendCalled  bool  // set to true after SendTask is called
 }
 
 func (s *stubSupervisor) StatusStr() string { return s.state }
@@ -28,6 +30,11 @@ func (s *stubSupervisor) ListTasks() ([]ui.TaskRecord, error) {
 
 func (s *stubSupervisor) PostVerdict(taskID string, approve bool) error {
 	return s.verdErr
+}
+
+func (s *stubSupervisor) SendTask(text string) error {
+	s.sendCalled = true
+	return s.sendErr
 }
 
 // buildHandler wires a UIHandler into an httptest server and returns the server.
@@ -224,5 +231,78 @@ func TestSSEReceivesEvent(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout: SSE event not received")
+	}
+}
+
+// TestSendTaskSuccess checks that POST /api/send with a valid message returns 200.
+func TestSendTaskSuccess(t *testing.T) {
+	sup := &stubSupervisor{}
+	srv := buildHandler(sup)
+	defer srv.Close()
+
+	body := bytes.NewBufferString(`{"message":"review the quarterly report"}`)
+	resp, err := http.Post(srv.URL+"/api/send", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("send valid message: want 200, got %d", resp.StatusCode)
+	}
+	if !sup.sendCalled {
+		t.Fatal("SendTask was not called on supervisor")
+	}
+
+	var payload struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatal("decode send response:", err)
+	}
+	if !payload.OK {
+		t.Fatal("send response: want ok=true")
+	}
+}
+
+// TestSendTaskEmptyMessage checks that POST /api/send with an empty message returns 400.
+func TestSendTaskEmptyMessage(t *testing.T) {
+	sup := &stubSupervisor{}
+	srv := buildHandler(sup)
+	defer srv.Close()
+
+	body := bytes.NewBufferString(`{"message":""}`)
+	resp, err := http.Post(srv.URL+"/api/send", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("send empty message: want 400, got %d", resp.StatusCode)
+	}
+	if sup.sendCalled {
+		t.Fatal("SendTask should not be called for empty message")
+	}
+}
+
+// TestSendTaskFailedState checks that POST /api/send returns 409 when the
+// supervisor adapter rejects the send because the last task is FAILED.
+func TestSendTaskFailedState(t *testing.T) {
+	sup := &stubSupervisor{
+		sendErr: ui.ErrAgentFailed,
+	}
+	srv := buildHandler(sup)
+	defer srv.Close()
+
+	body := bytes.NewBufferString(`{"message":"new task"}`)
+	resp, err := http.Post(srv.URL+"/api/send", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("send with failed state: want 409, got %d", resp.StatusCode)
 	}
 }

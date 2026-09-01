@@ -103,6 +103,34 @@ func (a *supervisorUIAdapter) PostVerdict(taskID string, approve bool) error {
 	return err
 }
 
+// SendTask implements ui.Supervisor.
+// It checks the most recent task state; if the supervisor is in a FAILED task,
+// it refuses to send. Otherwise it delivers the message as a new SendMessage
+// with an empty TaskID — the a2asrv framework treats this as a new task.
+func (a *supervisorUIAdapter) SendTask(text string) error {
+	tasks, err := a.sup.ListTasks()
+	if err != nil {
+		return err
+	}
+	// Refuse if the most recent task is in a terminal failed state.
+	if len(tasks) > 0 {
+		last := tasks[len(tasks)-1]
+		if last.State == string(sdka2a.TaskStateFailed) {
+			return ui.ErrAgentFailed
+		}
+	}
+
+	msg := sdka2a.NewMessage(sdka2a.MessageRoleUser, sdka2a.NewTextPart(text))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err = a.handler.SendMessage(ctx, &sdka2a.SendMessageRequest{
+		Tenant:  a.tenant,
+		Message: msg,
+	})
+	return err
+}
+
 // wireOptions controls how agents and gateways are constructed.
 // Tests inject fakes through these fields.
 type wireOptions struct {

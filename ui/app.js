@@ -29,7 +29,8 @@ function renderTasks(tasks) {
     taskList.innerHTML = '<p class="empty">No tasks.</p>';
     return;
   }
-  taskList.innerHTML = tasks.map(function(t) {
+  // Reverse so newest tasks appear first.
+  taskList.innerHTML = tasks.slice().reverse().map(function(t) {
     const label  = displayLabel(t.state);
     const isInput = t.state === 'TASK_STATE_INPUT_REQUIRED';
     const actions = isInput
@@ -108,3 +109,48 @@ function connectSSE() {
 // Bootstrap.
 fetchTasks();
 connectSSE();
+
+// Send task to CEO.
+var sendBtn    = document.getElementById('send-btn');
+var msgInput   = document.getElementById('task-message');
+
+msgInput.addEventListener('input', function() {
+  sendBtn.disabled = msgInput.value.trim() === '';
+});
+
+sendBtn.addEventListener('click', function() {
+  var msg = msgInput.value.trim();
+  if (!msg) return;
+
+  sendBtn.disabled = true;
+  sendBtn.textContent = 'Sending…';
+  fetch('/api/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: msg }),
+  })
+    .then(function(r) {
+      if (!r.ok) throw new Error('send failed');
+      return r.json();
+    })
+    .then(function() {
+      showToast('Task sent successfully', 'success');
+      msgInput.value = '';
+      sendBtn.textContent = 'Send Task';
+      sendBtn.disabled = false;
+      msgInput.focus();
+    })
+    .catch(function() {
+      showToast('Failed to send task', 'error');
+      sendBtn.textContent = 'Send Task';
+      sendBtn.disabled = false;
+    });
+});
+
+function showToast(msg, type) {
+  var toast = document.createElement('div');
+  toast.className = 'toast toast-' + type;
+  toast.textContent = msg;
+  document.body.appendChild(toast);
+  setTimeout(function() { toast.remove(); }, 3000);
+}

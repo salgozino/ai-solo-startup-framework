@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -36,6 +37,8 @@ type Supervisor interface {
 	// PostVerdict sends an approve or reject verdict for taskID.
 	// Returns an error if the task is not in INPUT_REQUIRED state.
 	PostVerdict(taskID string, approve bool) error
+	// SendTask submits a new task with the given message text.
+	SendTask(text string) error
 }
 
 // sseClient holds the channel for a single connected SSE client.
@@ -53,6 +56,7 @@ type sseClient struct {
 //   GET  /api/events  → SSE stream of state-change events
 //   POST /api/approve → approve an INPUT_REQUIRED task (409 otherwise)
 //   POST /api/reject  → reject an INPUT_REQUIRED task (409 otherwise)
+//   POST /api/send    → submit a new task with a message
 type UIHandler struct {
 	sup Supervisor
 
@@ -75,6 +79,7 @@ func (h *UIHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/events", h.handleEvents)
 	mux.HandleFunc("/api/approve", h.handleApprove)
 	mux.HandleFunc("/api/reject", h.handleReject)
+	mux.HandleFunc("/api/send", h.handleSendTask)
 }
 
 // Broadcast sends a JSON-encoded SSE 'state' event to all connected clients.
@@ -162,9 +167,20 @@ func (h *UIHandler) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ErrEmptyMessage is returned by SendTask when the message is empty.
+var ErrEmptyMessage = fmt.Errorf("message must not be empty")
+
+// ErrAgentFailed is returned by SendTask when the agent's last task is in FAILED state.
+var ErrAgentFailed = fmt.Errorf("agent is in FAILED state")
+
 // verdictRequest is the JSON body for /api/approve and /api/reject.
 type verdictRequest struct {
 	TaskID string `json:"task_id"`
+}
+
+// sendRequest is the JSON body for /api/send.
+type sendRequest struct {
+	Message string `json:"message"`
 }
 
 // handleApprove handles POST /api/approve.
@@ -198,9 +214,40 @@ func (h *UIHandler) handleVerdict(w http.ResponseWriter, r *http.Request, approv
 	w.WriteHeader(http.StatusOK)
 }
 
+// handleSendTask handles POST /api/send.
+func (h *UIHandler) handleSendTask(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req sendRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Message) == "" {
+		http.Error(w, ErrEmptyMessage.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := h.sup.SendTask(req.Message); err != nil {
+		if isAgentFailed(err) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
 // ErrNotInputRequired is returned by PostVerdict when the task is not in INPUT_REQUIRED state.
 var ErrNotInputRequired = fmt.Errorf("task is not in INPUT_REQUIRED state")
 
 func isNotInputRequired(err error) bool {
 	return err != nil && err.Error() == ErrNotInputRequired.Error()
+}
+
+func isAgentFailed(err error) bool {
+	return err != nil && err.Error() == ErrAgentFailed.Error()
 }
