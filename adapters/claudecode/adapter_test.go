@@ -118,3 +118,38 @@ func TestNonZeroExit_MapsToError(t *testing.T) {
 		t.Fatal("expected error for non-zero exit, got nil (success hidden failure)")
 	}
 }
+
+// TestModelFlag_PassedToCLI verifies that when a model is configured,
+// the --model flag is correctly passed to the claude CLI.
+func TestModelFlag_PassedToCLI(t *testing.T) {
+	bin := helperBinary(t)
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "anthropic/claude-sonnet-4-20250514")
+
+	ctx := context.Background()
+	result, err := adapter.RunTask(ctx, "task-model", "hello")
+	if err != nil {
+		t.Fatalf("RunTask with model: unexpected error: %v", err)
+	}
+	// fakeclaude prepends "model:<model>|" when --model is passed.
+	expected := "model:anthropic/claude-sonnet-4-20250514|hello"
+	if result.Output != expected {
+		t.Errorf("expected output %q, got %q", expected, result.Output)
+	}
+}
+
+// TestNoModelFlag_OmitsFlag verifies that when no model is configured,
+// the --model flag is not passed to the CLI.
+func TestNoModelFlag_OmitsFlag(t *testing.T) {
+	bin := helperBinary(t)
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "")
+
+	ctx := context.Background()
+	result, err := adapter.RunTask(ctx, "task-no-model", "hello")
+	if err != nil {
+		t.Fatalf("RunTask without model: unexpected error: %v", err)
+	}
+	// Without model, fakeclaude echoes input verbatim (no model prefix).
+	if result.Output != "hello" {
+		t.Errorf("expected output %q, got %q", "hello", result.Output)
+	}
+}
