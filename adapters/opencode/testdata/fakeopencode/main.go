@@ -1,4 +1,4 @@
-// fakeclaude simulates the claude CLI for unit testing the Claude Code adapter.
+// fakeopencode simulates the opencode CLI for unit testing the OpenCode adapter.
 // It reads argv and behaves as follows:
 //
 //	"fail"   — exits with code 1, prints nothing
@@ -19,18 +19,15 @@ import (
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "fakeclaude: expected -p <argument>")
+		fmt.Fprintln(os.Stderr, "fakeopencode: expected run <argument>")
 		os.Exit(2)
 	}
 
-	// Args: [-p [--model <model>]] <input>
+	// Args: [run [--model <model>]] <input>
 	// Parse flags, then take the last argument as the prompt.
 	var model string
 	input := ""
 	for i := 1; i < len(os.Args); i++ {
-		if os.Args[i] == "-p" {
-			continue // skip -p flag
-		}
 		if os.Args[i] == "--model" && i+1 < len(os.Args) {
 			model = os.Args[i+1]
 			i++ // skip model value
@@ -40,7 +37,7 @@ func main() {
 	}
 
 	if input == "" {
-		fmt.Fprintln(os.Stderr, "fakeclaude: no input provided")
+		fmt.Fprintln(os.Stderr, "fakeopencode: no input provided")
 		os.Exit(2)
 	}
 
@@ -49,11 +46,9 @@ func main() {
 		os.Exit(1)
 
 	case "hang":
-		// Sleep until killed — simulates a hung process.
 		time.Sleep(24 * time.Hour)
 
 	case "large":
-		// Emit 1 MiB of data so the adapter's io.LimitReader is triggered.
 		fmt.Print(strings.Repeat("x", 1<<20))
 
 	default:

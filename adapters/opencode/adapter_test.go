@@ -1,13 +1,14 @@
-// Package claudecode_test contains threat-matrix RED tests for the Claude Code adapter.
-// These tests cover the provider-subprocess threat cases from design.md:
+// Package opencode_test contains threat-matrix RED tests for the OpenCode adapter.
+// These tests cover the provider-subprocess threat cases:
 //   (a) argv-as-slice: shell metacharacters in input are literal data, never interpreted
 //   (b) hung child killed after ctx deadline → FAILED
 //   (c) oversized output truncated with marker before parse
 //   (d) non-zero exit → failure outcome, not success
+//   (e) model flag is passed to the CLI when configured
 //
-// Tests use a helper binary (built from testdata/fakeclaude) that simulates claude CLI
-// exit behavior without requiring a real claude installation.
-package claudecode_test
+// Tests use a helper binary (built from testdata/fakeopencode) that simulates opencode CLI
+// exit behavior without requiring a real opencode installation.
+package opencode_test
 
 import (
 	"context"
@@ -19,65 +20,54 @@ import (
 	"testing"
 	"time"
 
-	"github.com/salgozino/ai-solo-startup-framework/adapters/claudecode"
+	"github.com/salgozino/ai-solo-startup-framework/adapters/opencode"
 )
 
-// helperBinary builds the fakeclaude binary once per test run and returns its path.
-// The binary is placed in t.TempDir() so it is cleaned up automatically.
+// helperBinary builds the fakeopencode binary once per test run and returns its path.
 func helperBinary(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "fakeclaude")
+	bin := filepath.Join(dir, "fakeopencode")
 	if runtime.GOOS == "windows" {
 		bin += ".exe"
 	}
-	src := filepath.Join("testdata", "fakeclaude", "main.go")
+	src := filepath.Join("testdata", "fakeopencode", "main.go")
 	cmd := exec.Command("go", "build", "-o", bin, src)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("build fakeclaude: %v", err)
+		t.Fatalf("build fakeopencode: %v", err)
 	}
 	return bin
 }
 
 // TestArgvSlice_ShellMetacharactersAreLiteral verifies threat-matrix case (a):
-// shell metacharacters in input do not alter the invocation — they are passed as literal data.
-//
-// If the adapter used "sh -c", the shell would execute `echo INJECTED` and `rm -rf /` as
-// separate commands, producing a multi-line output where INJECTED appears on its own line.
-// With argv-as-slice, the entire string is passed verbatim as one argument; fakeclaude echoes
-// it as-is on a single line. No newline within the output means no command was interpreted.
+// shell metacharacters in input do not alter the invocation.
 func TestArgvSlice_ShellMetacharactersAreLiteral(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "")
 
 	ctx := context.Background()
-	// This input would produce a second output line ("INJECTED") if run through sh -c.
 	maliciousInput := "prefix; echo INJECTED"
 
 	result, err := adapter.RunTask(ctx, "task-argv", maliciousInput)
 	if err != nil {
 		t.Fatalf("RunTask with metachar input: unexpected error: %v", err)
 	}
-	// With argv-as-slice: fakeclaude echoes the full string as one token, no newline inside.
-	// The output must be exactly the literal input (trimmed of trailing newline).
 	if result.Output != maliciousInput {
 		t.Errorf("expected literal output %q, got %q", maliciousInput, result.Output)
 	}
-	// Secondary check: no newline inside the output — a shell would produce two lines.
 	if strings.Contains(result.Output, "\n") {
 		t.Errorf("output contains newline — possible shell interpretation: %q", result.Output)
 	}
 }
 
 // TestHungChild_KilledOnDeadline verifies threat-matrix case (b):
-// a hung claude process is killed when the context deadline elapses; outcome is FAILED.
+// a hung opencode process is killed when the context deadline elapses.
 func TestHungChild_KilledOnDeadline(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "")
 
-	// Very short deadline — fakeclaude in "hang" mode sleeps indefinitely.
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 
@@ -91,28 +81,25 @@ func TestHungChild_KilledOnDeadline(t *testing.T) {
 // output that exceeds the size cap is truncated; the marker is prepended.
 func TestOversizedOutput_TruncatedWithMarker(t *testing.T) {
 	bin := helperBinary(t)
-	// Tiny limit so the fakeclaude "large" output exceeds it.
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 10}, "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 10}, "")
 
 	ctx := context.Background()
 	result, err := adapter.RunTask(ctx, "task-large", "large")
 	if err != nil {
 		t.Fatalf("RunTask large output: %v", err)
 	}
-	// When truncated, the marker must appear in the output.
-	if !strings.Contains(result.Output, claudecode.TruncationMarker) {
-		t.Errorf("expected truncation marker %q in output, got: %q", claudecode.TruncationMarker, result.Output)
+	if !strings.Contains(result.Output, opencode.TruncationMarker) {
+		t.Errorf("expected truncation marker %q in output, got: %q", opencode.TruncationMarker, result.Output)
 	}
 }
 
 // TestNonZeroExit_MapsToError verifies threat-matrix case (d):
-// a non-zero exit from the claude process results in an error, not a success result.
+// a non-zero exit from the opencode process results in an error.
 func TestNonZeroExit_MapsToError(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "")
 
 	ctx := context.Background()
-	// fakeclaude exits with code 1 when input is "fail".
 	_, err := adapter.RunTask(ctx, "task-fail", "fail")
 	if err == nil {
 		t.Fatal("expected error for non-zero exit, got nil (success hidden failure)")
@@ -120,17 +107,17 @@ func TestNonZeroExit_MapsToError(t *testing.T) {
 }
 
 // TestModelFlag_PassedToCLI verifies that when a model is configured,
-// the --model flag is correctly passed to the claude CLI.
+// the --model flag is correctly passed to the opencode CLI.
 func TestModelFlag_PassedToCLI(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "anthropic/claude-sonnet-4-20250514")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "anthropic/claude-sonnet-4-20250514")
 
 	ctx := context.Background()
 	result, err := adapter.RunTask(ctx, "task-model", "hello")
 	if err != nil {
 		t.Fatalf("RunTask with model: unexpected error: %v", err)
 	}
-	// fakeclaude prepends "model:<model>|" when --model is passed.
+	// fakeopencode prepends "model:<model>|" when --model is passed.
 	expected := "model:anthropic/claude-sonnet-4-20250514|hello"
 	if result.Output != expected {
 		t.Errorf("expected output %q, got %q", expected, result.Output)
@@ -141,14 +128,14 @@ func TestModelFlag_PassedToCLI(t *testing.T) {
 // the --model flag is not passed to the CLI.
 func TestNoModelFlag_OmitsFlag(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "")
 
 	ctx := context.Background()
 	result, err := adapter.RunTask(ctx, "task-no-model", "hello")
 	if err != nil {
 		t.Fatalf("RunTask without model: unexpected error: %v", err)
 	}
-	// Without model, fakeclaude echoes input verbatim (no model prefix).
+	// Without model, fakeopencode echoes input verbatim (no model prefix).
 	if result.Output != "hello" {
 		t.Errorf("expected output %q, got %q", "hello", result.Output)
 	}

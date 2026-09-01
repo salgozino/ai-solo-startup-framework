@@ -24,13 +24,14 @@ type CompanyConfig struct {
 	RiskPolicy map[string]Policy `yaml:"risk_policy"`
 }
 
-// AgentConfig declares a single agent: name, role, and provider.
+// AgentConfig declares a single agent: name, role, provider, and optional model.
 // There is deliberately no Gateways field here; gateway authorization is
 // governed solely by RiskPolicy.allowed_roles at the company level.
 type AgentConfig struct {
 	Name     string `yaml:"name"`
 	Role     string `yaml:"role"`
 	Provider string `yaml:"provider"`
+	Model    string `yaml:"model,omitempty"`
 }
 
 // GatewayConfig holds the company-level gateway declarations.
@@ -95,7 +96,7 @@ func Load(path string) (*CompanyConfig, error) {
 		// Reject any other unknown field.
 		for k := range a {
 			switch k {
-			case "name", "role", "provider":
+			case "name", "role", "provider", "model":
 				// valid fields
 			default:
 				return nil, fmt.Errorf("config: agent[%d] (%q): unknown field %q", i, name, k)
@@ -104,7 +105,8 @@ func Load(path string) (*CompanyConfig, error) {
 
 		role, _ := a["role"].(string)
 		provider, _ := a["provider"].(string)
-		agents = append(agents, AgentConfig{Name: name, Role: role, Provider: provider})
+		model, _ := a["model"].(string)
+		agents = append(agents, AgentConfig{Name: name, Role: role, Provider: provider, Model: model})
 	}
 
 	// Inline-secret guard for Telegram gateway.

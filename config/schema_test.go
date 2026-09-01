@@ -28,6 +28,15 @@ func TestLoad(t *testing.T) {
 				if c.Agents[0].Name != "ceo" {
 					t.Errorf("Agents[0].Name = %q; want %q", c.Agents[0].Name, "ceo")
 				}
+				if c.Agents[0].Model != "anthropic/claude-sonnet-4-20250514" {
+					t.Errorf("Agents[0].Model = %q; want %q", c.Agents[0].Model, "anthropic/claude-sonnet-4-20250514")
+				}
+				if c.Agents[1].Provider != "opencode" {
+					t.Errorf("Agents[1].Provider = %q; want %q", c.Agents[1].Provider, "opencode")
+				}
+				if c.Agents[1].Model != "openai/gpt-4o" {
+					t.Errorf("Agents[1].Model = %q; want %q", c.Agents[1].Model, "openai/gpt-4o")
+				}
 				if c.Gateways.Telegram == nil {
 					t.Fatal("Gateways.Telegram = nil; want non-nil")
 				}

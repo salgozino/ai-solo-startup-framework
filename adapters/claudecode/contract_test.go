@@ -21,7 +21,7 @@ import (
 // two calls produce independent results with no shared in-process state.
 func TestContract_RunTask_Stateless(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20})
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "")
 	ctx := context.Background()
 
 	r1, err := adapter.RunTask(ctx, "task-a", "hello")
@@ -41,7 +41,7 @@ func TestContract_RunTask_Stateless(t *testing.T) {
 // parsed string (port.ProviderResult.Output), not raw bytes or a hidden nil.
 func TestContract_RunTask_OutputParsed(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20})
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "")
 	ctx := context.Background()
 
 	result, err := adapter.RunTask(ctx, "task-parse", "parsed-content")
@@ -57,7 +57,7 @@ func TestContract_RunTask_OutputParsed(t *testing.T) {
 // to a non-nil error, not a success result with a hidden error.
 func TestContract_RunTask_FailureIsMapped(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20})
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "")
 	ctx := context.Background()
 
 	_, err := adapter.RunTask(ctx, "task-fail-contract", "fail")
@@ -77,7 +77,7 @@ func TestContract_RunTask_RealClaude(t *testing.T) {
 		t.Skip("claude binary not found on PATH — skipping real-claude integration test")
 	}
 
-	adapter := claudecode.New(claudePath, claudecode.Options{OutputLimit: 1 << 20})
+	adapter := claudecode.New(claudePath, claudecode.Options{OutputLimit: 1 << 20}, "")
 	ctx := context.Background()
 
 	// We only verify the adapter does not panic and returns a result.

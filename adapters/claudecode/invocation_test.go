@@ -18,7 +18,7 @@ import (
 // exec.Cmd), the second call would observe the first call's output or state.
 func TestInvocation_SeparateInstances(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20})
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -50,7 +50,7 @@ func TestInvocation_SeparateInstances(t *testing.T) {
 // every non-zero exit scenario must produce an error.
 func TestInvocation_NonZeroExitTable(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20})
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -75,7 +75,7 @@ func TestInvocation_NonZeroExitTable(t *testing.T) {
 // The contract: result.Output is a plain string; ActionIntents is a slice (may be nil/empty).
 func TestInvocation_RawOutputNeverExposed(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20})
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "")
 	ctx := context.Background()
 
 	result, err := adapter.RunTask(ctx, "task-raw", "some-output")
