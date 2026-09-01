@@ -2,6 +2,8 @@
 
 A framework for running startups entirely by AI agents. You declare your company as a YAML file — tenant, agents, gateways, and risk policy — and the framework materializes it: each role agent gets a supervised process, an A2A endpoint, and a risk policy. The human interacts only with the CEO agent and approves risk escalations through a minimal monitoring UI.
 
+Supports **Claude Code** and **OpenCode** as provider backends, with per-agent model selection.
+
 Built on the [A2A protocol](https://a2a-protocol.org/latest/) (Linux Foundation).
 
 ## Quickstart
@@ -25,9 +27,11 @@ agents:
   - name: ceo
     role: ceo
     provider: claude-code
+    model: anthropic/claude-sonnet-4-20250514
   - name: engineer
     role: engineer
-    provider: claude-code
+    provider: opencode
+    model: openai/gpt-4o
 
 gateways:
   telegram:
@@ -40,6 +44,22 @@ risk_policy:
     allowed_roles:
       - ceo
 ```
+
+#### Supported providers
+
+| Provider | CLI binary | `provider` value |
+|----------|-----------|-----------------|
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude` | `claude-code` |
+| [OpenCode](https://opencode.ai) | `opencode` | `opencode` |
+
+#### Model selection
+
+The `model` field is optional. When set, the adapter passes `--model <model>` to the CLI.
+
+- **Claude Code**: accepts aliases (`sonnet`, `opus`) or full names (`anthropic/claude-sonnet-4-20250514`)
+- **OpenCode**: requires `provider/model` format (e.g. `openai/gpt-4o`, `opencode/mimo-v2.5-free`)
+
+When omitted, each CLI uses its configured default model.
 
 ### 3. Set environment variables
 
