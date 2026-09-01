@@ -45,7 +45,7 @@ func helperBinary(t *testing.T) string {
 // shell metacharacters in input do not alter the invocation.
 func TestArgvSlice_ShellMetacharactersAreLiteral(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "")
 
 	ctx := context.Background()
 	maliciousInput := "prefix; echo INJECTED"
@@ -66,7 +66,7 @@ func TestArgvSlice_ShellMetacharactersAreLiteral(t *testing.T) {
 // a hung opencode process is killed when the context deadline elapses.
 func TestHungChild_KilledOnDeadline(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
@@ -81,7 +81,7 @@ func TestHungChild_KilledOnDeadline(t *testing.T) {
 // output that exceeds the size cap is truncated; the marker is prepended.
 func TestOversizedOutput_TruncatedWithMarker(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := opencode.New(bin, opencode.Options{OutputLimit: 10}, "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 10}, "", "")
 
 	ctx := context.Background()
 	result, err := adapter.RunTask(ctx, "task-large", "large")
@@ -97,7 +97,7 @@ func TestOversizedOutput_TruncatedWithMarker(t *testing.T) {
 // a non-zero exit from the opencode process results in an error.
 func TestNonZeroExit_MapsToError(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "")
 
 	ctx := context.Background()
 	_, err := adapter.RunTask(ctx, "task-fail", "fail")
@@ -110,7 +110,7 @@ func TestNonZeroExit_MapsToError(t *testing.T) {
 // the --model flag is correctly passed to the opencode CLI.
 func TestModelFlag_PassedToCLI(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "anthropic/claude-sonnet-4-20250514")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "anthropic/claude-sonnet-4-20250514", "")
 
 	ctx := context.Background()
 	result, err := adapter.RunTask(ctx, "task-model", "hello")
@@ -128,7 +128,7 @@ func TestModelFlag_PassedToCLI(t *testing.T) {
 // the --model flag is not passed to the CLI.
 func TestNoModelFlag_OmitsFlag(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "")
 
 	ctx := context.Background()
 	result, err := adapter.RunTask(ctx, "task-no-model", "hello")
@@ -136,6 +136,41 @@ func TestNoModelFlag_OmitsFlag(t *testing.T) {
 		t.Fatalf("RunTask without model: unexpected error: %v", err)
 	}
 	// Without model, fakeopencode echoes input verbatim (no model prefix).
+	if result.Output != "hello" {
+		t.Errorf("expected output %q, got %q", "hello", result.Output)
+	}
+}
+
+// TestAgentFlag_PassedToCLI verifies that when an agent name is configured,
+// the --agent flag is correctly passed to the opencode CLI.
+func TestAgentFlag_PassedToCLI(t *testing.T) {
+	bin := helperBinary(t)
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "ceo")
+
+	ctx := context.Background()
+	result, err := adapter.RunTask(ctx, "task-agent", "hello")
+	if err != nil {
+		t.Fatalf("RunTask with agent: unexpected error: %v", err)
+	}
+	// fakeopencode prepends "agent:<agent>|" when --agent is passed.
+	expected := "agent:ceo|hello"
+	if result.Output != expected {
+		t.Errorf("expected output %q, got %q", expected, result.Output)
+	}
+}
+
+// TestNoAgentFlag_OmitsFlag verifies that when no agent name is configured,
+// the --agent flag is not passed to the CLI.
+func TestNoAgentFlag_OmitsFlag(t *testing.T) {
+	bin := helperBinary(t)
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "")
+
+	ctx := context.Background()
+	result, err := adapter.RunTask(ctx, "task-no-agent", "hello")
+	if err != nil {
+		t.Fatalf("RunTask without agent: unexpected error: %v", err)
+	}
+	// Without agent, fakeopencode echoes input verbatim (no agent prefix).
 	if result.Output != "hello" {
 		t.Errorf("expected output %q, got %q", "hello", result.Output)
 	}

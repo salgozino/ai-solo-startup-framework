@@ -80,3 +80,24 @@ pending state.
 - WHEN the provider returns control to the supervisor
 - THEN the supervisor receives an explicit failure outcome it can map to the task's `FAILED`
   state
+
+### Requirement: Agent Names Are Consistent Across Config and Provider
+
+The agent name used in `company.yaml` MUST be the same name passed to the provider adapter.
+This ensures consistent identification across the framework and the provider's system.
+
+For providers with named agents (e.g., OpenCode), the adapter passes the agent name to the
+provider CLI via `--agent <name>`. For providers without named agents (e.g., Claude), the
+agent name is not passed.
+
+#### Scenario: OpenCode adapter passes agent name to CLI
+
+- GIVEN an agent named `gentle-orchestrator` configured with provider `opencode`
+- WHEN the supervisor invokes the OpenCode adapter
+- THEN the adapter spawns `opencode run --agent gentle-orchestrator <input>`
+
+#### Scenario: Claude adapter does not pass agent name
+
+- GIVEN an agent named `ceo` configured with provider `claude-code`
+- WHEN the supervisor invokes the Claude adapter
+- THEN the adapter spawns `claude -p <input>` without an agent name flag

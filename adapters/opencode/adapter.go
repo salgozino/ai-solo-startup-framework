@@ -39,17 +39,19 @@ type Adapter struct {
 	opencodeBin string
 	limit       int64
 	model       string
+	agentName   string
 }
 
 // New returns an Adapter that invokes opencodeBin as the opencode CLI.
 // opencodeBin must be a path to the opencode executable (or a test double).
 // model is optional; when non-empty it is passed as --model <model>.
-func New(opencodeBin string, opts Options, model string) *Adapter {
+// agentName is optional; when non-empty it is passed as --agent <agentName>.
+func New(opencodeBin string, opts Options, model string, agentName string) *Adapter {
 	limit := opts.OutputLimit
 	if limit <= 0 {
 		limit = defaultOutputLimit
 	}
-	return &Adapter{opencodeBin: opencodeBin, limit: limit, model: model}
+	return &Adapter{opencodeBin: opencodeBin, limit: limit, model: model, agentName: agentName}
 }
 
 // RunTask implements port.Provider.RunTask.
@@ -57,12 +59,15 @@ func New(opencodeBin string, opts Options, model string) *Adapter {
 // a positional argv argument, reads stdout up to the size cap, and returns a parsed
 // ProviderResult. Non-zero exit → error. ctx deadline kills the child.
 func (a *Adapter) RunTask(ctx context.Context, _ string, input string) (port.ProviderResult, error) {
-	// Build argv: opencode run [--model <model>] <input>
+	// Build argv: opencode run [--model <model>] [--agent <agentName>] <input>
 	// argv-as-slice: input is passed as a literal argument, never interpolated into a shell string.
 	// This is the primary guard against argument injection.
 	args := []string{"run"}
 	if a.model != "" {
 		args = append(args, "--model", a.model)
+	}
+	if a.agentName != "" {
+		args = append(args, "--agent", a.agentName)
 	}
 	args = append(args, input)
 
