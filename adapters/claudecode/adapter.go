@@ -1,7 +1,8 @@
 // Package claudecode provides the Claude Code adapter — the first concrete implementation
 // of port.Provider. It spawns an ephemeral claude CLI process per invocation via os/exec
-// with an argv slice (never sh -c), enforces ctx deadlines, and parses output into
-// framework types before returning. Raw process output never crosses the port boundary.
+// with an argv slice (never sh -c), using -p for non-interactive output. It enforces ctx
+// deadlines and parses output into framework types before returning. Raw process output
+// never crosses the port boundary.
 //
 // Import policy: imported only by cmd/company (the composition root). core/ must never
 // import this package.
@@ -50,15 +51,16 @@ func New(claudeBin string, opts Options) *Adapter {
 }
 
 // RunTask implements port.Provider.RunTask.
-// It spawns a fresh claude process, passes input as a positional argv argument,
-// reads stdout up to the size cap, and returns a parsed ProviderResult.
-// Non-zero exit → error. ctx deadline kills the child.
+// It spawns a fresh claude process with -p (non-interactive mode), passes input as
+// a positional argv argument, reads stdout up to the size cap, and returns a parsed
+// ProviderResult. Non-zero exit → error. ctx deadline kills the child.
 func (a *Adapter) RunTask(ctx context.Context, _ string, input string) (port.ProviderResult, error) {
 	// argv-as-slice: input is passed as a literal argument, never interpolated into a shell string.
 	// This is the primary guard against argument injection (threat-matrix case a).
+	// -p requests non-interactive mode: claude processes the prompt and prints output to stdout,
+	// then exits. Without -p, claude starts an interactive REPL which blocks forever.
 	// A fresh exec.Cmd per call → stateless across invocations (task 5.5).
-	// ponytail: no intermediate builder — direct CommandContext is the minimum.
-	cmd := exec.CommandContext(ctx, a.claudeBin, input) //nolint:gosec // argv slice, no shell
+	cmd := exec.CommandContext(ctx, a.claudeBin, "-p", input) //nolint:gosec // argv slice, no shell
 
 	// Use StdoutPipe so we control reading. This lets us read only up to the size cap
 	// and then drain the remainder via io.Discard in a goroutine, preventing EPIPE.
