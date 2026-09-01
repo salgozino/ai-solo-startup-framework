@@ -58,6 +58,7 @@ func (a *supervisorUIAdapter) ListTasks() ([]ui.TaskRecord, error) {
 			State:             r.State,
 			Input:             r.Input,
 			PendingIntentKind: r.PendingIntentKind,
+			Output:            r.Output,
 		}
 	}
 	return out, nil

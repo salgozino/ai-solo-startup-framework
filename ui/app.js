@@ -64,10 +64,11 @@ function renderTasks(tasks) {
 }
 
 function toggleOutput(taskID) {
-  var body = document.getElementById('output-' + taskID);
-  if (!body) return;
-  var header = body.querySelector('.task-output-header');
+  var container = document.getElementById('output-' + taskID);
+  if (!container) return;
+  var header = container.querySelector('.task-output-header');
   var toggle = header.querySelector('.task-output-toggle');
+  var body = container.querySelector('.task-output-body');
   var isOpen = body.classList.contains('open');
   if (isOpen) {
     body.classList.remove('open');
