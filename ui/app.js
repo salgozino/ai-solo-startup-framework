@@ -15,6 +15,10 @@ const indicator    = document.getElementById('status-indicator');
 const supState     = document.getElementById('supervisor-state');
 const taskList     = document.getElementById('task-list');
 
+// Auto-refresh state
+var autoRefreshInterval = null;
+var autoRefreshEnabled  = false;
+
 function setIndicator(state) {
   indicator.className = 'indicator ' + state;
   indicator.textContent = state === 'live' ? 'Live' : state === 'error' ? 'Disconnected' : 'Connecting…';
@@ -39,15 +43,39 @@ function renderTasks(tasks) {
            <button class="btn btn-reject"  onclick="verdict('${t.task_id}','reject')">Reject</button>
          </div>`
       : '';
+    const outputHtml = t.output
+      ? `<div class="task-output" id="output-${t.task_id}">
+           <div class="task-output-header" onclick="toggleOutput('${t.task_id}')">
+             <span class="task-output-toggle">▶</span> Agent output
+           </div>
+           <div class="task-output-body"><pre>${escHtml(t.output)}</pre></div>
+         </div>`
+      : '';
     return `<div class="task-card" id="task-${t.task_id}">
       <div class="task-header">
         <span class="task-id">${t.task_id}</span>
         <span class="task-state task-state-${label}">${label}</span>
       </div>
       <div class="task-input">${escHtml(t.input || '')}</div>
+      ${outputHtml}
       ${actions}
     </div>`;
   }).join('');
+}
+
+function toggleOutput(taskID) {
+  var body = document.getElementById('output-' + taskID);
+  if (!body) return;
+  var header = body.querySelector('.task-output-header');
+  var toggle = header.querySelector('.task-output-toggle');
+  var isOpen = body.classList.contains('open');
+  if (isOpen) {
+    body.classList.remove('open');
+    toggle.textContent = '▶';
+  } else {
+    body.classList.add('open');
+    toggle.textContent = '▼';
+  }
 }
 
 function escHtml(s) {
@@ -105,6 +133,20 @@ function connectSSE() {
     setTimeout(connectSSE, 3000);
   });
 }
+
+// Auto-refresh toggle.
+var refreshToggle = document.getElementById('auto-refresh-toggle');
+refreshToggle.addEventListener('click', function() {
+  autoRefreshEnabled = !autoRefreshEnabled;
+  refreshToggle.textContent = autoRefreshEnabled ? 'Auto-refresh: ON' : 'Auto-refresh: OFF';
+  refreshToggle.classList.toggle('active', autoRefreshEnabled);
+  if (autoRefreshEnabled) {
+    autoRefreshInterval = setInterval(fetchTasks, 5000);
+  } else {
+    clearInterval(autoRefreshInterval);
+    autoRefreshInterval = null;
+  }
+});
 
 // Bootstrap.
 fetchTasks();

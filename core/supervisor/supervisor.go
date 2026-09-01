@@ -288,6 +288,7 @@ func (s *Supervisor) executeWithPolicy(
 		"output", result.Output,
 		"action_intents_count", len(result.ActionIntents),
 	)
+	rec.Output = result.Output
 
 	// Classify each action intent.
 	for _, intent := range result.ActionIntents {

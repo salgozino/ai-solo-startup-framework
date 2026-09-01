@@ -20,6 +20,7 @@ type TaskRecord struct {
 	State             string `json:"state"`
 	Input             string `json:"input"`
 	PendingIntentKind string `json:"pending_intent_kind,omitempty"`
+	Output            string `json:"output,omitempty"`
 }
 
 // SupervisorStatus is the minimal view of the supervisor's observable state.
