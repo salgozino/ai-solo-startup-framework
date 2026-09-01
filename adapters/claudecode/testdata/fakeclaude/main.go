@@ -1,13 +1,13 @@
 // fakeclaude simulates the claude CLI for unit testing the Claude Code adapter.
-// It reads the first argument and behaves as follows:
+// It reads argv[2] (after the -p flag) and behaves as follows:
 //
 //	"fail"   — exits with code 1, prints nothing
 //	"hang"   — sleeps until SIGKILL (simulates a hung process)
 //	"large"  — prints 1 MiB of 'x' characters then exits 0
 //	anything else — prints the argument as output text then exits 0
 //
-// The adapter must pass the input as argv[1], not via sh -c.
-// Shell metacharacters in argv[1] appear verbatim in the printed output.
+// The adapter passes input as argv[2] via `claude -p <input>`, not via sh -c.
+// Shell metacharacters in argv[2] appear verbatim in the printed output.
 package main
 
 import (
@@ -18,12 +18,13 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "fakeclaude: missing argument")
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "fakeclaude: expected -p <argument>")
 		os.Exit(2)
 	}
 
-	input := os.Args[1]
+	// Args: [-p <input>] — skip the -p flag, take the prompt.
+	input := os.Args[2]
 
 	switch input {
 	case "fail":
