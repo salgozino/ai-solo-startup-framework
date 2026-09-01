@@ -247,8 +247,8 @@ func TestSendTaskSuccess(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("send valid message: want 200, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("send valid message: want 202, got %d", resp.StatusCode)
 	}
 	if !sup.sendCalled {
 		t.Fatal("SendTask was not called on supervisor")

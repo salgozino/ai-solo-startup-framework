@@ -137,8 +137,11 @@ sendBtn.addEventListener('click', function() {
       showToast('Task sent successfully', 'success');
       msgInput.value = '';
       sendBtn.textContent = 'Send Task';
-      sendBtn.disabled = false;
+      sendBtn.disabled = true; // textarea is empty, disable button
       msgInput.focus();
+      // Refresh after a short delay so the background goroutine has time
+      // to persist the new task in the store.
+      setTimeout(fetchTasks, 500);
     })
     .catch(function() {
       showToast('Failed to send task', 'error');

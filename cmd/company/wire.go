@@ -105,8 +105,9 @@ func (a *supervisorUIAdapter) PostVerdict(taskID string, approve bool) error {
 
 // SendTask implements ui.Supervisor.
 // It checks the most recent task state; if the supervisor is in a FAILED task,
-// it refuses to send. Otherwise it delivers the message as a new SendMessage
-// with an empty TaskID — the a2asrv framework treats this as a new task.
+// it refuses to send. Otherwise it fires the message as a new SendMessage
+// with an empty TaskID in a background goroutine and returns immediately —
+// the a2asrv framework treats this as a new task.
 func (a *supervisorUIAdapter) SendTask(text string) error {
 	tasks, err := a.sup.ListTasks()
 	if err != nil {
@@ -122,13 +123,16 @@ func (a *supervisorUIAdapter) SendTask(text string) error {
 
 	msg := sdka2a.NewMessage(sdka2a.MessageRoleUser, sdka2a.NewTextPart(text))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	_, err = a.handler.SendMessage(ctx, &sdka2a.SendMessageRequest{
-		Tenant:  a.tenant,
-		Message: msg,
-	})
-	return err
+	// Fire and forget: run SendMessage in background so the UI returns immediately.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		_, _ = a.handler.SendMessage(ctx, &sdka2a.SendMessageRequest{
+			Tenant:  a.tenant,
+			Message: msg,
+		})
+	}()
+	return nil
 }
 
 // wireOptions controls how agents and gateways are constructed.

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -168,10 +169,10 @@ func (h *UIHandler) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 // ErrEmptyMessage is returned by SendTask when the message is empty.
-var ErrEmptyMessage = fmt.Errorf("message must not be empty")
+var ErrEmptyMessage = errors.New("message must not be empty")
 
 // ErrAgentFailed is returned by SendTask when the agent's last task is in FAILED state.
-var ErrAgentFailed = fmt.Errorf("agent is in FAILED state")
+var ErrAgentFailed = errors.New("agent is in FAILED state")
 
 // verdictRequest is the JSON body for /api/approve and /api/reject.
 type verdictRequest struct {
@@ -229,6 +230,7 @@ func (h *UIHandler) handleSendTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, ErrEmptyMessage.Error(), http.StatusBadRequest)
 		return
 	}
+	req.Message = strings.TrimSpace(req.Message)
 	if err := h.sup.SendTask(req.Message); err != nil {
 		if isAgentFailed(err) {
 			http.Error(w, err.Error(), http.StatusConflict)
@@ -238,16 +240,17 @@ func (h *UIHandler) handleSendTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 // ErrNotInputRequired is returned by PostVerdict when the task is not in INPUT_REQUIRED state.
-var ErrNotInputRequired = fmt.Errorf("task is not in INPUT_REQUIRED state")
+var ErrNotInputRequired = errors.New("task is not in INPUT_REQUIRED state")
 
 func isNotInputRequired(err error) bool {
-	return err != nil && err.Error() == ErrNotInputRequired.Error()
+	return errors.Is(err, ErrNotInputRequired)
 }
 
 func isAgentFailed(err error) bool {
-	return err != nil && err.Error() == ErrAgentFailed.Error()
+	return errors.Is(err, ErrAgentFailed)
 }
