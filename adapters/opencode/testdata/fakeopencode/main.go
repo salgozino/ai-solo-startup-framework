@@ -8,6 +8,8 @@
 //
 // When --model is present, it prepends "model:<model>|" to the output so tests
 // can verify the model flag was passed correctly.
+// When --agent is present, it prepends "agent:<agent>|" to the output so tests
+// can verify the agent flag was passed correctly.
 package main
 
 import (
@@ -23,14 +25,20 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Args: [run [--model <model>]] <input>
+	// Args: [run [--model <model>] [--agent <agent>]] <input>
 	// Parse flags, then take the last argument as the prompt.
 	var model string
+	var agent string
 	input := ""
 	for i := 1; i < len(os.Args); i++ {
 		if os.Args[i] == "--model" && i+1 < len(os.Args) {
 			model = os.Args[i+1]
 			i++ // skip model value
+			continue
+		}
+		if os.Args[i] == "--agent" && i+1 < len(os.Args) {
+			agent = os.Args[i+1]
+			i++ // skip agent value
 			continue
 		}
 		input = os.Args[i]
@@ -53,8 +61,11 @@ func main() {
 
 	default:
 		output := input
+		if agent != "" {
+			output = "agent:" + agent + "|" + output
+		}
 		if model != "" {
-			output = "model:" + model + "|" + input
+			output = "model:" + model + "|" + output
 		}
 		fmt.Print(output)
 	}
