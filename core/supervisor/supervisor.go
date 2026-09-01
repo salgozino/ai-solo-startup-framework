@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"log/slog"
 	"os"
 
 	a2a "github.com/a2aproject/a2a-go/v2/a2a"
@@ -38,6 +39,9 @@ type Config struct {
 	// PolicyConfig is the full risk_policy map from company.yaml.
 	// Keyed by action kind (e.g. "telegram_send").
 	PolicyConfig map[string]config.Policy
+	// Logger is the structured logger for supervisor events.
+	// When nil, a default JSON logger writing to stderr is used.
+	Logger *slog.Logger
 }
 
 // Status is the observable state of a supervisor at a point in time.
@@ -58,11 +62,19 @@ type Supervisor struct {
 // New creates a Supervisor in STARTING state.
 // Call MarkReady() after the A2A endpoint is registered.
 func New(cfg Config) *Supervisor {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	}
 	s := &Supervisor{
 		cfg: cfg,
 		fsm: newFSM(),
 	}
 	return s
+}
+
+// log returns the supervisor's logger, scoped with the task and agent context.
+func (s *Supervisor) log(taskID string) *slog.Logger {
+	return s.cfg.Logger.With("agent", string(s.cfg.Addr), "task_id", taskID)
 }
 
 // MarkReady transitions the supervisor from STARTING (or RECOVERING) to IDLE.
@@ -198,9 +210,13 @@ func (s *Supervisor) executeResume(
 	taskID string,
 	approvalInput string,
 ) {
+	log := s.log(taskID)
+	log.Info("resume.start", "approval_input", approvalInput)
+
 	// Check stored state: was this task parked in INPUT_REQUIRED?
 	rec, err := s.cfg.Store.Load(s.cfg.Addr, taskID)
 	if err != nil {
+		log.Error("resume.load_task.failed", "error", err)
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 		return
 	}
@@ -209,6 +225,7 @@ func (s *Supervisor) executeResume(
 	if rec.PendingIntentKind == "" {
 		// No pending intent — this is a normal task resumption (not an escalation resume).
 		// Treat it as a new execution.
+		log.Info("resume.no_pending_intent", "action", "re_execute")
 		rec.State = string(a2a.TaskStateWorking)
 		_ = s.cfg.Store.Save(s.cfg.Addr, rec)
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, nil), nil) //nolint
@@ -222,6 +239,7 @@ func (s *Supervisor) executeResume(
 
 	if !isApproved {
 		// Human rejected → REJECTED.
+		log.Info("resume.rejected", "intent", rec.PendingIntentKind)
 		rec.State = string(a2a.TaskStateRejected)
 		_ = s.cfg.Store.Save(s.cfg.Addr, rec)
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateRejected, nil), nil) //nolint
@@ -229,15 +247,18 @@ func (s *Supervisor) executeResume(
 	}
 
 	// Human approved → mint token and execute the action.
+	log.Info("resume.approved", "intent", rec.PendingIntentKind)
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, nil), nil) //nolint
 
 	token := s.cfg.PolicyEngine.MintApprovalToken()
 	if err := s.executeAction(ctx, rec.PendingIntentKind, token); err != nil {
+		log.Error("resume.action.failed", "intent", rec.PendingIntentKind, "error", err)
 		s.markFailed(rec)
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 		return
 	}
 
+	log.Info("resume.completed", "intent", rec.PendingIntentKind)
 	rec.State = string(a2a.TaskStateCompleted)
 	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil) //nolint
@@ -251,21 +272,37 @@ func (s *Supervisor) executeWithPolicy(
 	yield func(a2a.Event, error) bool,
 	rec TaskRecord,
 ) {
+	log := s.log(rec.TaskID)
+
+	log.Info("runtask.start", "input", rec.Input)
+
 	result, err := s.cfg.Provider.RunTask(ctx, rec.TaskID, rec.Input)
 	if err != nil {
+		log.Error("runtask.failed", "error", err)
 		s.markFailed(rec)
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 		return
 	}
+
+	log.Info("runtask.done",
+		"output", result.Output,
+		"action_intents_count", len(result.ActionIntents),
+	)
 
 	// Classify each action intent.
 	for _, intent := range result.ActionIntents {
 		portIntent := policy.ActionIntent{Kind: intent.Kind}
 		classResult := s.cfg.PolicyEngine.Classify(portIntent, s.cfg.Role, s.cfg.PolicyConfig)
 
+		log.Info("intent.classified",
+			"kind", intent.Kind,
+			"classification", string(classResult.Kind),
+		)
+
 		switch classResult.Kind { //nolint:exhaustive
 		case policy.HardDeny:
 			// REJECTED — not FAILED. Terminal, no escalation, no send, no token.
+			log.Warn("intent.hard_deny", "kind", intent.Kind)
 			rec.State = string(a2a.TaskStateRejected)
 			_ = s.cfg.Store.Save(s.cfg.Addr, rec)
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateRejected, nil), nil) //nolint
@@ -273,6 +310,7 @@ func (s *Supervisor) executeWithPolicy(
 
 		case policy.Escalate:
 			// Persist as INPUT_REQUIRED with the pending intent kind so the resume path knows what to approve.
+			log.Info("intent.escalate", "kind", intent.Kind)
 			rec.State = string(a2a.TaskStateInputRequired)
 			rec.PendingIntentKind = intent.Kind
 
@@ -290,15 +328,19 @@ func (s *Supervisor) executeWithPolicy(
 			return
 
 		case policy.Permit:
+			log.Info("action.execute", "kind", intent.Kind)
 			if err := s.executeAction(ctx, intent.Kind, classResult.ApprovalToken); err != nil {
+				log.Error("action.failed", "kind", intent.Kind, "error", err)
 				s.markFailed(rec)
 				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 				return
 			}
+			log.Info("action.done", "kind", intent.Kind)
 		}
 	}
 
 	// All intents handled (or none) → COMPLETED.
+	log.Info("task.completed", "state", "COMPLETED")
 	rec.State = string(a2a.TaskStateCompleted)
 	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil) //nolint
@@ -312,6 +354,8 @@ func (s *Supervisor) executeDelegation(
 	yield func(a2a.Event, error) bool,
 	rec TaskRecord,
 ) {
+	log := s.log(rec.TaskID)
+
 	// Assemble bounded context from prior messages.
 	history := buildHistory(execCtx)
 	bc := assembleBoundedContext(history, s.cfg.ContextBudget)
@@ -319,15 +363,19 @@ func (s *Supervisor) executeDelegation(
 	// Dispatch to the provider (A2A network client).
 	targetAddr, err := s.cfg.Provider.ResolveAgent(ctx, roleOf(s.cfg.Addr))
 	if err != nil {
+		log.Error("delegation.resolve_agent.failed", "error", err)
 		// Cannot resolve peer — mark task FAILED.
 		s.markFailed(rec)
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 		return
 	}
 
+	log.Info("delegation.resolve_agent.done", "target", string(targetAddr))
+
 	taskText := contextText(bc) + "\n" + rec.Input
 	_, providerErr := s.cfg.Provider.SendMessage(ctx, targetAddr, taskText, true)
 	if providerErr != nil {
+		log.Error("delegation.send_message.failed", "error", providerErr)
 		// Non-zero exit or provider error → FAILED (never silently dropped).
 		s.markFailed(rec)
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(providerErr)), nil) //nolint
@@ -335,6 +383,7 @@ func (s *Supervisor) executeDelegation(
 	}
 
 	// Success — mark COMPLETED.
+	log.Info("task.completed", "state", "COMPLETED")
 	rec.State = string(a2a.TaskStateCompleted)
 	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
 
@@ -383,6 +432,7 @@ func (s *Supervisor) StatusStr() string {
 // helpers
 
 func (s *Supervisor) markFailed(rec TaskRecord) {
+	s.log(rec.TaskID).Warn("task.failed", "state", "FAILED")
 	rec.State = string(a2a.TaskStateFailed)
 	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
 }
@@ -440,11 +490,10 @@ func roleOf(addr address.A2AAddress) string {
 
 // errorMessage wraps err into an a2a.Message for inclusion in a status event.
 // Returns a generic message to avoid leaking internal details (file paths, env vars).
-// The real error is logged to stderr for operator debugging.
+// The real error is logged by the structured logger at the call site.
 func errorMessage(err error) *a2a.Message {
 	if err == nil {
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "supervisor: task error: %v\n", err)
 	return a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("task execution failed"))
 }
