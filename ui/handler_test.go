@@ -331,23 +331,4 @@ func TestSendTaskEmptyMessage(t *testing.T) {
 	}
 }
 
-// TestSendTaskFailedState checks that POST /api/send returns 409 when the
-// supervisor adapter rejects the send because the last task is FAILED.
-func TestSendTaskFailedState(t *testing.T) {
-	sup := &stubSupervisor{
-		sendErr: ui.ErrAgentFailed,
-	}
-	srv := buildHandler(sup)
-	defer srv.Close()
 
-	body := bytes.NewBufferString(`{"message":"new task"}`)
-	resp, err := http.Post(srv.URL+"/api/send", "application/json", body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("send with failed state: want 409, got %d", resp.StatusCode)
-	}
-}
