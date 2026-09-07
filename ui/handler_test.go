@@ -234,6 +234,51 @@ func TestSSEReceivesEvent(t *testing.T) {
 	}
 }
 
+// TestSSEBroadcastEventType verifies that Broadcast delivers a line exactly equal to
+// "event: state" to connected SSE clients (not just a data line).
+// Satisfies: Bug 1 spec "escalation appears live without refresh".
+func TestSSEBroadcastEventType(t *testing.T) {
+	sup := &stubSupervisor{state: "IDLE"}
+	mux := http.NewServeMux()
+	h := ui.NewUIHandler(sup)
+	h.Register(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/events", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	received := make(chan string, 1)
+	go func() {
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "event: state" {
+				received <- line
+				return
+			}
+		}
+	}()
+
+	// Give the client goroutine time to register with the handler.
+	time.Sleep(20 * time.Millisecond)
+
+	h.Broadcast(map[string]any{"supervisor": "WORKING"})
+
+	select {
+	case line := <-received:
+		if line != "event: state" {
+			t.Fatalf("expected 'event: state' line, got %q", line)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout: 'event: state' line not received from Broadcast")
+	}
+}
+
 // TestSendTaskSuccess checks that POST /api/send with a valid message returns 200.
 func TestSendTaskSuccess(t *testing.T) {
 	sup := &stubSupervisor{}

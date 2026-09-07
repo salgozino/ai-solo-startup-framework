@@ -347,6 +347,100 @@ func TestSupervisor_ResumeRecognized(t *testing.T) {
 	}
 }
 
+// TestSupervisor_BodyPropagatedToGateway verifies that the message body declared in
+// the provider's ActionIntent.Payload["body"] reaches the gateway's OutboundMessage.Body
+// instead of the raw action kind string.
+// Satisfies: Bug 2 — gateway body propagation.
+func TestSupervisor_BodyPropagatedToGateway(t *testing.T) {
+	const wantBody = "Hello from CEO"
+	prov := &fake.Provider{
+		ReturnRunResult: port.ProviderResult{
+			ActionIntents: []port.ActionIntent{{
+				Kind:    "telegram_send",
+				Payload: map[string]any{"body": wantBody},
+			}},
+		},
+	}
+	gw := &fake.Gateway{}
+	eng := policy.NewEngine()
+	// Risk "low" → Permit (direct execution, no escalation).
+	policyCfg := makePolicyCfg("telegram_send", "low", []string{"ceo"})
+
+	sup := newTestSupervisor(t, "ceo", prov, gw, eng, policyCfg)
+	sup.MarkReady()
+
+	ctx := context.Background()
+	execCtx := newExecCtx("task-body-1", "send a telegram")
+	_ = collectEvents(ctx, sup, execCtx)
+
+	// Gateway must have been called exactly once.
+	if gw.CallCount() != 1 {
+		t.Fatalf("expected 1 gateway call, got %d", gw.CallCount())
+	}
+
+	last, ok := gw.LastCall()
+	if !ok {
+		t.Fatal("expected a recorded gateway call")
+	}
+
+	// Body must NOT be the action kind string; it must be the intent payload body.
+	if last.Body == "telegram_send" {
+		t.Errorf("gateway body must not be the action kind %q; want %q", "telegram_send", wantBody)
+	}
+	if last.Body != wantBody {
+		t.Errorf("gateway body: got %q, want %q", last.Body, wantBody)
+	}
+}
+
+// TestSupervisor_ResumeBodyPropagated verifies that the body stored in
+// ActionIntent.Payload["body"] during escalation is preserved in the file store
+// and flows through to the gateway when the task is approved via the resume path.
+// Satisfies: approval-flow spec "Resume path sends the persisted body".
+func TestSupervisor_ResumeBodyPropagated(t *testing.T) {
+	const wantBody = "Hello from CEO"
+	prov := &fake.Provider{
+		ReturnRunResult: port.ProviderResult{
+			ActionIntents: []port.ActionIntent{{
+				Kind:    "telegram_send",
+				Payload: map[string]any{"body": wantBody},
+			}},
+		},
+	}
+	gw := &fake.Gateway{}
+	eng := policy.NewEngine()
+	// risk "risky" → Escalate: requires human approval before the send.
+	policyCfg := makePolicyCfg("telegram_send", "risky", []string{"ceo"})
+
+	sup := newTestSupervisor(t, "ceo", prov, gw, eng, policyCfg)
+	sup.MarkReady()
+
+	ctx := context.Background()
+	const taskID = "task-resume-body-1"
+
+	// Step 1: initial task → escalates to INPUT_REQUIRED; gateway NOT called yet.
+	execCtx := newExecCtx(taskID, "send a telegram")
+	_ = collectEvents(ctx, sup, execCtx)
+
+	if gw.CallCount() != 0 {
+		t.Errorf("gateway must not be called before approval; got %d calls", gw.CallCount())
+	}
+
+	// Step 2: approval → the resume path must deliver the body persisted at escalation.
+	resumeCtx := newResumeExecCtx(taskID, "approve")
+	_ = collectEvents(ctx, sup, resumeCtx)
+
+	if gw.CallCount() != 1 {
+		t.Fatalf("expected 1 gateway call after approval, got %d", gw.CallCount())
+	}
+	last, ok := gw.LastCall()
+	if !ok {
+		t.Fatal("expected a recorded gateway call")
+	}
+	if last.Body != wantBody {
+		t.Errorf("gateway body via resume path: got %q, want %q", last.Body, wantBody)
+	}
+}
+
 // TestSupervisor_RejectionPreventsGateway verifies that when a human rejects the
 // escalation, the gateway is never called and the task reaches REJECTED.
 // Satisfies: approval-flow spec "Rejection prevents the send entirely".

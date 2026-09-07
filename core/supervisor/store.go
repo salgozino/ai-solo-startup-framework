@@ -27,6 +27,10 @@ type TaskRecord struct {
 	// PendingIntentKind is set when the task is parked in INPUT_REQUIRED awaiting
 	// a human verdict for a specific action kind. Empty for normal tasks.
 	PendingIntentKind string `json:"pending_intent_kind,omitempty"`
+	// PendingIntentBody is the message body to deliver when the pending intent is
+	// approved. Stored alongside PendingIntentKind; zero-value safe (omitempty
+	// preserves backward compatibility with records written before this field existed).
+	PendingIntentBody string `json:"pending_intent_body,omitempty"`
 	// Output is the result produced by the provider when the task completes.
 	Output string `json:"output,omitempty"`
 }

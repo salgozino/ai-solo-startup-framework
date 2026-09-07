@@ -9,6 +9,7 @@ package a2a
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -87,8 +88,25 @@ func New(sup *supervisor.Supervisor) (*Server, error) {
 		_ = httpSrv.Serve(ln)
 	}()
 
+	// registerFn is called for each INPUT_REQUIRED task found in the supervisor's
+	// file store. It seeds the a2asrv in-memory task store so that a subsequent
+	// SendMessage carrying the same TaskID is recognised as a resume (StoredTask != nil).
+	registerFn := func(ctx context.Context, taskID, _ string) error {
+		task := &sdka2a.Task{
+			ID: sdka2a.TaskID(taskID),
+			Status: sdka2a.TaskStatus{
+				State: sdka2a.TaskStateInputRequired,
+			},
+		}
+		_, err := store.Create(ctx, task)
+		if errors.Is(err, taskstore.ErrTaskAlreadyExists) {
+			return nil // idempotent
+		}
+		return err
+	}
+
 	// Transition the supervisor to IDLE — endpoint is now registered.
-	if err := sup.RecoverOpenTasks(context.Background(), handler); err != nil {
+	if err := sup.RecoverOpenTasks(context.Background(), handler, registerFn); err != nil {
 		return nil, fmt.Errorf("a2a server: recover: %w", err)
 	}
 	sup.MarkReady()
