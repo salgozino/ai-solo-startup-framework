@@ -8,7 +8,10 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
 
+	"github.com/salgozino/ai-solo-startup-framework/config"
 	"github.com/salgozino/ai-solo-startup-framework/core/address"
+	"github.com/salgozino/ai-solo-startup-framework/core/policy"
+	"github.com/salgozino/ai-solo-startup-framework/core/port"
 	"github.com/salgozino/ai-solo-startup-framework/core/port/fake"
 	"github.com/salgozino/ai-solo-startup-framework/core/supervisor"
 	transa2a "github.com/salgozino/ai-solo-startup-framework/transport/a2a"
@@ -117,4 +120,104 @@ func TestIntegration_CEODelegatesToWorkerOverRealWire(t *testing.T) {
 
 	t.Logf("Worker result type: %T", result)
 	t.Logf("CEO ListTasks: %d tasks", len(listResp.Tasks))
+}
+
+// TestIntegration_InputRequiredRecoveredAndResumed verifies that an INPUT_REQUIRED task
+// persisted in the file store before a restart is:
+//  1. Registered in the a2asrv in-memory store by RecoverOpenTasks (via registerFn).
+//  2. Recognisable as a resume (ExecutorContext.StoredTask != nil) when a subsequent
+//     SendMessage carries the same TaskID.
+//  3. Handled via executeResume — RunTask is NOT called again.
+//  4. Completed with a single gateway call when the approval arrives.
+//
+// Satisfies: Bug 3 spec "INPUT_REQUIRED task still resumable after restart".
+// This test starts real loopback listeners; skip with -short.
+func TestIntegration_InputRequiredRecoveredAndResumed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: skipping in -short mode")
+	}
+
+	ctx := context.Background()
+
+	const (
+		taskID = "seeded-ir-task-1"
+		tenant = "acme"
+		role   = "ceo"
+	)
+
+	addr, err := address.New(role, tenant)
+	if err != nil {
+		t.Fatalf("address.New: %v", err)
+	}
+
+	prov := &fake.Provider{
+		ReturnRunResult: port.ProviderResult{
+			ActionIntents: []port.ActionIntent{{Kind: "telegram_send"}},
+		},
+	}
+	gw := &fake.Gateway{}
+	eng := policy.NewEngine()
+	policyCfg := map[string]config.Policy{
+		"telegram_send": {Risk: "risky", AllowedRoles: []string{role}},
+	}
+
+	// Shared file store — persists across the simulated restart.
+	fileStore, err := supervisor.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	// Pre-seed the file store with a task parked in INPUT_REQUIRED, simulating
+	// a supervisor that escalated the task and then crashed before the human replied.
+	if err := fileStore.Save(addr, supervisor.TaskRecord{
+		TaskID:            taskID,
+		State:             string(sdka2a.TaskStateInputRequired),
+		Input:             "send a telegram",
+		Owner:             string(addr),
+		PendingIntentKind: "telegram_send",
+	}); err != nil {
+		t.Fatalf("store.Save (seed): %v", err)
+	}
+
+	// Create supervisor — transa2a.New calls RecoverOpenTasks which invokes registerFn
+	// for the INPUT_REQUIRED task, seeding it into the a2asrv in-memory store.
+	sup := supervisor.New(supervisor.Config{
+		Addr:         addr,
+		Provider:     prov,
+		Store:        fileStore,
+		PolicyEngine: eng,
+		Gateway:      gw,
+		Role:         role,
+		PolicyConfig: policyCfg,
+	})
+	srv, err := transa2a.New(sup)
+	if err != nil {
+		t.Fatalf("transa2a.New: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	runCountBefore := prov.RunTaskCallCount()
+
+	// Send an approval message carrying the original TaskID.
+	// The a2asrv framework finds the task in its store → StoredTask != nil → resume path.
+	approval := sdka2a.NewMessage(sdka2a.MessageRoleUser, sdka2a.NewTextPart("approve"))
+	approval.TaskID = sdka2a.TaskID(taskID)
+	_, err = srv.Handler().SendMessage(ctx, &sdka2a.SendMessageRequest{
+		Tenant:  tenant,
+		Message: approval,
+	})
+	if err != nil {
+		t.Logf("approval SendMessage: %v (non-fatal; checking assertions)", err)
+	}
+
+	// Resume must NOT call RunTask (it's a resume, not a fresh Execute).
+	if prov.RunTaskCallCount() != runCountBefore {
+		t.Errorf("resume called RunTask; before=%d after=%d",
+			runCountBefore, prov.RunTaskCallCount())
+	}
+
+	// Gateway must be called exactly once after the human approved.
+	if gw.CallCount() != 1 {
+		t.Errorf("expected gateway.Send called once on approval; got %d", gw.CallCount())
+	}
 }
