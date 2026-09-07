@@ -42,6 +42,11 @@ type Config struct {
 	// Logger is the structured logger for supervisor events.
 	// When nil, a default JSON logger writing to stderr is used.
 	Logger *slog.Logger
+	// OnStateChange, when non-nil, is called after each supervisor or task state
+	// transition and after each persisted store write. Wire this at the composition
+	// root to push SSE events to connected UI clients.
+	// Must be nil-safe to call from any goroutine; the notify() method guards it.
+	OnStateChange func()
 }
 
 // Status is the observable state of a supervisor at a point in time.
@@ -77,31 +82,55 @@ func (s *Supervisor) log(taskID string) *slog.Logger {
 	return s.cfg.Logger.With("agent", string(s.cfg.Addr), "task_id", taskID)
 }
 
+// SetOnStateChange registers fn to be called after each supervisor or task state
+// change. Safe to call before or after construction; replaces any prior hook.
+func (s *Supervisor) SetOnStateChange(fn func()) {
+	s.cfg.OnStateChange = fn
+}
+
+// notify calls cfg.OnStateChange if it is set.
+// Must be called outside any FSM lock to avoid lock-order hazards.
+func (s *Supervisor) notify() {
+	if s.cfg.OnStateChange != nil {
+		s.cfg.OnStateChange()
+	}
+}
+
 // MarkReady transitions the supervisor from STARTING (or RECOVERING) to IDLE.
 // The transport layer calls this once the HTTP server is listening.
 func (s *Supervisor) MarkReady() {
 	s.fsm.ready()
+	s.notify()
 }
 
-// RecoverOpenTasks loads any tasks in non-terminal state from the store and
-// re-enters them into the a2asrv task queue by transitioning to RECOVERING.
-// Call before MarkReady; a no-op if the store has no open tasks for this address.
-func (s *Supervisor) RecoverOpenTasks(ctx context.Context, handler a2asrv.RequestHandler) error {
+// RecoverOpenTasks loads persisted tasks and re-enters them based on their state:
+//   - WORKING tasks: re-submitted via handler.SendMessage (as before).
+//   - INPUT_REQUIRED tasks: registered in the a2asrv task store via registerFn so that
+//     a subsequent approval message is recognized as a resume (StoredTask != nil).
+//
+// Call before MarkReady; a no-op if the store has no recoverable tasks for this address.
+func (s *Supervisor) RecoverOpenTasks(
+	ctx context.Context,
+	handler a2asrv.RequestHandler,
+	registerFn func(ctx context.Context, taskID, input string) error,
+) error {
 	records, err := s.cfg.Store.LoadAll(s.cfg.Addr)
 	if err != nil {
 		return fmt.Errorf("supervisor: load open tasks: %w", err)
 	}
 
-	openTasks := filterOpenTasks(records)
-	if len(openTasks) == 0 {
+	workingTasks := filterWorkingTasks(records)
+	inputRequiredTasks := filterInputRequiredTasks(records)
+
+	if len(workingTasks) == 0 && len(inputRequiredTasks) == 0 {
 		return nil
 	}
 
 	// Signal RECOVERING state.
 	s.fsm.recover()
 
-	for _, rec := range openTasks {
-		// Re-submit each open task as a new SendMessage carrying its TaskID.
+	for _, rec := range workingTasks {
+		// Re-submit each working task as a new SendMessage carrying its TaskID.
 		// The a2asrv framework recognizes a message with TaskID as a resume.
 		msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(rec.Input))
 		msg.TaskID = a2a.TaskID(rec.TaskID)
@@ -114,12 +143,23 @@ func (s *Supervisor) RecoverOpenTasks(ctx context.Context, handler a2asrv.Reques
 			_ = fmt.Errorf("supervisor: recovery send for task %s: %w", rec.TaskID, err)
 		}
 	}
+
+	for _, rec := range inputRequiredTasks {
+		// Register each INPUT_REQUIRED task in the a2asrv store so that the next
+		// SendMessage with the same TaskID is recognised as a resume.
+		if err := registerFn(ctx, rec.TaskID, rec.Input); err != nil {
+			// Log but continue.
+			_ = fmt.Errorf("supervisor: recovery register INPUT_REQUIRED task %s: %w", rec.TaskID, err)
+		}
+	}
+
 	return nil
 }
 
 // Shutdown starts draining the supervisor's queue. Does not wait for completion.
 func (s *Supervisor) Shutdown() {
 	s.fsm.drain()
+	s.notify()
 }
 
 // Status returns a snapshot of the supervisor's current state.
@@ -160,7 +200,8 @@ func (s *Supervisor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContex
 
 		// Transition supervisor FSM: IDLE → WORKING (or RECOVERING → WORKING).
 		s.fsm.taskStarted()
-		defer s.fsm.taskDone()
+		s.notify()
+		defer func() { s.fsm.taskDone(); s.notify() }()
 
 		input := messageText(execCtx.Message)
 		taskID := string(execCtx.TaskID)
@@ -185,6 +226,7 @@ func (s *Supervisor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContex
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 			return
 		}
+		s.notify()
 
 		// Announce WORKING.
 		if !yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, nil), nil) {
@@ -228,6 +270,7 @@ func (s *Supervisor) executeResume(
 		log.Info("resume.no_pending_intent", "action", "re_execute")
 		rec.State = string(a2a.TaskStateWorking)
 		_ = s.cfg.Store.Save(s.cfg.Addr, rec)
+		s.notify()
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, nil), nil) //nolint
 		s.executeWithPolicy(ctx, execCtx, yield, rec)
 		return
@@ -242,6 +285,7 @@ func (s *Supervisor) executeResume(
 		log.Info("resume.rejected", "intent", rec.PendingIntentKind)
 		rec.State = string(a2a.TaskStateRejected)
 		_ = s.cfg.Store.Save(s.cfg.Addr, rec)
+		s.notify()
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateRejected, nil), nil) //nolint
 		return
 	}
@@ -251,7 +295,7 @@ func (s *Supervisor) executeResume(
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, nil), nil) //nolint
 
 	token := s.cfg.PolicyEngine.MintApprovalToken()
-	if err := s.executeAction(ctx, rec.PendingIntentKind, token); err != nil {
+	if err := s.executeAction(ctx, rec.PendingIntentKind, rec.PendingIntentBody, token); err != nil {
 		log.Error("resume.action.failed", "intent", rec.PendingIntentKind, "error", err)
 		s.markFailed(rec)
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
@@ -261,6 +305,7 @@ func (s *Supervisor) executeResume(
 	log.Info("resume.completed", "intent", rec.PendingIntentKind)
 	rec.State = string(a2a.TaskStateCompleted)
 	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
+	s.notify()
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil) //nolint
 }
 
@@ -306,20 +351,23 @@ func (s *Supervisor) executeWithPolicy(
 			log.Warn("intent.hard_deny", "kind", intent.Kind)
 			rec.State = string(a2a.TaskStateRejected)
 			_ = s.cfg.Store.Save(s.cfg.Addr, rec)
+			s.notify()
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateRejected, nil), nil) //nolint
 			return
 
 		case policy.Escalate:
-			// Persist as INPUT_REQUIRED with the pending intent kind so the resume path knows what to approve.
+			// Persist as INPUT_REQUIRED with the pending intent kind and body so the resume path knows what to approve.
 			log.Info("intent.escalate", "kind", intent.Kind)
 			rec.State = string(a2a.TaskStateInputRequired)
 			rec.PendingIntentKind = intent.Kind
+			rec.PendingIntentBody = extractBody(intent)
 
 			payload, _ := policy.MarshalPayload(policy.EscalationPayload{
 				ActionKind: intent.Kind,
 				TaskID:     rec.TaskID,
 			})
 			_ = s.cfg.Store.Save(s.cfg.Addr, rec)
+			s.notify()
 
 			// Use a text part instead of a data part so that the a2asrv in-memory
 			// task store (gob-encoded) can serialize the message without needing to
@@ -330,7 +378,7 @@ func (s *Supervisor) executeWithPolicy(
 
 		case policy.Permit:
 			log.Info("action.execute", "kind", intent.Kind)
-			if err := s.executeAction(ctx, intent.Kind, classResult.ApprovalToken); err != nil {
+			if err := s.executeAction(ctx, intent.Kind, extractBody(intent), classResult.ApprovalToken); err != nil {
 				log.Error("action.failed", "kind", intent.Kind, "error", err)
 				s.markFailed(rec)
 				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
@@ -344,6 +392,7 @@ func (s *Supervisor) executeWithPolicy(
 	log.Info("task.completed", "state", "COMPLETED")
 	rec.State = string(a2a.TaskStateCompleted)
 	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
+	s.notify()
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil) //nolint
 }
 
@@ -387,13 +436,16 @@ func (s *Supervisor) executeDelegation(
 	log.Info("task.completed", "state", "COMPLETED")
 	rec.State = string(a2a.TaskStateCompleted)
 	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
+	s.notify()
 
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil) //nolint
 }
 
 // executeAction calls the gateway with the given approval token for the action kind.
+// body is the message text from the provider's ActionIntent.Payload["body"]; it is
+// passed through to OutboundMessage.Body so the gateway delivers the intended content.
 // In v1, the only action kind is "telegram_send" → Gateway.Send.
-func (s *Supervisor) executeAction(ctx context.Context, actionKind string, token string) error {
+func (s *Supervisor) executeAction(ctx context.Context, actionKind, body, token string) error {
 	if s.cfg.Gateway == nil {
 		return fmt.Errorf("supervisor: gateway required for action %q but none configured", actionKind)
 	}
@@ -402,7 +454,7 @@ func (s *Supervisor) executeAction(ctx context.Context, actionKind string, token
 	}
 	return s.cfg.Gateway.Send(ctx, port.OutboundMessage{
 		Channel: "telegram",
-		Body:    actionKind,
+		Body:    body,
 	})
 }
 
@@ -436,6 +488,7 @@ func (s *Supervisor) markFailed(rec TaskRecord) {
 	s.log(rec.TaskID).Warn("task.failed", "state", "FAILED")
 	rec.State = string(a2a.TaskStateFailed)
 	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
+	s.notify()
 }
 
 // messageText extracts the first text part from a message, or empty string.
@@ -466,16 +519,43 @@ func buildHistory(execCtx *a2asrv.ExecutorContext) []port.ContextMessage {
 	return history
 }
 
-// filterOpenTasks returns records whose state is not terminal.
-func filterOpenTasks(records []TaskRecord) []TaskRecord {
-	var open []TaskRecord
+// extractBody reads the "body" key from intent.Payload as a string.
+// Returns "" if the key is absent, the map is nil, or the value is not a string.
+func extractBody(intent port.ActionIntent) string {
+	if intent.Payload == nil {
+		return ""
+	}
+	v, ok := intent.Payload["body"]
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
+// filterWorkingTasks returns records whose state is not terminal and not INPUT_REQUIRED.
+// Used during recovery to re-submit tasks that were actively running when the supervisor last stopped.
+func filterWorkingTasks(records []TaskRecord) []TaskRecord {
+	var working []TaskRecord
 	for _, r := range records {
 		state := a2a.TaskState(r.State)
 		if !state.Terminal() && state != a2a.TaskStateInputRequired {
-			open = append(open, r)
+			working = append(working, r)
 		}
 	}
-	return open
+	return working
+}
+
+// filterInputRequiredTasks returns only records in INPUT_REQUIRED state.
+// Used during recovery to re-register parked tasks with the a2asrv task store.
+func filterInputRequiredTasks(records []TaskRecord) []TaskRecord {
+	var parked []TaskRecord
+	for _, r := range records {
+		if a2a.TaskState(r.State) == a2a.TaskStateInputRequired {
+			parked = append(parked, r)
+		}
+	}
+	return parked
 }
 
 // tenantOf extracts the tenant segment from an A2AAddress ("name/tenant").

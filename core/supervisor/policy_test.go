@@ -347,6 +347,51 @@ func TestSupervisor_ResumeRecognized(t *testing.T) {
 	}
 }
 
+// TestSupervisor_BodyPropagatedToGateway verifies that the message body declared in
+// the provider's ActionIntent.Payload["body"] reaches the gateway's OutboundMessage.Body
+// instead of the raw action kind string.
+// Satisfies: Bug 2 — gateway body propagation.
+func TestSupervisor_BodyPropagatedToGateway(t *testing.T) {
+	const wantBody = "Hello from CEO"
+	prov := &fake.Provider{
+		ReturnRunResult: port.ProviderResult{
+			ActionIntents: []port.ActionIntent{{
+				Kind:    "telegram_send",
+				Payload: map[string]any{"body": wantBody},
+			}},
+		},
+	}
+	gw := &fake.Gateway{}
+	eng := policy.NewEngine()
+	// Risk "low" → Permit (direct execution, no escalation).
+	policyCfg := makePolicyCfg("telegram_send", "low", []string{"ceo"})
+
+	sup := newTestSupervisor(t, "ceo", prov, gw, eng, policyCfg)
+	sup.MarkReady()
+
+	ctx := context.Background()
+	execCtx := newExecCtx("task-body-1", "send a telegram")
+	_ = collectEvents(ctx, sup, execCtx)
+
+	// Gateway must have been called exactly once.
+	if gw.CallCount() != 1 {
+		t.Fatalf("expected 1 gateway call, got %d", gw.CallCount())
+	}
+
+	last, ok := gw.LastCall()
+	if !ok {
+		t.Fatal("expected a recorded gateway call")
+	}
+
+	// Body must NOT be the action kind string; it must be the intent payload body.
+	if last.Body == "telegram_send" {
+		t.Errorf("gateway body must not be the action kind %q; want %q", "telegram_send", wantBody)
+	}
+	if last.Body != wantBody {
+		t.Errorf("gateway body: got %q, want %q", last.Body, wantBody)
+	}
+}
+
 // TestSupervisor_RejectionPreventsGateway verifies that when a human rejects the
 // escalation, the gateway is never called and the task reaches REJECTED.
 // Satisfies: approval-flow spec "Rejection prevents the send entirely".
