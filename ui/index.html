@@ -10,12 +10,19 @@
   <header>
     <h1>Agent Monitor</h1>
     <span id="status-indicator" class="indicator connecting">Connecting…</span>
+    <button id="auto-refresh-toggle" class="btn btn-refresh" title="Toggle auto-refresh every 5s">Auto-refresh: OFF</button>
   </header>
 
   <main>
     <section id="supervisor-section">
       <h2>Supervisor</h2>
       <div id="supervisor-state" class="state-badge">—</div>
+    </section>
+
+    <section id="send-section">
+      <h2>Send Task to CEO</h2>
+      <textarea id="task-message" placeholder="Describe the task..." rows="3"></textarea>
+      <button id="send-btn" class="btn btn-send" disabled>Send Task</button>
     </section>
 
     <section id="tasks-section">
