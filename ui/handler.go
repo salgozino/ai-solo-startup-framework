@@ -172,8 +172,7 @@ func (h *UIHandler) handleEvents(w http.ResponseWriter, r *http.Request) {
 // ErrEmptyMessage is returned by SendTask when the message is empty.
 var ErrEmptyMessage = errors.New("message must not be empty")
 
-// ErrAgentFailed is returned by SendTask when the agent's last task is in FAILED state.
-var ErrAgentFailed = errors.New("agent is in FAILED state")
+
 
 // verdictRequest is the JSON body for /api/approve and /api/reject.
 type verdictRequest struct {
@@ -233,10 +232,6 @@ func (h *UIHandler) handleSendTask(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Message = strings.TrimSpace(req.Message)
 	if err := h.sup.SendTask(req.Message); err != nil {
-		if isAgentFailed(err) {
-			http.Error(w, err.Error(), http.StatusConflict)
-			return
-		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -252,6 +247,4 @@ func isNotInputRequired(err error) bool {
 	return errors.Is(err, ErrNotInputRequired)
 }
 
-func isAgentFailed(err error) bool {
-	return errors.Is(err, ErrAgentFailed)
-}
+
