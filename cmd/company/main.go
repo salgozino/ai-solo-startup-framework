@@ -65,6 +65,14 @@ func runMaterialize(yamlPath string) error {
 		ceoBind = "127.0.0.1:8080"
 	}
 	ceoHandler := ui.NewUIHandler(runtimes[0].uiAdap)
+
+	// Push a state snapshot to all connected SSE clients whenever the supervisor
+	// or any task changes state. SetOnStateChange must be called after both the
+	// supervisor and ceoHandler are constructed.
+	runtimes[0].sup.SetOnStateChange(func() {
+		ceoHandler.Broadcast(runtimes[0].sup.Status())
+	})
+
 	uiMux := http.NewServeMux()
 	ceoHandler.Register(uiMux)
 
