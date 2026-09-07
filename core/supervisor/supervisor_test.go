@@ -145,7 +145,7 @@ func TestAssembleBoundedContext_EmptyMessages(t *testing.T) {
 
 // task-state helpers
 
-func TestFilterOpenTasks(t *testing.T) {
+func TestFilterWorkingTasks(t *testing.T) {
 	tests := []struct {
 		name    string
 		records []TaskRecord
@@ -192,9 +192,65 @@ func TestFilterOpenTasks(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			open := filterOpenTasks(tt.records)
-			if len(open) != tt.want {
-				t.Errorf("filterOpenTasks: got %d open tasks, want %d", len(open), tt.want)
+			working := filterWorkingTasks(tt.records)
+			if len(working) != tt.want {
+				t.Errorf("filterWorkingTasks: got %d working tasks, want %d", len(working), tt.want)
+			}
+		})
+	}
+}
+
+func TestFilterInputRequiredTasks(t *testing.T) {
+	tests := []struct {
+		name    string
+		records []TaskRecord
+		want    int
+	}{
+		{
+			name: "input_required task is returned",
+			records: []TaskRecord{
+				{TaskID: "t1", State: "TASK_STATE_INPUT_REQUIRED"},
+			},
+			want: 1,
+		},
+		{
+			name: "working task is not returned",
+			records: []TaskRecord{
+				{TaskID: "t1", State: "TASK_STATE_WORKING"},
+			},
+			want: 0,
+		},
+		{
+			name: "completed task is not returned",
+			records: []TaskRecord{
+				{TaskID: "t1", State: "TASK_STATE_COMPLETED"},
+			},
+			want: 0,
+		},
+		{
+			name: "failed task is not returned",
+			records: []TaskRecord{
+				{TaskID: "t1", State: "TASK_STATE_FAILED"},
+			},
+			want: 0,
+		},
+		{
+			name: "mixed: only INPUT_REQUIRED returned",
+			records: []TaskRecord{
+				{TaskID: "t1", State: "TASK_STATE_WORKING"},
+				{TaskID: "t2", State: "TASK_STATE_COMPLETED"},
+				{TaskID: "t3", State: "TASK_STATE_INPUT_REQUIRED"},
+				{TaskID: "t4", State: "TASK_STATE_INPUT_REQUIRED"},
+			},
+			want: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parked := filterInputRequiredTasks(tt.records)
+			if len(parked) != tt.want {
+				t.Errorf("filterInputRequiredTasks: got %d parked tasks, want %d", len(parked), tt.want)
 			}
 		})
 	}
