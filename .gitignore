@@ -2,6 +2,9 @@
 .atl/
 .codegraph/
 
+# Git worktrees
+.worktrees/
+
 # Go build output
 /company
 *.exe
