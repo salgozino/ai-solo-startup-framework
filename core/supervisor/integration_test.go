@@ -2,11 +2,13 @@ package supervisor_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	sdka2a "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 
 	"github.com/salgozino/ai-solo-startup-framework/config"
 	"github.com/salgozino/ai-solo-startup-framework/core/address"
@@ -219,5 +221,77 @@ func TestIntegration_InputRequiredRecoveredAndResumed(t *testing.T) {
 	// Gateway must be called exactly once after the human approved.
 	if gw.CallCount() != 1 {
 		t.Errorf("expected gateway.Send called once on approval; got %d", gw.CallCount())
+	}
+}
+
+// TestRecoverOpenTasks_DoubleRecoveryIsIdempotent verifies that calling RecoverOpenTasks
+// twice with the same INPUT_REQUIRED data does not return an error.
+// The first call seeds the a2asrv in-memory task store; the second call encounters
+// taskstore.ErrTaskAlreadyExists which the registerFn suppresses, making it idempotent.
+//
+// Satisfies: Bug 3 spec "Double-recovery is idempotent".
+func TestRecoverOpenTasks_DoubleRecoveryIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+
+	const (
+		taskID = "idempotent-ir-task-1"
+		tenant = "acme"
+		role   = "ceo"
+	)
+
+	addr, err := address.New(role, tenant)
+	if err != nil {
+		t.Fatalf("address.New: %v", err)
+	}
+
+	fileStore, err := supervisor.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	// Pre-seed an INPUT_REQUIRED task, simulating a supervisor that parked a task
+	// awaiting human approval before it was shut down.
+	if err := fileStore.Save(addr, supervisor.TaskRecord{
+		TaskID:            taskID,
+		State:             string(sdka2a.TaskStateInputRequired),
+		Input:             "send a telegram",
+		Owner:             string(addr),
+		PendingIntentKind: "telegram_send",
+	}); err != nil {
+		t.Fatalf("store.Save (seed): %v", err)
+	}
+
+	sup := supervisor.New(supervisor.Config{
+		Addr:  addr,
+		Store: fileStore,
+	})
+
+	// Build a registerFn backed by a real in-memory task store, mirroring what
+	// transport/a2a.New does: ErrTaskAlreadyExists is suppressed (idempotent).
+	memStore := taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
+		Authenticator: func(_ context.Context) (string, error) {
+			return "supervisor", nil
+		},
+	})
+	registerFn := func(ctx context.Context, taskID, _ string) error {
+		task := &sdka2a.Task{
+			ID:     sdka2a.TaskID(taskID),
+			Status: sdka2a.TaskStatus{State: sdka2a.TaskStateInputRequired},
+		}
+		_, err := memStore.Create(ctx, task)
+		if errors.Is(err, taskstore.ErrTaskAlreadyExists) {
+			return nil // idempotent: already registered
+		}
+		return err
+	}
+
+	// First recovery: seeds the in-memory store — must succeed.
+	if err := sup.RecoverOpenTasks(ctx, nil, registerFn); err != nil {
+		t.Fatalf("first RecoverOpenTasks: %v", err)
+	}
+
+	// Second recovery on the same data: ErrTaskAlreadyExists is suppressed — must also succeed.
+	if err := sup.RecoverOpenTasks(ctx, nil, registerFn); err != nil {
+		t.Fatalf("second RecoverOpenTasks (must be idempotent): %v", err)
 	}
 }
