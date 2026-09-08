@@ -4,7 +4,7 @@
 //   (b) hung child killed after ctx deadline → FAILED
 //   (c) oversized output truncated with marker before parse
 //   (d) non-zero exit → failure outcome, not success
-//   (e) model flag is passed to the CLI when configured
+//   (e) --pure always present; content prepended only when system_prompt is set
 //
 // Tests use a helper binary (built from testdata/fakeopencode) that simulates opencode CLI
 // exit behavior without requiring a real opencode installation.
@@ -41,11 +41,72 @@ func helperBinary(t *testing.T) string {
 	return bin
 }
 
+// TestPureFlag_AlwaysPresent verifies that --pure is unconditionally included
+// in the opencode invocation regardless of other settings (spec: Unconditional Isolation).
+func TestPureFlag_AlwaysPresent(t *testing.T) {
+	bin := helperBinary(t)
+	// No system prompt, no model, no agent — pure must still be set.
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
+
+	ctx := context.Background()
+	result, err := adapter.RunTask(ctx, "task-pure", "hello")
+	if err != nil {
+		t.Fatalf("RunTask: unexpected error: %v", err)
+	}
+	// fakeopencode prepends "pure:1|" when --pure is passed.
+	if !strings.HasPrefix(result.Output, "pure:1|") {
+		t.Errorf("expected output to start with \"pure:1|\", got %q", result.Output)
+	}
+}
+
+// TestContentPrepend_WhenSet verifies that when a system prompt path is configured,
+// its content is prepended to the task input with the [SYSTEM] marker.
+func TestContentPrepend_WhenSet(t *testing.T) {
+	bin := helperBinary(t)
+	// Write a temp system prompt file.
+	promptFile := filepath.Join(t.TempDir(), "system.md")
+	if err := os.WriteFile(promptFile, []byte("You are the CEO."), 0o600); err != nil {
+		t.Fatalf("write temp prompt: %v", err)
+	}
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", promptFile)
+
+	ctx := context.Background()
+	result, err := adapter.RunTask(ctx, "task-sysprompt", "hello")
+	if err != nil {
+		t.Fatalf("RunTask: unexpected error: %v", err)
+	}
+	// The effective input passed to the binary should contain the system content prepended.
+	// fakeopencode echoes the input, so the output will contain the [SYSTEM] marker.
+	if !strings.Contains(result.Output, "[SYSTEM]") {
+		t.Errorf("expected output to contain [SYSTEM] marker, got %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "You are the CEO.") {
+		t.Errorf("expected output to contain system prompt content, got %q", result.Output)
+	}
+}
+
+// TestContentPrepend_WhenNotSet verifies that no system content is prepended
+// when no system prompt path is configured.
+func TestContentPrepend_WhenNotSet(t *testing.T) {
+	bin := helperBinary(t)
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
+
+	ctx := context.Background()
+	result, err := adapter.RunTask(ctx, "task-no-sysprompt", "hello")
+	if err != nil {
+		t.Fatalf("RunTask: unexpected error: %v", err)
+	}
+	// No system prompt → no [SYSTEM] marker in output.
+	if strings.Contains(result.Output, "[SYSTEM]") {
+		t.Errorf("expected no [SYSTEM] in output when not set, got %q", result.Output)
+	}
+}
+
 // TestArgvSlice_ShellMetacharactersAreLiteral verifies threat-matrix case (a):
 // shell metacharacters in input do not alter the invocation.
 func TestArgvSlice_ShellMetacharactersAreLiteral(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
 
 	ctx := context.Background()
 	maliciousInput := "prefix; echo INJECTED"
@@ -54,9 +115,13 @@ func TestArgvSlice_ShellMetacharactersAreLiteral(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTask with metachar input: unexpected error: %v", err)
 	}
-	if result.Output != maliciousInput {
-		t.Errorf("expected literal output %q, got %q", maliciousInput, result.Output)
+	// With argv-as-slice: fakeopencode echoes the full string as one token.
+	// Output has "pure:1|" prefix (isolation flag is always present) then the literal input.
+	expected := "pure:1|" + maliciousInput
+	if result.Output != expected {
+		t.Errorf("expected literal output %q, got %q", expected, result.Output)
 	}
+	// Secondary check: no newline inside the output — a shell would produce two lines.
 	if strings.Contains(result.Output, "\n") {
 		t.Errorf("output contains newline — possible shell interpretation: %q", result.Output)
 	}
@@ -66,7 +131,7 @@ func TestArgvSlice_ShellMetacharactersAreLiteral(t *testing.T) {
 // a hung opencode process is killed when the context deadline elapses.
 func TestHungChild_KilledOnDeadline(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
@@ -81,7 +146,7 @@ func TestHungChild_KilledOnDeadline(t *testing.T) {
 // output that exceeds the size cap is truncated; the marker is prepended.
 func TestOversizedOutput_TruncatedWithMarker(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := opencode.New(bin, opencode.Options{OutputLimit: 10}, "", "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 10}, "", "", "")
 
 	ctx := context.Background()
 	result, err := adapter.RunTask(ctx, "task-large", "large")
@@ -97,7 +162,7 @@ func TestOversizedOutput_TruncatedWithMarker(t *testing.T) {
 // a non-zero exit from the opencode process results in an error.
 func TestNonZeroExit_MapsToError(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
 
 	ctx := context.Background()
 	_, err := adapter.RunTask(ctx, "task-fail", "fail")
@@ -110,15 +175,15 @@ func TestNonZeroExit_MapsToError(t *testing.T) {
 // the --model flag is correctly passed to the opencode CLI.
 func TestModelFlag_PassedToCLI(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "anthropic/claude-sonnet-4-20250514", "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "anthropic/claude-sonnet-4-20250514", "", "")
 
 	ctx := context.Background()
 	result, err := adapter.RunTask(ctx, "task-model", "hello")
 	if err != nil {
 		t.Fatalf("RunTask with model: unexpected error: %v", err)
 	}
-	// fakeopencode prepends "model:<model>|" when --model is passed.
-	expected := "model:anthropic/claude-sonnet-4-20250514|hello"
+	// fakeopencode prepends "pure:1|" (always) then "model:<model>|" when --model is passed.
+	expected := "pure:1|model:anthropic/claude-sonnet-4-20250514|hello"
 	if result.Output != expected {
 		t.Errorf("expected output %q, got %q", expected, result.Output)
 	}
@@ -128,16 +193,16 @@ func TestModelFlag_PassedToCLI(t *testing.T) {
 // the --model flag is not passed to the CLI.
 func TestNoModelFlag_OmitsFlag(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
 
 	ctx := context.Background()
 	result, err := adapter.RunTask(ctx, "task-no-model", "hello")
 	if err != nil {
 		t.Fatalf("RunTask without model: unexpected error: %v", err)
 	}
-	// Without model, fakeopencode echoes input verbatim (no model prefix).
-	if result.Output != "hello" {
-		t.Errorf("expected output %q, got %q", "hello", result.Output)
+	// Without model, output is only pure prefix + input.
+	if result.Output != "pure:1|hello" {
+		t.Errorf("expected output %q, got %q", "pure:1|hello", result.Output)
 	}
 }
 
@@ -145,15 +210,15 @@ func TestNoModelFlag_OmitsFlag(t *testing.T) {
 // the --agent flag is correctly passed to the opencode CLI.
 func TestAgentFlag_PassedToCLI(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "ceo")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "ceo", "")
 
 	ctx := context.Background()
 	result, err := adapter.RunTask(ctx, "task-agent", "hello")
 	if err != nil {
 		t.Fatalf("RunTask with agent: unexpected error: %v", err)
 	}
-	// fakeopencode prepends "agent:<agent>|" when --agent is passed.
-	expected := "agent:ceo|hello"
+	// fakeopencode prepends "pure:1|" (always) then "agent:<agent>|" when --agent is passed.
+	expected := "pure:1|agent:ceo|hello"
 	if result.Output != expected {
 		t.Errorf("expected output %q, got %q", expected, result.Output)
 	}
@@ -163,15 +228,15 @@ func TestAgentFlag_PassedToCLI(t *testing.T) {
 // the --agent flag is not passed to the CLI.
 func TestNoAgentFlag_OmitsFlag(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
 
 	ctx := context.Background()
 	result, err := adapter.RunTask(ctx, "task-no-agent", "hello")
 	if err != nil {
 		t.Fatalf("RunTask without agent: unexpected error: %v", err)
 	}
-	// Without agent, fakeopencode echoes input verbatim (no agent prefix).
-	if result.Output != "hello" {
-		t.Errorf("expected output %q, got %q", "hello", result.Output)
+	// Without agent, output is only pure prefix + input.
+	if result.Output != "pure:1|hello" {
+		t.Errorf("expected output %q, got %q", "pure:1|hello", result.Output)
 	}
 }

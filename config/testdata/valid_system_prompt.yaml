@@ -1,0 +1,14 @@
+tenant: acme
+agents:
+  - name: ceo
+    role: ceo
+    provider: claude-code
+    model: anthropic/claude-sonnet-4-20250514
+    system_prompt: agents/ceo.md
+gateways:
+  telegram:
+    token_env: TELEGRAM_BOT_TOKEN
+risk_policy:
+  telegram_send:
+    risk: risky
+    allowed_roles: [ceo]

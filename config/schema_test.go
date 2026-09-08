@@ -1,6 +1,8 @@
 package config_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -92,6 +94,74 @@ func TestLoad(t *testing.T) {
 			wantErr:     true,
 			errContains: "read",
 		},
+		// --- system_prompt tests (threat-matrix case e) ---
+		{
+			name: "valid system_prompt resolves to absolute path",
+			file: "testdata/valid_system_prompt.yaml",
+			check: func(t *testing.T, c *config.CompanyConfig) {
+				if len(c.Agents) == 0 {
+					t.Fatal("expected at least one agent")
+				}
+				got := c.Agents[0].SystemPrompt
+				if got == "" {
+					t.Error("SystemPrompt = \"\"; want non-empty absolute path")
+				}
+				if !filepath.IsAbs(got) {
+					t.Errorf("SystemPrompt = %q; want absolute path", got)
+				}
+				if !strings.HasSuffix(got, filepath.Join("testdata", "agents", "ceo.md")) {
+					t.Errorf("SystemPrompt = %q; want path ending in testdata/agents/ceo.md", got)
+				}
+			},
+		},
+		{
+			name:        "system_prompt referencing missing file is rejected",
+			file:        "testdata/missing_prompt_file.yaml",
+			wantErr:     true,
+			errContains: "agents/missing.md",
+		},
+		{
+			name: "absolute system_prompt path used as-is",
+			file: "", // dynamically generated below
+			check: func(t *testing.T, c *config.CompanyConfig) {
+				if len(c.Agents) == 0 {
+					t.Fatal("expected at least one agent")
+				}
+				got := c.Agents[0].SystemPrompt
+				if !filepath.IsAbs(got) {
+					t.Errorf("SystemPrompt = %q; want absolute path", got)
+				}
+			},
+		},
+		{
+			name: "absent system_prompt field yields empty string",
+			file: "testdata/valid.yaml",
+			check: func(t *testing.T, c *config.CompanyConfig) {
+				if len(c.Agents) == 0 {
+					t.Fatal("expected at least one agent")
+				}
+				if c.Agents[0].SystemPrompt != "" {
+					t.Errorf("SystemPrompt = %q; want empty string when field is absent", c.Agents[0].SystemPrompt)
+				}
+			},
+		},
+	}
+
+	// Dynamic setup for "absolute system_prompt path used as-is" test case.
+	// Creates a temp YAML that references an absolute path to the prompt file.
+	for i, tc := range tests {
+		if tc.name == "absolute system_prompt path used as-is" {
+			absPrompt, err := filepath.Abs("testdata/agents/ceo.md")
+			if err != nil {
+				t.Fatalf("resolve abs path for ceo.md: %v", err)
+			}
+			yaml := "tenant: acme\nagents:\n  - name: ceo\n    role: ceo\n    provider: claude-code\n    system_prompt: " + absPrompt + "\n"
+			tmpFile := filepath.Join(t.TempDir(), "abs_prompt.yaml")
+			if err := os.WriteFile(tmpFile, []byte(yaml), 0o644); err != nil {
+				t.Fatalf("write temp yaml: %v", err)
+			}
+			tests[i].file = tmpFile
+		}
 	}
 
 	for _, tc := range tests {

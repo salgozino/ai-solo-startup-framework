@@ -6,8 +6,10 @@
 //	"large"  — prints 1 MiB of 'x' characters then exits 0
 //	anything else — prints the argument as output text then exits 0
 //
-// When --model is present, it prepends "model:<model>|" to the output so tests
-// can verify the model flag was passed correctly.
+// When --bare is present, it prepends "bare:1|" to the output.
+// When --model is present, it prepends "model:<model>|" to the output.
+// When --system-prompt-file is present, it prepends "sysprompt:<path>|" to the output.
+// --no-session-persistence is consumed silently.
 package main
 
 import (
@@ -23,20 +25,33 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Args: [-p [--model <model>]] <input>
+	// Args: [-p [--bare] [--no-session-persistence] [--model <model>] [--system-prompt-file <path>]] <input>
 	// Parse flags, then take the last argument as the prompt.
 	var model string
+	var systemPromptFile string
+	bare := false
 	input := ""
 	for i := 1; i < len(os.Args); i++ {
-		if os.Args[i] == "-p" {
-			continue // skip -p flag
+		switch os.Args[i] {
+		case "-p":
+			// skip
+		case "--bare":
+			bare = true
+		case "--no-session-persistence":
+			// consumed silently
+		case "--model":
+			if i+1 < len(os.Args) {
+				model = os.Args[i+1]
+				i++
+			}
+		case "--system-prompt-file":
+			if i+1 < len(os.Args) {
+				systemPromptFile = os.Args[i+1]
+				i++
+			}
+		default:
+			input = os.Args[i]
 		}
-		if os.Args[i] == "--model" && i+1 < len(os.Args) {
-			model = os.Args[i+1]
-			i++ // skip model value
-			continue
-		}
-		input = os.Args[i]
 	}
 
 	if input == "" {
@@ -58,8 +73,14 @@ func main() {
 
 	default:
 		output := input
+		if systemPromptFile != "" {
+			output = "sysprompt:" + systemPromptFile + "|" + output
+		}
 		if model != "" {
-			output = "model:" + model + "|" + input
+			output = "model:" + model + "|" + output
+		}
+		if bare {
+			output = "bare:1|" + output
 		}
 		fmt.Print(output)
 	}

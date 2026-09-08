@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 
 	"gopkg.in/yaml.v3"
@@ -24,14 +25,19 @@ type CompanyConfig struct {
 	RiskPolicy map[string]Policy `yaml:"risk_policy"`
 }
 
-// AgentConfig declares a single agent: name, role, provider, and optional model.
-// There is deliberately no Gateways field here; gateway authorization is
-// governed solely by RiskPolicy.allowed_roles at the company level.
+// AgentConfig declares a single agent: name, role, provider, optional model,
+// and optional system_prompt. There is deliberately no Gateways field here;
+// gateway authorization is governed solely by RiskPolicy.allowed_roles at the
+// company level.
+//
+// SystemPrompt holds the resolved absolute path to the agent's persona file
+// after Load() validates and resolves it. Empty string means no system prompt.
 type AgentConfig struct {
-	Name     string `yaml:"name"`
-	Role     string `yaml:"role"`
-	Provider string `yaml:"provider"`
-	Model    string `yaml:"model,omitempty"`
+	Name         string `yaml:"name"`
+	Role         string `yaml:"role"`
+	Provider     string `yaml:"provider"`
+	Model        string `yaml:"model,omitempty"`
+	SystemPrompt string `yaml:"system_prompt,omitempty"` // abs path after Load()
 }
 
 // GatewayConfig holds the company-level gateway declarations.
@@ -83,6 +89,9 @@ func Load(path string) (*CompanyConfig, error) {
 		return nil, fmt.Errorf("config: %q: tenant must not be empty", path)
 	}
 
+	// Derive basedir for relative system_prompt paths from the config file location.
+	basedir := filepath.Dir(path)
+
 	// Decode agents with strict field enforcement.
 	agents := make([]AgentConfig, 0, len(raw.Agents))
 	for i, a := range raw.Agents {
@@ -96,7 +105,7 @@ func Load(path string) (*CompanyConfig, error) {
 		// Reject any other unknown field.
 		for k := range a {
 			switch k {
-			case "name", "role", "provider", "model":
+			case "name", "role", "provider", "model", "system_prompt":
 				// valid fields
 			default:
 				return nil, fmt.Errorf("config: agent[%d] (%q): unknown field %q", i, name, k)
@@ -106,7 +115,31 @@ func Load(path string) (*CompanyConfig, error) {
 		role, _ := a["role"].(string)
 		provider, _ := a["provider"].(string)
 		model, _ := a["model"].(string)
-		agents = append(agents, AgentConfig{Name: name, Role: role, Provider: provider, Model: model})
+		rawPrompt, _ := a["system_prompt"].(string)
+
+		// Resolve system_prompt to an absolute path and validate file existence.
+		var systemPrompt string
+		if rawPrompt != "" {
+			if !filepath.IsAbs(rawPrompt) {
+				rawPrompt = filepath.Join(basedir, rawPrompt)
+			}
+			abs, err := filepath.Abs(rawPrompt)
+			if err != nil {
+				return nil, fmt.Errorf("config: agent[%d] (%q): system_prompt: resolve path: %w", i, name, err)
+			}
+			if _, err := os.Stat(abs); err != nil {
+				return nil, fmt.Errorf("config: agent[%d] (%q): system_prompt: file not found: %s", i, name, abs)
+			}
+			systemPrompt = abs
+		}
+
+		agents = append(agents, AgentConfig{
+			Name:         name,
+			Role:         role,
+			Provider:     provider,
+			Model:        model,
+			SystemPrompt: systemPrompt,
+		})
 	}
 
 	// Inline-secret guard for Telegram gateway.
