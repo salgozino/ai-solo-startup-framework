@@ -92,6 +92,7 @@ func runMaterialize(yamlPath string) error {
 	fmt.Fprintf(os.Stderr, "shutting down...\n")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	ceoHandler.Shutdown()
 	_ = uiSrv.Shutdown(ctx)
 	for _, rt := range runtimes {
 		_ = rt.srv.Shutdown(ctx)
