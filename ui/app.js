@@ -33,6 +33,15 @@ function renderTasks(tasks) {
     taskList.innerHTML = '<p class="empty">No tasks.</p>';
     return;
   }
+  // Remember which output toggles are open before re-rendering.
+  var openOutputs = {};
+  taskList.querySelectorAll('.task-output-body.open').forEach(function(el) {
+    var container = el.closest('.task-output');
+    if (container && container.id) {
+      // id is "output-{taskID}"
+      openOutputs[container.id] = true;
+    }
+  });
   // Reverse so newest tasks appear first.
   taskList.innerHTML = tasks.slice().reverse().map(function(t) {
     const label  = displayLabel(t.state);
@@ -61,6 +70,15 @@ function renderTasks(tasks) {
       ${actions}
     </div>`;
   }).join('');
+  // Restore open toggles after re-render.
+  Object.keys(openOutputs).forEach(function(id) {
+    var container = document.getElementById(id);
+    if (!container) return;
+    var body = container.querySelector('.task-output-body');
+    var toggle = container.querySelector('.task-output-toggle');
+    if (body) body.classList.add('open');
+    if (toggle) toggle.textContent = '▼';
+  });
 }
 
 function toggleOutput(taskID) {
