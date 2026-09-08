@@ -17,6 +17,30 @@ import (
 	transa2a "github.com/salgozino/ai-solo-startup-framework/transport/a2a"
 )
 
+const testToken = "test-bearer-token"
+
+// TestNew_EmptyToken_ReturnsError asserts that New() refuses to start when
+// no auth token is configured (satisfies spec: "Server refuses to start without a token").
+func TestNew_EmptyToken_ReturnsError(t *testing.T) {
+	addr, err := address.New("ceo", "acme")
+	if err != nil {
+		t.Fatalf("address.New: %v", err)
+	}
+	store, err := supervisor.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	sup := supervisor.New(supervisor.Config{
+		Addr:     addr,
+		Provider: &fake.Provider{ReturnTaskID: "task-1"},
+		Store:    store,
+	})
+	_, newErr := transa2a.New(sup, "")
+	if newErr == nil {
+		t.Fatal("expected error from New() with empty token, got nil")
+	}
+}
+
 func newTestSupervisor(t *testing.T, name, tenant string) (*supervisor.Supervisor, *transa2a.Server) {
 	t.Helper()
 	if testing.Short() {
@@ -41,7 +65,7 @@ func newTestSupervisor(t *testing.T, name, tenant string) (*supervisor.Superviso
 		Store:    store,
 	})
 
-	srv, err := transa2a.New(sup)
+	srv, err := transa2a.New(sup, testToken)
 	if err != nil {
 		t.Fatalf("transport/a2a.New: %v", err)
 	}
@@ -172,7 +196,7 @@ func TestProviderFailureMarksFailed(t *testing.T) {
 		Store:    store,
 	})
 
-	srv, err := transa2a.New(sup)
+	srv, err := transa2a.New(sup, testToken)
 	if err != nil {
 		t.Fatalf("transport/a2a.New: %v", err)
 	}

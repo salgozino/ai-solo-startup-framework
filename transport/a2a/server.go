@@ -45,9 +45,13 @@ func (tenantInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext
 	return ctx, nil, nil
 }
 
-// New creates a Server for the given supervisor.
-// It binds a random loopback port (127.0.0.1:0) and constructs the Agent Card.
-func New(sup *supervisor.Supervisor) (*Server, error) {
+// New creates a Server for the given supervisor, authenticating all inbound
+// requests against authToken. Returns an error if authToken is empty.
+func New(sup *supervisor.Supervisor, authToken string) (*Server, error) {
+	if authToken == "" {
+		return nil, fmt.Errorf("a2a server: auth_token must not be empty")
+	}
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("a2a server: listen: %w", err)

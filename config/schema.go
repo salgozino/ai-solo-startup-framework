@@ -19,10 +19,11 @@ var envVarName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // CompanyConfig is the top-level structure decoded from company.yaml.
 type CompanyConfig struct {
-	Tenant     string            `yaml:"tenant"`
-	Agents     []AgentConfig     `yaml:"agents"`
-	Gateways   GatewayConfig     `yaml:"gateways"`
-	RiskPolicy map[string]Policy `yaml:"risk_policy"`
+	Tenant       string            `yaml:"tenant"`
+	AuthTokenEnv string            `yaml:"auth_token_env"`
+	Agents       []AgentConfig     `yaml:"agents"`
+	Gateways     GatewayConfig     `yaml:"gateways"`
+	RiskPolicy   map[string]Policy `yaml:"risk_policy"`
 }
 
 // AgentConfig declares a single agent: name, role, provider, optional model,
@@ -73,10 +74,11 @@ func Load(path string) (*CompanyConfig, error) {
 	// rawCompany mirrors CompanyConfig but agents use a generic map
 	// so we can detect unknown/forbidden fields before accepting them.
 	var raw struct {
-		Tenant     string            `yaml:"tenant"`
-		Agents     []map[string]any  `yaml:"agents"`
-		Gateways   GatewayConfig     `yaml:"gateways"`
-		RiskPolicy map[string]Policy `yaml:"risk_policy"`
+		Tenant       string            `yaml:"tenant"`
+		AuthTokenEnv string            `yaml:"auth_token_env"`
+		Agents       []map[string]any  `yaml:"agents"`
+		Gateways     GatewayConfig     `yaml:"gateways"`
+		RiskPolicy   map[string]Policy `yaml:"risk_policy"`
 	}
 
 	dec := yaml.NewDecoder(bytes.NewReader(data))
@@ -87,6 +89,10 @@ func Load(path string) (*CompanyConfig, error) {
 
 	if raw.Tenant == "" {
 		return nil, fmt.Errorf("config: %q: tenant must not be empty", path)
+	}
+
+	if err := requireEnvRef("auth_token_env", raw.AuthTokenEnv); err != nil {
+		return nil, fmt.Errorf("config: %q: %w", path, err)
 	}
 
 	// Derive basedir for relative system_prompt paths from the config file location.
@@ -155,10 +161,11 @@ func Load(path string) (*CompanyConfig, error) {
 	}
 
 	return &CompanyConfig{
-		Tenant:     raw.Tenant,
-		Agents:     agents,
-		Gateways:   raw.Gateways,
-		RiskPolicy: raw.RiskPolicy,
+		Tenant:       raw.Tenant,
+		AuthTokenEnv: raw.AuthTokenEnv,
+		Agents:       agents,
+		Gateways:     raw.Gateways,
+		RiskPolicy:   raw.RiskPolicy,
 	}, nil
 }
 
