@@ -70,6 +70,11 @@ func (a *Adapter) RunTask(ctx context.Context, _ string, input string) (port.Pro
 
 	cmd := exec.CommandContext(ctx, a.claudeBin, args...) //nolint:gosec // argv slice, no shell
 
+	// Capture stderr independently of StdoutPipe. cmd.Stderr and StdoutPipe are
+	// orthogonal: setting Stderr does not interfere with the LimitReader drain pattern.
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
 	// Use StdoutPipe so we control reading. This lets us read only up to the size cap
 	// and then drain the remainder via io.Discard in a goroutine, preventing EPIPE.
 	stdout, err := cmd.StdoutPipe()
@@ -99,8 +104,10 @@ func (a *Adapter) RunTask(ctx context.Context, _ string, input string) (port.Pro
 		return port.ProviderResult{}, fmt.Errorf("claudecode: deadline exceeded: %w", ctx.Err())
 	}
 	if waitErr != nil {
-		// Non-zero exit → failure outcome (threat-matrix case d).
-		return port.ProviderResult{}, fmt.Errorf("claudecode: %w", waitErr)
+		// Non-zero exit → failure outcome (threat-matrix case d). Include captured
+		// stderr and stdout so callers receive actionable diagnostics rather than
+		// opaque exit codes. Some CLI errors land on stdout, not stderr.
+		return port.ProviderResult{}, fmt.Errorf("claudecode: %w\nstderr: %s\nstdout: %s", waitErr, stderrBuf.String(), buf.String())
 	}
 	if readErr != nil {
 		return port.ProviderResult{}, fmt.Errorf("claudecode: read output: %w", readErr)
@@ -119,6 +126,43 @@ func parseOutput(raw []byte, n, limit int64) string {
 		return TruncationMarker + " " + text
 	}
 	return text
+}
+
+// ProbeModel verifies the configured model is recognised by the CLI without
+// making an API call. It passes an empty prompt ("") which forces the CLI to
+// validate the model and exit immediately (~1s). An invalid model produces
+// "issue with the selected model" on stderr; a valid model produces "Input
+// must be provided". Both exit non-zero — we distinguish them by stderr content.
+// ProbeModel satisfies the unexported modelProber interface in cmd/company/wire.go.
+func (a *Adapter) ProbeModel(ctx context.Context) error {
+	// Empty prompt: CLI validates model then exits 1 without an API call.
+	// Invalid model → "issue with the selected model" on stderr.
+	// Valid model   → "Input must be provided" on stderr.
+	args := []string{"-p"}
+	if a.model != "" {
+		args = append(args, "--model", a.model)
+	}
+	args = append(args, "")
+
+	cmd := exec.CommandContext(ctx, a.claudeBin, args...) //nolint:gosec // argv slice, no shell
+
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+	cmd.Stdout = io.Discard
+
+	_ = cmd.Run() // always exits non-zero with empty prompt
+
+	if ctx.Err() != nil {
+		return fmt.Errorf("claudecode: probe deadline exceeded: %w", ctx.Err())
+	}
+
+	stderr := stderrBuf.String()
+	if strings.Contains(stderr, "issue with the selected model") ||
+		strings.Contains(stderr, "isn't described by this version") {
+		return fmt.Errorf("claudecode: invalid model %q\nstderr: %s", a.model, stderr)
+	}
+	// "Input must be provided" or similar → model is valid, CLI just rejected the empty prompt.
+	return nil
 }
 
 // ---- port.Provider stub methods (A2A network client side) -------------------

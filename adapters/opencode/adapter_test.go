@@ -175,3 +175,50 @@ func TestNoAgentFlag_OmitsFlag(t *testing.T) {
 		t.Errorf("expected output %q, got %q", "hello", result.Output)
 	}
 }
+
+// TestRunTask_StderrInError verifies that subprocess stderr text is surfaced in the
+// returned error on non-zero exit (spec: Subprocess fails with stderr output).
+func TestRunTask_StderrInError(t *testing.T) {
+	bin := helperBinary(t)
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "")
+
+	ctx := context.Background()
+	// "fail-stderr" causes fakeopencode to write a diagnostic line to stderr then exit 1.
+	_, err := adapter.RunTask(ctx, "task-fail-stderr", "fail-stderr")
+	if err == nil {
+		t.Fatal("expected error for non-zero exit with stderr, got nil")
+	}
+	if !strings.Contains(err.Error(), "stderr:") {
+		t.Errorf("error must contain \"stderr:\" label; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "simulated stderr output") {
+		t.Errorf("error must contain subprocess stderr text; got: %v", err)
+	}
+}
+
+// TestRunTask_EmptyStderrOnFail verifies that a non-zero exit with no stderr
+// produces a non-nil, non-empty error and does not panic
+// (spec: Subprocess fails with empty stderr).
+func TestRunTask_EmptyStderrOnFail(t *testing.T) {
+	bin := helperBinary(t)
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "")
+
+	ctx := context.Background()
+	// "fail" exits 1 without writing anything to stderr.
+	_, err := adapter.RunTask(ctx, "task-fail-empty-stderr", "fail")
+	if err == nil {
+		t.Fatal("expected non-nil error for non-zero exit with empty stderr, got nil")
+	}
+	if err.Error() == "" {
+		t.Error("error message must not be empty string")
+	}
+	// Error format must include the "stderr:" label even when content is empty.
+	if !strings.Contains(err.Error(), "stderr:") {
+		t.Errorf("error must contain \"stderr:\" label even with empty stderr; got: %v", err)
+	}
+}
+
+// NOTE: ProbeModel tests removed — opencode CLI does not distinguish invalid
+// model from missing prompt (both produce the same generic error). The opencode
+// adapter intentionally does not implement modelProber; materializeAgents skips
+// the probe for it. See adapters/opencode/adapter.go for details.
