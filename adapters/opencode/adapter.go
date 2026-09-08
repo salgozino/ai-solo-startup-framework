@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -36,22 +37,43 @@ type Options struct {
 // Adapter implements port.Provider by running an ephemeral opencode CLI process per task.
 // It is stateless: each RunTask call creates a fresh exec.Cmd with no shared state.
 type Adapter struct {
-	opencodeBin string
-	limit       int64
-	model       string
-	agentName   string
+	opencodeBin         string
+	limit               int64
+	model               string
+	agentName           string
+	systemPromptContent string // file content read once at New(); empty → no prepend
 }
 
 // New returns an Adapter that invokes opencodeBin as the opencode CLI.
 // opencodeBin must be a path to the opencode executable (or a test double).
 // model is optional; when non-empty it is passed as --model <model>.
 // agentName is optional; when non-empty it is passed as --agent <agentName>.
-func New(opencodeBin string, opts Options, model string, agentName string) *Adapter {
+// systemPromptPath is optional; when non-empty the file is read once at construction time
+// and its content is prepended to every task input as "[SYSTEM]\n{content}\n\n".
+// --pure is always included unconditionally for agent isolation.
+func New(opencodeBin string, opts Options, model string, agentName string, systemPromptPath string) *Adapter {
 	limit := opts.OutputLimit
 	if limit <= 0 {
 		limit = defaultOutputLimit
 	}
-	return &Adapter{opencodeBin: opencodeBin, limit: limit, model: model, agentName: agentName}
+	var content string
+	if systemPromptPath != "" {
+		raw, err := os.ReadFile(systemPromptPath)
+		if err == nil {
+			content = string(raw)
+		} else {
+			// TOCTOU: Load() validated the file but it became unreadable before New().
+			// The agent starts without a system prompt rather than crashing.
+			fmt.Fprintf(os.Stderr, "warn: system_prompt file validated at config load but unreadable at adapter construction: %v; agent will start without system prompt\n", err)
+		}
+	}
+	return &Adapter{
+		opencodeBin:         opencodeBin,
+		limit:               limit,
+		model:               model,
+		agentName:           agentName,
+		systemPromptContent: content,
+	}
 }
 
 // RunTask implements port.Provider.RunTask.
@@ -59,17 +81,23 @@ func New(opencodeBin string, opts Options, model string, agentName string) *Adap
 // a positional argv argument, reads stdout up to the size cap, and returns a parsed
 // ProviderResult. Non-zero exit → error. ctx deadline kills the child.
 func (a *Adapter) RunTask(ctx context.Context, _ string, input string) (port.ProviderResult, error) {
-	// Build argv: opencode run [--model <model>] [--agent <agentName>] <input>
+	// Build argv: opencode run --pure [--model <model>] [--agent <agentName>] <effective-input>
 	// argv-as-slice: input is passed as a literal argument, never interpolated into a shell string.
 	// This is the primary guard against argument injection.
-	args := []string{"run"}
+	// --pure is always included unconditionally for agent isolation.
+	// When systemPromptContent is set, prepend "[SYSTEM]\n{content}\n\n" to the task input.
+	args := []string{"run", "--pure"}
 	if a.model != "" {
 		args = append(args, "--model", a.model)
 	}
 	if a.agentName != "" {
 		args = append(args, "--agent", a.agentName)
 	}
-	args = append(args, input)
+	effectiveInput := input
+	if a.systemPromptContent != "" {
+		effectiveInput = "[SYSTEM]\n" + a.systemPromptContent + "\n\n" + input
+	}
+	args = append(args, effectiveInput)
 
 	cmd := exec.CommandContext(ctx, a.opencodeBin, args...) //nolint:gosec // argv slice, no shell
 

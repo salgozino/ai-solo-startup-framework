@@ -196,9 +196,9 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) ([]*agentRun
 		} else {
 			switch agCfg.Provider {
 			case "claude-code":
-				prov = claudecode.New("claude", claudecode.Options{}, agCfg.Model)
+				prov = claudecode.New("claude", claudecode.Options{}, agCfg.Model, agCfg.SystemPrompt)
 			case "opencode":
-				prov = opencode.New("opencode", opencode.Options{}, agCfg.Model, agCfg.Name)
+				prov = opencode.New("opencode", opencode.Options{}, agCfg.Model, agCfg.Name, agCfg.SystemPrompt)
 			default:
 				return nil, fmt.Errorf("wire: unknown provider %q for agent %q", agCfg.Provider, agCfg.Name)
 			}

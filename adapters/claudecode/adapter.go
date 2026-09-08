@@ -36,20 +36,28 @@ type Options struct {
 // Adapter implements port.Provider by running an ephemeral claude CLI process per task.
 // It is stateless: each RunTask call creates a fresh exec.Cmd with no shared state.
 type Adapter struct {
-	claudeBin string
-	limit     int64
-	model     string
+	claudeBin        string
+	limit            int64
+	model            string
+	systemPromptPath string // absolute path; empty → flag omitted
 }
 
 // New returns an Adapter that invokes claudeBin as the claude CLI.
 // claudeBin must be a path to the claude executable (or a test double).
 // model is optional; when non-empty it is passed as --model <model>.
-func New(claudeBin string, opts Options, model string) *Adapter {
+// systemPromptPath is optional; when non-empty it is passed as --system-prompt-file <path>.
+// --safe-mode and --no-session-persistence are always included unconditionally.
+func New(claudeBin string, opts Options, model string, systemPromptPath string) *Adapter {
 	limit := opts.OutputLimit
 	if limit <= 0 {
 		limit = defaultOutputLimit
 	}
-	return &Adapter{claudeBin: claudeBin, limit: limit, model: model}
+	return &Adapter{
+		claudeBin:        claudeBin,
+		limit:            limit,
+		model:            model,
+		systemPromptPath: systemPromptPath,
+	}
 }
 
 // RunTask implements port.Provider.RunTask.
@@ -61,10 +69,16 @@ func (a *Adapter) RunTask(ctx context.Context, _ string, input string) (port.Pro
 	// This is the primary guard against argument injection (threat-matrix case a).
 	// -p requests non-interactive mode: claude processes the prompt and prints output to stdout,
 	// then exits. Without -p, claude starts an interactive REPL which blocks forever.
+	// --safe-mode disables all customizations (skills, MCP, CLAUDE.md, hooks) while
+	// preserving the user's auth/keychain — unlike --bare which requires ANTHROPIC_API_KEY.
+	// --no-session-persistence prevents writing session transcripts to disk.
 	// A fresh exec.Cmd per call → stateless across invocations (task 5.5).
-	args := []string{"-p"}
+	args := []string{"-p", "--safe-mode", "--no-session-persistence"}
 	if a.model != "" {
 		args = append(args, "--model", a.model)
+	}
+	if a.systemPromptPath != "" {
+		args = append(args, "--system-prompt-file", a.systemPromptPath)
 	}
 	args = append(args, input)
 

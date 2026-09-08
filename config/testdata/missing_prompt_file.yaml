@@ -1,0 +1,10 @@
+tenant: acme
+agents:
+  - name: ceo
+    role: ceo
+    provider: claude-code
+    system_prompt: agents/missing.md
+gateways:
+  telegram:
+    token_env: TELEGRAM_BOT_TOKEN
+risk_policy: {}
