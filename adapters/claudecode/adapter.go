@@ -46,7 +46,7 @@ type Adapter struct {
 // claudeBin must be a path to the claude executable (or a test double).
 // model is optional; when non-empty it is passed as --model <model>.
 // systemPromptPath is optional; when non-empty it is passed as --system-prompt-file <path>.
-// --bare and --no-session-persistence are always included unconditionally.
+// --safe-mode and --no-session-persistence are always included unconditionally.
 func New(claudeBin string, opts Options, model string, systemPromptPath string) *Adapter {
 	limit := opts.OutputLimit
 	if limit <= 0 {
@@ -69,9 +69,11 @@ func (a *Adapter) RunTask(ctx context.Context, _ string, input string) (port.Pro
 	// This is the primary guard against argument injection (threat-matrix case a).
 	// -p requests non-interactive mode: claude processes the prompt and prints output to stdout,
 	// then exits. Without -p, claude starts an interactive REPL which blocks forever.
-	// --bare and --no-session-persistence are always included for agent isolation (unconditional).
+	// --safe-mode disables all customizations (skills, MCP, CLAUDE.md, hooks) while
+	// preserving the user's auth/keychain — unlike --bare which requires ANTHROPIC_API_KEY.
+	// --no-session-persistence prevents writing session transcripts to disk.
 	// A fresh exec.Cmd per call → stateless across invocations (task 5.5).
-	args := []string{"-p", "--bare", "--no-session-persistence"}
+	args := []string{"-p", "--safe-mode", "--no-session-persistence"}
 	if a.model != "" {
 		args = append(args, "--model", a.model)
 	}

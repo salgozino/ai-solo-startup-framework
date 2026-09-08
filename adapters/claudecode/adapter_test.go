@@ -61,8 +61,8 @@ func TestArgvSlice_ShellMetacharactersAreLiteral(t *testing.T) {
 		t.Fatalf("RunTask with metachar input: unexpected error: %v", err)
 	}
 	// With argv-as-slice: fakeclaude echoes the full string as one token, no newline inside.
-	// The output has a "bare:1|" prefix (isolation flag is always present) then the literal input.
-	expected := "bare:1|" + maliciousInput
+	// The output has a "safe:1|" prefix (isolation flag is always present) then the literal input.
+	expected := "safe:1|" + maliciousInput
 	if result.Output != expected {
 		t.Errorf("expected literal output %q, got %q", expected, result.Output)
 	}
@@ -120,21 +120,21 @@ func TestNonZeroExit_MapsToError(t *testing.T) {
 	}
 }
 
-// TestBareFlag_AlwaysPresent verifies that --bare is unconditionally included
+// TestSafeModeFlag_AlwaysPresent verifies that --safe-mode is unconditionally included
 // in the claude invocation regardless of other settings (spec: Unconditional Isolation).
-func TestBareFlag_AlwaysPresent(t *testing.T) {
+func TestSafeModeFlag_AlwaysPresent(t *testing.T) {
 	bin := helperBinary(t)
-	// No system prompt, no model — bare must still be set.
+	// No system prompt, no model — safe-mode must still be set.
 	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "", "")
 
 	ctx := context.Background()
-	result, err := adapter.RunTask(ctx, "task-bare", "hello")
+	result, err := adapter.RunTask(ctx, "task-safe", "hello")
 	if err != nil {
 		t.Fatalf("RunTask: unexpected error: %v", err)
 	}
-	// fakeclaude prepends "bare:1|" when --bare is passed.
-	if !strings.HasPrefix(result.Output, "bare:1|") {
-		t.Errorf("expected output to start with \"bare:1|\", got %q", result.Output)
+	// fakeclaude prepends "safe:1|" when --safe-mode is passed.
+	if !strings.HasPrefix(result.Output, "safe:1|") {
+		t.Errorf("expected output to start with \"safe:1|\", got %q", result.Output)
 	}
 }
 
@@ -183,8 +183,8 @@ func TestModelFlag_PassedToCLI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTask with model: unexpected error: %v", err)
 	}
-	// fakeclaude prepends "bare:1|" (always) then "model:<model>|" when --model is passed.
-	expected := "bare:1|model:anthropic/claude-sonnet-4-20250514|hello"
+	// fakeclaude prepends "safe:1|" (always, --safe-mode) then "model:<model>|" when --model is passed.
+	expected := "safe:1|model:anthropic/claude-sonnet-4-20250514|hello"
 	if result.Output != expected {
 		t.Errorf("expected output %q, got %q", expected, result.Output)
 	}
@@ -201,8 +201,8 @@ func TestNoModelFlag_OmitsFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTask without model: unexpected error: %v", err)
 	}
-	// Without model, fakeclaude echoes input with only the bare prefix.
-	if result.Output != "bare:1|hello" {
-		t.Errorf("expected output %q, got %q", "bare:1|hello", result.Output)
+	// Without model, fakeclaude echoes input with only the safe-mode prefix.
+	if result.Output != "safe:1|hello" {
+		t.Errorf("expected output %q, got %q", "safe:1|hello", result.Output)
 	}
 }

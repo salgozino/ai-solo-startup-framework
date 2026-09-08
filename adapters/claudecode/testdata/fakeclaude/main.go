@@ -6,7 +6,7 @@
 //	"large"  — prints 1 MiB of 'x' characters then exits 0
 //	anything else — prints the argument as output text then exits 0
 //
-// When --bare is present, it prepends "bare:1|" to the output.
+// When --safe-mode is present, it prepends "safe:1|" to the output.
 // When --model is present, it prepends "model:<model>|" to the output.
 // When --system-prompt-file is present, it prepends "sysprompt:<path>|" to the output.
 // --no-session-persistence is consumed silently.
@@ -25,18 +25,18 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Args: [-p [--bare] [--no-session-persistence] [--model <model>] [--system-prompt-file <path>]] <input>
+	// Args: [-p [--safe-mode] [--no-session-persistence] [--model <model>] [--system-prompt-file <path>]] <input>
 	// Parse flags, then take the last argument as the prompt.
 	var model string
 	var systemPromptFile string
-	bare := false
+	safeMode := false
 	input := ""
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "-p":
 			// skip
-		case "--bare":
-			bare = true
+		case "--safe-mode":
+			safeMode = true
 		case "--no-session-persistence":
 			// consumed silently
 		case "--model":
@@ -79,8 +79,8 @@ func main() {
 		if model != "" {
 			output = "model:" + model + "|" + output
 		}
-		if bare {
-			output = "bare:1|" + output
+		if safeMode {
+			output = "safe:1|" + output
 		}
 		fmt.Print(output)
 	}

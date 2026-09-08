@@ -69,7 +69,7 @@ All agents run in **isolated mode** by default, independent of the user's local 
 
 | Provider | Isolation flags |
 |----------|----------------|
-| Claude Code | `--bare --no-session-persistence` — always applied |
+| Claude Code | `--safe-mode --no-session-persistence` — always applied |
 | OpenCode | `--pure` — always applied |
 
 These flags are unconditional — there is no opt-out. Isolation is a security baseline, not a feature.
@@ -193,7 +193,7 @@ company.yaml
 ## Key Concepts
 
 - **Company as code**: Your company is a YAML file, reviewable in a PR, version-controlled
-- **Agent isolation**: Agents always run with isolation flags (`--bare` / `--pure`), independent of local config
+- **Agent isolation**: Agents always run with isolation flags (`--safe-mode` / `--pure`), independent of local config
 - **System prompts**: Per-agent persona files enforce declared roles; loaded once at startup
 - **Risk policy**: Actions are classified as `safe`, `risky`, or `hard-deny` based on role
 - **Human-in-the-loop**: Risky actions escalate to the monitoring UI for approval
