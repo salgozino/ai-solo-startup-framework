@@ -26,6 +26,13 @@ import (
 	"github.com/salgozino/ai-solo-startup-framework/ui"
 )
 
+// modelProber is implemented by adapters that can verify model accessibility
+// at startup. Declared here (consumer-side) per Go's structural typing idiom —
+// no adapter package needs to import or declare this interface explicitly.
+type modelProber interface {
+	ProbeModel(ctx context.Context) error
+}
+
 // agentRuntime groups the live objects for a single materialized agent.
 type agentRuntime struct {
 	sup    *supervisor.Supervisor
@@ -194,6 +201,18 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) ([]*agentRun
 				prov = opencode.New("opencode", opencode.Options{}, agCfg.Model, agCfg.Name)
 			default:
 				return nil, fmt.Errorf("wire: unknown provider %q for agent %q", agCfg.Provider, agCfg.Name)
+			}
+
+			// Validate model accessibility before any server binds. The probe runs with
+			// a 15-second deadline per agent, sequentially. Adapters that do not implement
+			// modelProber skip the probe (structural opt-in — no interface change to port/).
+			if prober, ok := prov.(modelProber); ok {
+				probeCtx, probeCancel := context.WithTimeout(context.Background(), 15*time.Second)
+				probeErr := prober.ProbeModel(probeCtx)
+				probeCancel()
+				if probeErr != nil {
+					return nil, fmt.Errorf("agent %q model probe failed: %w", agCfg.Name, probeErr)
+				}
 			}
 		}
 

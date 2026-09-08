@@ -73,6 +73,11 @@ func (a *Adapter) RunTask(ctx context.Context, _ string, input string) (port.Pro
 
 	cmd := exec.CommandContext(ctx, a.opencodeBin, args...) //nolint:gosec // argv slice, no shell
 
+	// Capture stderr independently of StdoutPipe. cmd.Stderr and StdoutPipe are
+	// orthogonal: setting Stderr does not interfere with the LimitReader drain pattern.
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
 	// Use StdoutPipe so we control reading. This lets us read only up to the size cap
 	// and then drain the remainder via io.Discard in a goroutine, preventing EPIPE.
 	stdout, err := cmd.StdoutPipe()
@@ -101,7 +106,9 @@ func (a *Adapter) RunTask(ctx context.Context, _ string, input string) (port.Pro
 		return port.ProviderResult{}, fmt.Errorf("opencode: deadline exceeded: %w", ctx.Err())
 	}
 	if waitErr != nil {
-		return port.ProviderResult{}, fmt.Errorf("opencode: %w", waitErr)
+		// Non-zero exit → failure outcome. Include captured stderr and stdout
+		// so callers receive actionable diagnostics. Some CLI errors land on stdout.
+		return port.ProviderResult{}, fmt.Errorf("opencode: %w\nstderr: %s\nstdout: %s", waitErr, stderrBuf.String(), buf.String())
 	}
 	if readErr != nil {
 		return port.ProviderResult{}, fmt.Errorf("opencode: read output: %w", readErr)
@@ -120,6 +127,12 @@ func parseOutput(raw []byte, n, limit int64) string {
 	}
 	return text
 }
+
+// NOTE: ProbeModel is intentionally NOT implemented for the opencode adapter.
+// Unlike Claude CLI, opencode's "run" command does not distinguish between
+// an invalid model and a missing prompt — both produce the same generic error.
+// Until opencode exposes a model-validation path, this adapter does not satisfy
+// the modelProber interface, and materializeAgents skips the probe for it.
 
 // ---- port.Provider stub methods (A2A network client side) -------------------
 // The A2A client methods are implemented by transport/a2a, not by this adapter.

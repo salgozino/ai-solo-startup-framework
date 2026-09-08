@@ -44,13 +44,31 @@ func main() {
 		input = os.Args[i]
 	}
 
+	// Model-level behaviour: checked before input-level sentinels so that
+	// ProbeModel tests can trigger model-specific outcomes via --model flag.
+	if model == "badmodel" {
+		fmt.Fprintln(os.Stderr, "There's an issue with the selected model (badmodel). It may not exist or you may not have access to it.")
+		os.Exit(1)
+	}
+	if model == "hangmodel" {
+		// Simulates a model probe that never responds — killed by ctx deadline.
+		time.Sleep(24 * time.Hour)
+	}
+
+	// Empty prompt: simulate CLI behaviour for ProbeModel.
+	// Valid model + empty prompt → "Input must be provided" error (exit 1).
 	if input == "" {
-		fmt.Fprintln(os.Stderr, "fakeopencode: no input provided")
-		os.Exit(2)
+		fmt.Fprintln(os.Stderr, "Error: Input must be provided either through stdin or as a prompt argument")
+		os.Exit(1)
 	}
 
 	switch input {
 	case "fail":
+		os.Exit(1)
+
+	case "fail-stderr":
+		// Exits non-zero AND writes to stderr — used to test stderr capture.
+		fmt.Fprintln(os.Stderr, "simulated stderr output from failed subprocess")
 		os.Exit(1)
 
 	case "hang":
