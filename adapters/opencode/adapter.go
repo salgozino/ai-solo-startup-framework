@@ -61,9 +61,11 @@ func New(opencodeBin string, opts Options, model string, agentName string, syste
 		raw, err := os.ReadFile(systemPromptPath)
 		if err == nil {
 			content = string(raw)
+		} else {
+			// TOCTOU: Load() validated the file but it became unreadable before New().
+			// The agent starts without a system prompt rather than crashing.
+			fmt.Fprintf(os.Stderr, "warn: system_prompt file validated at config load but unreadable at adapter construction: %v; agent will start without system prompt\n", err)
 		}
-		// If reading fails here (e.g. race after Load validated it), content stays empty.
-		// The path was already validated at config.Load() time.
 	}
 	return &Adapter{
 		opencodeBin:         opencodeBin,
