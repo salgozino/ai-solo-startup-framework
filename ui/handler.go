@@ -62,13 +62,24 @@ type sseClient struct {
 type UIHandler struct {
 	sup Supervisor
 
-	mu      sync.Mutex
-	clients []*sseClient
+	mu         sync.Mutex
+	clients    []*sseClient
+	shutdownCh chan struct{}
+	once       sync.Once
 }
 
 // NewUIHandler creates a UIHandler backed by sup.
 func NewUIHandler(sup Supervisor) *UIHandler {
-	return &UIHandler{sup: sup}
+	return &UIHandler{
+		sup:        sup,
+		shutdownCh: make(chan struct{}),
+	}
+}
+
+// Shutdown closes all active SSE connections and is safe to call multiple times.
+// It must be called before http.Server.Shutdown() to avoid the 15s drain delay.
+func (h *UIHandler) Shutdown() {
+	h.once.Do(func() { close(h.shutdownCh) })
 }
 
 // Register wires the handler's routes into mux.
@@ -157,6 +168,8 @@ func (h *UIHandler) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	for {
 		select {
+		case <-h.shutdownCh:
+			return
 		case <-r.Context().Done():
 			return
 		case <-tick.C:

@@ -310,6 +310,62 @@ func TestSendTaskSuccess(t *testing.T) {
 	}
 }
 
+// TestUIHandlerShutdown verifies that Shutdown() causes active SSE connections to close
+// within 100ms (satisfies spec: "SSE event loop MUST exit within 100ms of the signal").
+func TestUIHandlerShutdown(t *testing.T) {
+	sup := &stubSupervisor{state: "IDLE"}
+	mux := http.NewServeMux()
+	h := ui.NewUIHandler(sup)
+	h.Register(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Open SSE connection.
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/events", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Allow time for the SSE goroutine to register the client.
+	time.Sleep(20 * time.Millisecond)
+
+	// Background reader: signals done when body is closed (EOF or error).
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 64)
+		for {
+			_, err := resp.Body.Read(buf)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	start := time.Now()
+	h.Shutdown()
+
+	select {
+	case <-done:
+		if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+			t.Fatalf("SSE goroutine did not exit within 100ms after Shutdown(); took %v", elapsed)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timeout: SSE connection was not closed after Shutdown()")
+	}
+}
+
+// TestShutdownIdempotent verifies that calling Shutdown() more than once does not panic
+// (satisfies spec: "The mechanism MUST be idempotent").
+func TestShutdownIdempotent(t *testing.T) {
+	sup := &stubSupervisor{}
+	h := ui.NewUIHandler(sup)
+	h.Shutdown()
+	h.Shutdown() // second call must not panic
+}
+
 // TestSendTaskEmptyMessage checks that POST /api/send with an empty message returns 400.
 func TestSendTaskEmptyMessage(t *testing.T) {
 	sup := &stubSupervisor{}
