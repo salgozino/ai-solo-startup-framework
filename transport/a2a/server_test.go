@@ -74,6 +74,113 @@ func newTestSupervisor(t *testing.T, name, tenant string) (*supervisor.Superviso
 	return sup, srv
 }
 
+// TestAuthInterceptor_Before covers the authInterceptor.Before logic:
+// nil ServiceParams (trusted in-process), valid bearer, missing header, wrong token, malformed prefix.
+func TestAuthInterceptor_Before(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: skipping in -short mode")
+	}
+
+	_, srv := newTestSupervisor(t, "ceo", "acme")
+
+	cases := []struct {
+		name    string
+		direct  bool   // true = invoke srv.Handler() directly (nil ServiceParams, trusted caller)
+		header  string // Authorization header for HTTP cases; empty = omit
+		wantErr bool
+	}{
+		{name: "nil ServiceParams (trusted internal call)", direct: true, wantErr: false},
+		{name: "valid bearer token", header: "Bearer " + testToken, wantErr: false},
+		{name: "missing Authorization header", header: "", wantErr: true},
+		{name: "wrong token", header: "Bearer wrong-token", wantErr: true},
+		{name: "malformed prefix (no Bearer)", header: testToken, wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.direct {
+				msg := sdka2a.NewMessage(sdka2a.MessageRoleUser, sdka2a.NewTextPart("hello"))
+				_, err := srv.Handler().SendMessage(context.Background(), &sdka2a.SendMessageRequest{
+					Tenant:  "acme",
+					Message: msg,
+				})
+				if tc.wantErr && err == nil {
+					t.Error("expected error, got success")
+				}
+				if !tc.wantErr && err != nil {
+					t.Errorf("expected success, got error: %v", err)
+				}
+				return
+			}
+
+			body := `{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"tenant":"acme","message":{"messageId":"msg-1","role":"ROLE_USER","parts":[{"text":"hello"}]}}}`
+			req, _ := http.NewRequest(http.MethodPost, srv.BaseURL()+"/invoke", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("HTTP request: %v", err)
+			}
+			defer resp.Body.Close()
+
+			var rpcResp struct {
+				Error *struct {
+					Code    int    `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+
+			if tc.wantErr && rpcResp.Error == nil {
+				t.Errorf("expected JSON-RPC error, got success")
+			}
+			if !tc.wantErr && rpcResp.Error != nil {
+				t.Errorf("expected success, got JSON-RPC error: %v", rpcResp.Error.Message)
+			}
+		})
+	}
+}
+
+// TestUnauthenticated_RequestRejected asserts that a request with no
+// Authorization header is rejected by authInterceptor before any handler
+// runs (satisfies spec: "Missing Authorization header is rejected").
+func TestUnauthenticated_RequestRejected(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: skipping in -short mode")
+	}
+
+	_, srv := newTestSupervisor(t, "ceo", "acme")
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"tenant":"acme","message":{"messageId":"msg-1","role":"ROLE_USER","parts":[{"text":"hello"}]}}}`
+	resp, err := http.Post( //nolint:noctx
+		srv.BaseURL()+"/invoke",
+		"application/json",
+		strings.NewReader(body),
+	)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var rpcResp struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if rpcResp.Error == nil {
+		t.Fatal("expected JSON-RPC unauthorized error for missing Authorization header, got success")
+	}
+}
+
 // TestAgentCardDiscoverable asserts that a newly started supervisor serves a
 // valid Agent Card at the well-known path (satisfies "Newly started supervisor is discoverable").
 func TestAgentCardDiscoverable(t *testing.T) {
@@ -116,26 +223,28 @@ func TestEmptyTenantRejected(t *testing.T) {
 
 	_, srv := newTestSupervisor(t, "ceo", "acme")
 
-	// Build a JSON-RPC SendMessage request with tenant:"" (empty).
+	// Build a JSON-RPC SendMessage request with tenant:"" (empty). The
+	// Authorization header is valid so this exercises tenantInterceptor,
+	// not authInterceptor.
 	body := `{
 		"jsonrpc":"2.0",
 		"id":1,
-		"method":"message/send",
+		"method":"SendMessage",
 		"params":{
 			"tenant":"",
 			"message":{
 				"messageId":"msg-1",
 				"role":"ROLE_USER",
-				"parts":[{"content":"hello"}]
+				"parts":[{"text":"hello"}]
 			}
 		}
 	}`
 
-	resp, err := http.Post( //nolint:noctx
-		srv.BaseURL()+"/invoke",
-		"application/json",
-		strings.NewReader(body),
-	)
+	req, _ := http.NewRequest(http.MethodPost, srv.BaseURL()+"/invoke", strings.NewReader(body)) //nolint:noctx
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testToken)
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}

@@ -46,6 +46,7 @@ gateways:
 func TestLoad_AcceptsEnvVarRef(t *testing.T) {
 	yaml := `
 tenant: acme
+auth_token_env: A2A_AUTH_TOKEN
 agents:
   - name: ceo
     role: ceo

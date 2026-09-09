@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 
 	sdka2a "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -45,6 +46,42 @@ func (tenantInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext
 	return ctx, nil, nil
 }
 
+// bearerPrefix is the required "Authorization" header prefix for a valid token.
+const bearerPrefix = "Bearer "
+
+// authInterceptor authenticates every inbound request against a shared
+// Bearer token before any other interceptor or handler runs. A nil
+// ServiceParams (set by [a2asrv.NewCallContext] when a caller invokes the
+// handler directly, without going through the HTTP transport) identifies a
+// trusted in-process caller and skips the token check.
+type authInterceptor struct {
+	a2asrv.PassthroughCallInterceptor
+	token string
+}
+
+// Before implements a2asrv.CallInterceptor.
+func (a authInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
+	if callCtx.ServiceParams() == nil {
+		// No HTTP context: this is a trusted in-process call (e.g. the UI
+		// adapter or a direct handler invocation in tests).
+		callCtx.User = a2asrv.NewAuthenticatedUser("internal", nil)
+		return ctx, nil, nil
+	}
+
+	vals, ok := callCtx.ServiceParams().Get("authorization")
+	if !ok || len(vals) == 0 {
+		return ctx, nil, fmt.Errorf("%w: missing Authorization header", sdka2a.ErrUnauthenticated)
+	}
+
+	token, hasPrefix := strings.CutPrefix(vals[0], bearerPrefix)
+	if !hasPrefix || token != a.token {
+		return ctx, nil, fmt.Errorf("%w: invalid bearer token", sdka2a.ErrUnauthenticated)
+	}
+
+	callCtx.User = a2asrv.NewAuthenticatedUser("caller", nil)
+	return ctx, nil, nil
+}
+
 // New creates a Server for the given supervisor, authenticating all inbound
 // requests against authToken. Returns an error if authToken is empty.
 func New(sup *supervisor.Supervisor, authToken string) (*Server, error) {
@@ -60,17 +97,15 @@ func New(sup *supervisor.Supervisor, authToken string) (*Server, error) {
 	baseURL := fmt.Sprintf("http://%s", ln.Addr().String())
 	card := buildAgentCard(sup.Addr(), baseURL)
 
-	// Use an in-memory task store with a fixed user authenticator so that
-	// ListTasks works without requiring real per-request authentication in v1.
-	// ponytail: one machine, one tenant at a time — no auth complexity for v1.
+	// Use an in-memory task store whose authenticator reads the caller
+	// identity set by authInterceptor, so ListTasks only returns tasks
+	// owned by the authenticated caller.
 	store := taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
-		Authenticator: func(_ context.Context) (string, error) {
-			return "supervisor", nil
-		},
+		Authenticator: a2asrv.NewTaskStoreAuthenticator(),
 	})
 
 	handler := a2asrv.NewHandler(sup,
-		a2asrv.WithCallInterceptors(tenantInterceptor{}),
+		a2asrv.WithCallInterceptors(authInterceptor{token: authToken}, tenantInterceptor{}),
 		a2asrv.WithTaskStore(store),
 	)
 
@@ -109,8 +144,15 @@ func New(sup *supervisor.Supervisor, authToken string) (*Server, error) {
 		return err
 	}
 
+	// Recovery runs outside the HTTP interceptor chain (registerFn calls
+	// store.Create directly), so NewTaskStoreAuthenticator has no CallContext
+	// to read from unless we attach one here. Treat recovery as the same
+	// trusted internal caller authInterceptor grants nil-ServiceParams calls.
+	recoverCtx, recoverCallCtx := a2asrv.NewCallContext(context.Background(), nil)
+	recoverCallCtx.User = a2asrv.NewAuthenticatedUser("internal", nil)
+
 	// Transition the supervisor to IDLE — endpoint is now registered.
-	if err := sup.RecoverOpenTasks(context.Background(), handler, registerFn); err != nil {
+	if err := sup.RecoverOpenTasks(recoverCtx, handler, registerFn); err != nil {
 		return nil, fmt.Errorf("a2a server: recover: %w", err)
 	}
 	sup.MarkReady()
@@ -148,6 +190,12 @@ func buildAgentCard(addr address.A2AAddress, baseURL string) *sdka2a.AgentCard {
 		DefaultOutputModes:  []string{"text/plain"},
 		Capabilities: sdka2a.AgentCapabilities{
 			Streaming: true,
+		},
+		SecuritySchemes: sdka2a.NamedSecuritySchemes{
+			"bearer": sdka2a.HTTPAuthSecurityScheme{Scheme: "bearer"},
+		},
+		SecurityRequirements: sdka2a.SecurityRequirementsOptions{
+			{sdka2a.SecuritySchemeName("bearer"): {}},
 		},
 		Skills: []sdka2a.AgentSkill{
 			{
