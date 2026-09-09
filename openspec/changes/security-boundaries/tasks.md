@@ -43,3 +43,9 @@ Chain strategy: stacked-to-main
 - [x] 3.2 Add `const testToken = "test-bearer-token"`; update `newTestSupervisor` signature to accept token; add `Authorization: Bearer test-bearer-token` header to all HTTP-level test requests in `transport/a2a/server_test.go`
 - [x] 3.3 Add `const testToken = "test-bearer-token"`; update `startSupervisor` in `core/supervisor/integration_test.go`; replace `workerClient.SendMessage` call with `workerSrv.Handler().SendMessage` for delegation assertion
 - [x] 3.4 [GREEN] Run `go test ./transport/a2a/... ./core/supervisor/... -count=1`; all tests pass; verify no regressions in `go test ./... -count=1`
+
+## Phase 4: Remediation — Verify-Reported Coverage Gaps
+
+- [x] 4.1 [RED→GREEN] Add `TestAuthPrecedesTenantValidation` in `transport/a2a/server_test.go`: invalid token + empty tenant → assert JSON-RPC error code is unauthenticated (-31401), not invalid-params (-32602), proving authInterceptor runs before tenantInterceptor
+- [x] 4.2 [RED→GREEN] Extend `TestAgentCardDiscoverable` in `transport/a2a/server_test.go`: assert the served Agent Card's `SecuritySchemes` contains an `httpBearer`-scheme entry and `SecurityRequirements` is non-empty
+- [x] 4.3 [RED→GREEN] Add `TestListTasks_OwnershipIsolation` in `transport/a2a/server_test.go`: create one task as the "internal" identity (direct handler call, nil ServiceParams) and one task as the "caller" identity (HTTP with valid Bearer token); assert `ListTasks` as each identity returns only its own task
