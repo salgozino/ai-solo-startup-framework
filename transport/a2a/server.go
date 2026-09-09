@@ -49,6 +49,18 @@ func (tenantInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext
 // bearerPrefix is the required "Authorization" header prefix for a valid token.
 const bearerPrefix = "Bearer "
 
+// authenticatedUserID is the task-store owner identity granted to every
+// authorized caller. A single shared Bearer secret means there is exactly ONE
+// authenticated principal: a valid-token HTTP request and a trusted in-process
+// call (nil ServiceParams) are the same authorized party. Task ownership is
+// keyed on this identity, so every path reaching the store — Before and crash
+// recovery in New — must use it. Splitting it partitions stored tasks into
+// mutually invisible sets and breaks continuity across restarts and entry
+// paths, with no security gain: unauthenticated callers are rejected by
+// authInterceptor before any handler or store access. This constant is the seam
+// to replace if per-caller identities are ever introduced.
+const authenticatedUserID = "authenticated"
+
 // authInterceptor authenticates every inbound request against a shared
 // Bearer token before any other interceptor or handler runs. A nil
 // ServiceParams (set by [a2asrv.NewCallContext] when a caller invokes the
@@ -64,7 +76,7 @@ func (a authInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext
 	if callCtx.ServiceParams() == nil {
 		// No HTTP context: this is a trusted in-process call (e.g. the UI
 		// adapter or a direct handler invocation in tests).
-		callCtx.User = a2asrv.NewAuthenticatedUser("internal", nil)
+		callCtx.User = a2asrv.NewAuthenticatedUser(authenticatedUserID, nil)
 		return ctx, nil, nil
 	}
 
@@ -78,7 +90,7 @@ func (a authInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext
 		return ctx, nil, fmt.Errorf("%w: invalid bearer token", sdka2a.ErrUnauthenticated)
 	}
 
-	callCtx.User = a2asrv.NewAuthenticatedUser("caller", nil)
+	callCtx.User = a2asrv.NewAuthenticatedUser(authenticatedUserID, nil)
 	return ctx, nil, nil
 }
 
@@ -98,8 +110,9 @@ func New(sup *supervisor.Supervisor, authToken string) (*Server, error) {
 	card := buildAgentCard(sup.Addr(), baseURL)
 
 	// Use an in-memory task store whose authenticator reads the caller
-	// identity set by authInterceptor, so ListTasks only returns tasks
-	// owned by the authenticated caller.
+	// identity set by authInterceptor, so an unauthenticated context can
+	// never reach a stored task. Every authorized caller shares
+	// authenticatedUserID, so tasks stay reachable across entry paths.
 	store := taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
 		Authenticator: a2asrv.NewTaskStoreAuthenticator(),
 	})
@@ -146,10 +159,11 @@ func New(sup *supervisor.Supervisor, authToken string) (*Server, error) {
 
 	// Recovery runs outside the HTTP interceptor chain (registerFn calls
 	// store.Create directly), so NewTaskStoreAuthenticator has no CallContext
-	// to read from unless we attach one here. Treat recovery as the same
-	// trusted internal caller authInterceptor grants nil-ServiceParams calls.
+	// to read from unless we attach one here. Recovered tasks must carry
+	// authenticatedUserID or an HTTP client with an in-flight task before a
+	// restart could no longer read, cancel, or resume it afterwards.
 	recoverCtx, recoverCallCtx := a2asrv.NewCallContext(context.Background(), nil)
-	recoverCallCtx.User = a2asrv.NewAuthenticatedUser("internal", nil)
+	recoverCallCtx.User = a2asrv.NewAuthenticatedUser(authenticatedUserID, nil)
 
 	// Transition the supervisor to IDLE — endpoint is now registered.
 	if err := sup.RecoverOpenTasks(recoverCtx, handler, registerFn); err != nil {

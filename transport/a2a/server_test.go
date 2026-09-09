@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -417,115 +418,196 @@ func TestProviderFailureMarksFailed(t *testing.T) {
 	}
 }
 
-// TestListTasks_OwnershipIsolation asserts that ListTasks returns only tasks
-// owned by the authenticated caller and never another caller's tasks
-// (satisfies spec: "Authenticated client lists only its own tasks").
-//
-// The shared-secret Bearer auth model in this codebase produces exactly two
-// distinct caller identities end to end: "internal" (a trusted in-process
-// call with nil ServiceParams — e.g. RecoverOpenTasks or a direct handler
-// invocation) and "caller" (any HTTP request presenting the valid shared
-// token; see authInterceptor.Before). There is no notion of distinct
-// per-holder tokens in this design — everyone who has the one shared token
-// is identified as "caller". This test exercises both identities that the
-// system actually produces, through the real interceptor chain and
-// taskstore, to prove the ownership-isolation guarantee holds.
-func TestListTasks_OwnershipIsolation(t *testing.T) {
+// rpcOverHTTP issues a JSON-RPC call against srv as an authenticated HTTP
+// caller (valid shared Bearer token) and decodes the result into out.
+// Fails the test on a transport or JSON-RPC error.
+func rpcOverHTTP(t *testing.T, srv *transa2a.Server, body string, out any) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, srv.BaseURL()+"/invoke", strings.NewReader(body)) //nolint:noctx
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /invoke: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var rpcResp struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		t.Fatalf("decode JSON-RPC response: %v", err)
+	}
+	if rpcResp.Error != nil {
+		t.Fatalf("JSON-RPC error for %s: %s", body, rpcResp.Error.Message)
+	}
+	if out != nil {
+		if err := json.Unmarshal(rpcResp.Result, out); err != nil {
+			t.Fatalf("decode JSON-RPC result: %v", err)
+		}
+	}
+}
+
+// sendMessageOverHTTP creates a task over HTTP and returns its TaskID.
+func sendMessageOverHTTP(t *testing.T, srv *transa2a.Server, msgID, text string) sdka2a.TaskID {
+	t.Helper()
+	body := fmt.Sprintf(
+		`{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"tenant":"acme","message":{"messageId":%q,"role":"ROLE_USER","parts":[{"text":%q}]}}}`,
+		msgID, text)
+	var result struct {
+		Task *sdka2a.Task `json:"task"`
+	}
+	rpcOverHTTP(t, srv, body, &result)
+	if result.Task == nil {
+		t.Fatalf("expected a task result for message %q", msgID)
+	}
+	return result.Task.ID
+}
+
+// listTasksOverHTTP returns the TaskIDs visible to an authenticated HTTP caller.
+func listTasksOverHTTP(t *testing.T, srv *transa2a.Server) []sdka2a.TaskID {
+	t.Helper()
+	var result sdka2a.ListTasksResponse
+	rpcOverHTTP(t, srv, `{"jsonrpc":"2.0","id":2,"method":"ListTasks","params":{"tenant":"acme"}}`, &result)
+	return taskIDs(result.Tasks)
+}
+
+// getTaskOverHTTP reads a single task over HTTP as an authenticated caller.
+func getTaskOverHTTP(t *testing.T, srv *transa2a.Server, id sdka2a.TaskID) *sdka2a.Task {
+	t.Helper()
+	body := fmt.Sprintf(`{"jsonrpc":"2.0","id":3,"method":"GetTask","params":{"tenant":"acme","id":%q}}`, id)
+	var task sdka2a.Task
+	rpcOverHTTP(t, srv, body, &task)
+	return &task
+}
+
+// TestTaskContinuityAcrossEntryPaths asserts that a stored task stays reachable
+// from BOTH entry paths this shared-secret model produces: a trusted in-process
+// handler call (nil ServiceParams) and an HTTP request carrying the valid
+// shared Bearer token. Both are the same authorized principal, so neither may
+// hide the other's tasks. The guarantee that does matter — an unauthenticated
+// request reaches no task at all — is covered by
+// TestUnauthenticated_RequestRejected.
+func TestTaskContinuityAcrossEntryPaths(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration: skipping in -short mode")
 	}
 
 	_, srv := newTestSupervisor(t, "ceo", "acme")
 
-	// Task A: created via a direct handler call (nil ServiceParams → "internal").
+	// Task A: created via a direct handler call (nil ServiceParams).
 	msgA := sdka2a.NewMessage(sdka2a.MessageRoleUser, sdka2a.NewTextPart("task A"))
 	resultA, err := srv.Handler().SendMessage(context.Background(), &sdka2a.SendMessageRequest{
 		Tenant:  "acme",
 		Message: msgA,
 	})
 	if err != nil {
-		t.Fatalf("SendMessage (internal caller): %v", err)
+		t.Fatalf("SendMessage (in-process): %v", err)
 	}
 	taskA, ok := resultA.(*sdka2a.Task)
 	if !ok {
 		t.Fatalf("expected *a2a.Task result for task A, got %T", resultA)
 	}
 
-	// Task B: created via HTTP with the valid Bearer token ("caller").
-	bodyB := `{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"tenant":"acme","message":{"messageId":"msg-b","role":"ROLE_USER","parts":[{"text":"task B"}]}}}`
-	reqB, _ := http.NewRequest(http.MethodPost, srv.BaseURL()+"/invoke", strings.NewReader(bodyB)) //nolint:noctx
-	reqB.Header.Set("Content-Type", "application/json")
-	reqB.Header.Set("Authorization", "Bearer "+testToken)
-	respB, err := http.DefaultClient.Do(reqB)
+	// Task B: created over HTTP with the valid Bearer token.
+	taskBID := sendMessageOverHTTP(t, srv, "msg-b", "task B")
+
+	// The in-process path must see BOTH tasks.
+	listInProcess, err := srv.Handler().ListTasks(context.Background(), &sdka2a.ListTasksRequest{Tenant: "acme"})
 	if err != nil {
-		t.Fatalf("POST SendMessage (caller): %v", err)
+		t.Fatalf("ListTasks (in-process): %v", err)
 	}
-	defer respB.Body.Close()
+	for _, id := range []sdka2a.TaskID{taskA.ID, taskBID} {
+		if !containsTaskID(listInProcess.Tasks, id) {
+			t.Errorf("in-process ListTasks cannot see task %s: got %v", id, taskIDs(listInProcess.Tasks))
+		}
+	}
 
-	var rpcRespB struct {
-		Result *struct {
-			Task *sdka2a.Task `json:"task"`
-		} `json:"result"`
-		Error *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
+	// The HTTP path must see BOTH tasks.
+	listHTTP := listTasksOverHTTP(t, srv)
+	for _, id := range []sdka2a.TaskID{taskA.ID, taskBID} {
+		if !slices.Contains(listHTTP, id) {
+			t.Errorf("HTTP ListTasks cannot see task %s: got %v", id, listHTTP)
+		}
 	}
-	if err := json.NewDecoder(respB.Body).Decode(&rpcRespB); err != nil {
-		t.Fatalf("decode SendMessage response (caller): %v", err)
-	}
-	if rpcRespB.Error != nil {
-		t.Fatalf("SendMessage (caller) failed: %s", rpcRespB.Error.Message)
-	}
-	if rpcRespB.Result == nil || rpcRespB.Result.Task == nil {
-		t.Fatalf("expected a task result for task B, got %+v", rpcRespB.Result)
-	}
-	taskBID := rpcRespB.Result.Task.ID
 
-	// ListTasks as "internal" (direct call) must see only task A.
-	listInternal, err := srv.Handler().ListTasks(context.Background(), &sdka2a.ListTasksRequest{Tenant: "acme"})
+	// Cross-path non-List reads: GetTask must work in both directions.
+	if got := getTaskOverHTTP(t, srv, taskA.ID); got.ID != taskA.ID {
+		t.Errorf("GetTask over HTTP for in-process task %s returned %s", taskA.ID, got.ID)
+	}
+	gotB, err := srv.Handler().GetTask(context.Background(), &sdka2a.GetTaskRequest{Tenant: "acme", ID: taskBID})
 	if err != nil {
-		t.Fatalf("ListTasks (internal caller): %v", err)
+		t.Fatalf("GetTask (in-process) for HTTP-created task %s: %v", taskBID, err)
 	}
-	if !containsTaskID(listInternal.Tasks, taskA.ID) {
-		t.Errorf("internal caller cannot see its own task %s: got %v", taskA.ID, taskIDs(listInternal.Tasks))
+	if gotB.ID != taskBID {
+		t.Errorf("GetTask (in-process) for HTTP task %s returned %s", taskBID, gotB.ID)
 	}
-	if containsTaskID(listInternal.Tasks, taskBID) {
-		t.Errorf("internal caller can see caller's task %s — ownership isolation broken: got %v", taskBID, taskIDs(listInternal.Tasks))
+}
+
+// TestRecoveredTask_ReachableOverHTTP asserts that a task created over HTTP
+// before a restart is still reachable over HTTP after crash recovery re-creates
+// it in the a2asrv task store. Recovery attaches its own CallContext, so it must
+// claim the same owner identity authInterceptor grants HTTP callers — otherwise
+// a task parked before a restart (the INPUT_REQUIRED resume flow is the concrete
+// casualty) becomes invisible to the wire client that has to reach it.
+func TestRecoveredTask_ReachableOverHTTP(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: skipping in -short mode")
 	}
 
-	// ListTasks as "caller" (HTTP with valid token) must see only task B.
-	bodyList := `{"jsonrpc":"2.0","id":2,"method":"ListTasks","params":{"tenant":"acme"}}`
-	reqList, _ := http.NewRequest(http.MethodPost, srv.BaseURL()+"/invoke", strings.NewReader(bodyList)) //nolint:noctx
-	reqList.Header.Set("Content-Type", "application/json")
-	reqList.Header.Set("Authorization", "Bearer "+testToken)
-	respList, err := http.DefaultClient.Do(reqList)
+	addr, err := address.New("ceo", "acme")
 	if err != nil {
-		t.Fatalf("POST ListTasks (caller): %v", err)
+		t.Fatalf("address.New: %v", err)
 	}
-	defer respList.Body.Close()
+	store, err := supervisor.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	newServer := func() *transa2a.Server {
+		t.Helper()
+		sup := supervisor.New(supervisor.Config{
+			Addr:     addr,
+			Provider: &fake.Provider{ReturnTaskID: "task-1"},
+			Store:    store,
+		})
+		srv, newErr := transa2a.New(sup, testToken)
+		if newErr != nil {
+			t.Fatalf("transport/a2a.New: %v", newErr)
+		}
+		t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+		return srv
+	}
 
-	var rpcRespList struct {
-		Result *sdka2a.ListTasksResponse `json:"result"`
-		Error  *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
+	// Before the restart: an authenticated HTTP caller creates a task.
+	srvBefore := newServer()
+	taskID := sendMessageOverHTTP(t, srvBefore, "msg-recover", "before restart")
+	if err := srvBefore.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown pre-restart server: %v", err)
 	}
-	if err := json.NewDecoder(respList.Body).Decode(&rpcRespList); err != nil {
-		t.Fatalf("decode ListTasks response (caller): %v", err)
+
+	// Park it in INPUT_REQUIRED so RecoverOpenTasks re-registers it in the
+	// process-local (therefore now empty) a2asrv task store on restart.
+	if err := store.Save(addr, supervisor.TaskRecord{
+		TaskID: string(taskID),
+		State:  string(sdka2a.TaskStateInputRequired),
+		Input:  "before restart",
+		Owner:  string(addr),
+	}); err != nil {
+		t.Fatalf("park task as INPUT_REQUIRED: %v", err)
 	}
-	if rpcRespList.Error != nil {
-		t.Fatalf("ListTasks (caller) failed: %s", rpcRespList.Error.Message)
+
+	// Restart: transa2a.New runs recovery over the same supervisor store.
+	srvAfter := newServer()
+
+	if got := getTaskOverHTTP(t, srvAfter, taskID); got.ID != taskID {
+		t.Errorf("GetTask over HTTP after recovery returned %s, want %s", got.ID, taskID)
 	}
-	if rpcRespList.Result == nil {
-		t.Fatal("expected a ListTasksResponse result, got nil")
-	}
-	if !containsTaskID(rpcRespList.Result.Tasks, taskBID) {
-		t.Errorf("caller cannot see its own task %s: got %v", taskBID, taskIDs(rpcRespList.Result.Tasks))
-	}
-	if containsTaskID(rpcRespList.Result.Tasks, taskA.ID) {
-		t.Errorf("caller can see internal's task %s — ownership isolation broken: got %v", taskA.ID, taskIDs(rpcRespList.Result.Tasks))
+	if ids := listTasksOverHTTP(t, srvAfter); !slices.Contains(ids, taskID) {
+		t.Errorf("recovered task %s is invisible to an authenticated HTTP caller: got %v", taskID, ids)
 	}
 }
 
