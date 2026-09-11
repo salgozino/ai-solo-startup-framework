@@ -1,10 +1,11 @@
 // Package opencode_test contains threat-matrix RED tests for the OpenCode adapter.
 // These tests cover the provider-subprocess threat cases:
-//   (a) argv-as-slice: shell metacharacters in input are literal data, never interpreted
-//   (b) hung child killed after ctx deadline → FAILED
-//   (c) oversized output truncated with marker before parse
-//   (d) non-zero exit → failure outcome, not success
-//   (e) --pure always present; content prepended only when system_prompt is set
+//
+//	(a) argv-as-slice: shell metacharacters in input are literal data, never interpreted
+//	(b) hung child killed after ctx deadline → FAILED
+//	(c) oversized output truncated with marker before parse
+//	(d) non-zero exit → failure outcome, not success
+//	(e) --pure always present; content prepended only when system_prompt is set
 //
 // Tests use a helper binary (built from testdata/fakeopencode) that simulates opencode CLI
 // exit behavior without requiring a real opencode installation.

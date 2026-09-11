@@ -73,12 +73,12 @@ func TestFSM_DrainFromWorking(t *testing.T) {
 
 func TestFSM_RecoveringToIdle(t *testing.T) {
 	f := newFSM()
-	f.ready()          // STARTING → IDLE
-	f.recover()        // IDLE → RECOVERING
+	f.ready()   // STARTING → IDLE
+	f.recover() // IDLE → RECOVERING
 	if f.current() != StateRecovering {
 		t.Fatalf("expected RECOVERING, got %s", f.current())
 	}
-	f.ready()          // RECOVERING → IDLE
+	f.ready() // RECOVERING → IDLE
 	if f.current() != StateIdle {
 		t.Fatalf("expected IDLE after second ready(), got %s", f.current())
 	}

@@ -15,11 +15,11 @@ import (
 
 // stubSupervisor implements ui.Supervisor for tests.
 type stubSupervisor struct {
-	state       string
-	tasks       []ui.TaskRecord
-	verdErr     error // if non-nil, PostVerdict returns this error
-	sendErr     error // if non-nil, SendTask returns this error
-	sendCalled  bool  // set to true after SendTask is called
+	state      string
+	tasks      []ui.TaskRecord
+	verdErr    error // if non-nil, PostVerdict returns this error
+	sendErr    error // if non-nil, SendTask returns this error
+	sendCalled bool  // set to true after SendTask is called
 }
 
 func (s *stubSupervisor) StatusStr() string { return s.state }
@@ -386,5 +386,3 @@ func TestSendTaskEmptyMessage(t *testing.T) {
 		t.Fatal("SendTask should not be called for empty message")
 	}
 }
-
-

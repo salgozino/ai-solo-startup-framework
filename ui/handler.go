@@ -51,14 +51,15 @@ type sseClient struct {
 // UIHandler serves the embedded monitoring UI and exposes REST + SSE endpoints.
 //
 // Routes:
-//   GET  /            → serves index.html from the embedded FS
-//   GET  /style.css   → served by the file server (static)
-//   GET  /app.js      → served by the file server (static)
-//   GET  /api/tasks   → JSON list of current task records
-//   GET  /api/events  → SSE stream of state-change events
-//   POST /api/approve → approve an INPUT_REQUIRED task (409 otherwise)
-//   POST /api/reject  → reject an INPUT_REQUIRED task (409 otherwise)
-//   POST /api/send    → submit a new task with a message
+//
+//	GET  /            → serves index.html from the embedded FS
+//	GET  /style.css   → served by the file server (static)
+//	GET  /app.js      → served by the file server (static)
+//	GET  /api/tasks   → JSON list of current task records
+//	GET  /api/events  → SSE stream of state-change events
+//	POST /api/approve → approve an INPUT_REQUIRED task (409 otherwise)
+//	POST /api/reject  → reject an INPUT_REQUIRED task (409 otherwise)
+//	POST /api/send    → submit a new task with a message
 type UIHandler struct {
 	sup Supervisor
 
@@ -185,8 +186,6 @@ func (h *UIHandler) handleEvents(w http.ResponseWriter, r *http.Request) {
 // ErrEmptyMessage is returned by SendTask when the message is empty.
 var ErrEmptyMessage = errors.New("message must not be empty")
 
-
-
 // verdictRequest is the JSON body for /api/approve and /api/reject.
 type verdictRequest struct {
 	TaskID string `json:"task_id"`
@@ -259,5 +258,3 @@ var ErrNotInputRequired = errors.New("task is not in INPUT_REQUIRED state")
 func isNotInputRequired(err error) bool {
 	return errors.Is(err, ErrNotInputRequired)
 }
-
-

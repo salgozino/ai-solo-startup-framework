@@ -24,10 +24,10 @@ import (
 
 // Server wraps a net/http server that speaks A2A JSON-RPC on a loopback port.
 type Server struct {
-	sup      *supervisor.Supervisor
-	httpSrv  *http.Server
-	handler  a2asrv.RequestHandler
-	baseURL  string
+	sup     *supervisor.Supervisor
+	httpSrv *http.Server
+	handler a2asrv.RequestHandler
+	baseURL string
 }
 
 // tenantInterceptor rejects requests whose tenant field is empty.
@@ -137,11 +137,11 @@ func buildAgentCard(addr address.A2AAddress, baseURL string) *sdka2a.AgentCard {
 	iface.Tenant = addr.Tenant()
 
 	return &sdka2a.AgentCard{
-		Name:        addr.Name(),
-		Description: fmt.Sprintf("Supervisor for agent %q", addr),
+		Name:                addr.Name(),
+		Description:         fmt.Sprintf("Supervisor for agent %q", addr),
 		SupportedInterfaces: []*sdka2a.AgentInterface{iface},
-		DefaultInputModes:  []string{"text/plain"},
-		DefaultOutputModes: []string{"text/plain"},
+		DefaultInputModes:   []string{"text/plain"},
+		DefaultOutputModes:  []string{"text/plain"},
 		Capabilities: sdka2a.AgentCapabilities{
 			Streaming: true,
 		},

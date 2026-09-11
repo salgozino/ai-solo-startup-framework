@@ -48,12 +48,12 @@ func NewEngine() *Engine {
 
 // Classify runs the two-stage classification for intent emitted by an agent with role.
 //
-//   Stage 1 (capability): is role in policy[intent.Kind].AllowedRoles?
-//   If NO → HardDeny (terminal REJECTED, no escalation offered).
+//	Stage 1 (capability): is role in policy[intent.Kind].AllowedRoles?
+//	If NO → HardDeny (terminal REJECTED, no escalation offered).
 //
-//   Stage 2 (risk): if role is allowed, is the action risky?
-//   If YES → Escalate (INPUT_REQUIRED, no token until human approves).
-//   If NO  → Permit (mint a token, execute directly).
+//	Stage 2 (risk): if role is allowed, is the action risky?
+//	If YES → Escalate (INPUT_REQUIRED, no token until human approves).
+//	If NO  → Permit (mint a token, execute directly).
 func (e *Engine) Classify(intent ActionIntent, role string, policies map[string]config.Policy) ClassificationResult {
 	p, ok := policies[intent.Kind]
 	if !ok {
