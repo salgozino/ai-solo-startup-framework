@@ -33,8 +33,6 @@ func e2eConfig(tenant string) *config.CompanyConfig {
 	}
 }
 
-
-
 // TestE2E_MultiTenantIsolation materializes tenant "acme" then tenant "beta" alongside it
 // and asserts that no task from "acme" appears in "beta"'s ListTasks response.
 // Satisfies: company-as-code "Two tenants coexist without collision".

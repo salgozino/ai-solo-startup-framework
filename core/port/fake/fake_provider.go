@@ -50,14 +50,14 @@ type Provider struct {
 	mu sync.Mutex
 
 	// Configurable returns —— set before calling the fake.
-	ReturnTaskID     string
-	ReturnErr        error // returned by SendMessage, SendTask, ResolveAgent
-	ReturnAddress    address.A2AAddress
-	ReturnStream     []port.StreamEvent  // events emitted by SendMessageStream (Done appended automatically)
-	CompleteErr      error               // error returned by Complete (not CompleteError)
-	CompleteErrErr   error               // error returned by CompleteError
-	ReturnRunResult  port.ProviderResult // returned by RunTask
-	ReturnRunErr     error               // error returned by RunTask
+	ReturnTaskID    string
+	ReturnErr       error // returned by SendMessage, SendTask, ResolveAgent
+	ReturnAddress   address.A2AAddress
+	ReturnStream    []port.StreamEvent  // events emitted by SendMessageStream (Done appended automatically)
+	CompleteErr     error               // error returned by Complete (not CompleteError)
+	CompleteErrErr  error               // error returned by CompleteError
+	ReturnRunResult port.ProviderResult // returned by RunTask
+	ReturnRunErr    error               // error returned by RunTask
 
 	// Recorded calls — read after exercising the fake.
 	Calls     []CompletedCall

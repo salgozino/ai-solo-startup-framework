@@ -73,10 +73,10 @@ func Load(path string) (*CompanyConfig, error) {
 	// rawCompany mirrors CompanyConfig but agents use a generic map
 	// so we can detect unknown/forbidden fields before accepting them.
 	var raw struct {
-		Tenant     string             `yaml:"tenant"`
-		Agents     []map[string]any   `yaml:"agents"`
-		Gateways   GatewayConfig      `yaml:"gateways"`
-		RiskPolicy map[string]Policy  `yaml:"risk_policy"`
+		Tenant     string            `yaml:"tenant"`
+		Agents     []map[string]any  `yaml:"agents"`
+		Gateways   GatewayConfig     `yaml:"gateways"`
+		RiskPolicy map[string]Policy `yaml:"risk_policy"`
 	}
 
 	dec := yaml.NewDecoder(bytes.NewReader(data))
