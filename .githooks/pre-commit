@@ -1,0 +1,24 @@
+#!/bin/sh
+# pre-commit: reject commits that contain unformatted Go files.
+#
+# Checks only the .go files that are staged for this commit, so unformatted
+# files you have not staged yet do not block you.
+#
+# To install: git config core.hooksPath .githooks
+#             (run once per clone; stored in .git/config, not tracked)
+
+staged=$(git diff --cached --name-only --diff-filter=ACM | grep '\.go$')
+
+if [ -z "$staged" ]; then
+  exit 0
+fi
+
+unformatted=$(gofmt -l $staged)
+
+if [ -n "$unformatted" ]; then
+  echo "gofmt: the following staged files need formatting:"
+  echo "$unformatted" | sed 's/^/  /'
+  echo ""
+  echo "  Run: gofmt -w . && git add <files above>"
+  exit 1
+fi
