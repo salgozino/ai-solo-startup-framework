@@ -10,6 +10,13 @@ import (
 )
 
 func TestLoad(t *testing.T) {
+	// Resolved once so the "absolute system_prompt path used as-is" case can assert
+	// the exact value Load() must return unchanged.
+	absSystemPrompt, err := filepath.Abs("testdata/agents/ceo.md")
+	if err != nil {
+		t.Fatalf("resolve abs path for ceo.md: %v", err)
+	}
+
 	tests := []struct {
 		name        string
 		file        string
@@ -128,8 +135,10 @@ func TestLoad(t *testing.T) {
 					t.Fatal("expected at least one agent")
 				}
 				got := c.Agents[0].SystemPrompt
-				if !filepath.IsAbs(got) {
-					t.Errorf("SystemPrompt = %q; want absolute path", got)
+				// IsAbs alone does not prove "used as-is": joining basedir with an
+				// absolute path also yields an absolute path. Assert the exact value.
+				if got != absSystemPrompt {
+					t.Errorf("SystemPrompt = %q; want %q unchanged", got, absSystemPrompt)
 				}
 			},
 		},
@@ -151,11 +160,7 @@ func TestLoad(t *testing.T) {
 	// Creates a temp YAML that references an absolute path to the prompt file.
 	for i, tc := range tests {
 		if tc.name == "absolute system_prompt path used as-is" {
-			absPrompt, err := filepath.Abs("testdata/agents/ceo.md")
-			if err != nil {
-				t.Fatalf("resolve abs path for ceo.md: %v", err)
-			}
-			yaml := "tenant: acme\nagents:\n  - name: ceo\n    role: ceo\n    provider: claude-code\n    system_prompt: " + absPrompt + "\n"
+			yaml := "tenant: acme\nagents:\n  - name: ceo\n    role: ceo\n    provider: claude-code\n    system_prompt: " + absSystemPrompt + "\n"
 			tmpFile := filepath.Join(t.TempDir(), "abs_prompt.yaml")
 			if err := os.WriteFile(tmpFile, []byte(yaml), 0o644); err != nil {
 				t.Fatalf("write temp yaml: %v", err)
