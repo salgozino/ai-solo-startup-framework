@@ -195,7 +195,7 @@ func TestModelFlag_PassedToCLI(t *testing.T) {
 // returned error on non-zero exit (spec: Subprocess fails with stderr output).
 func TestRunTask_StderrInError(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "")
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "", "")
 
 	ctx := context.Background()
 	// "fail-stderr" causes fakeclaude to write a diagnostic line to stderr then exit 1.
@@ -216,7 +216,7 @@ func TestRunTask_StderrInError(t *testing.T) {
 // (spec: Subprocess fails with empty stderr).
 func TestRunTask_EmptyStderrOnFail(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "")
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "", "")
 
 	ctx := context.Background()
 	// "fail" exits 1 without writing anything to stderr.
@@ -255,7 +255,7 @@ func TestNoModelFlag_OmitsFlag(t *testing.T) {
 func TestProbeModel_ValidModel(t *testing.T) {
 	bin := helperBinary(t)
 	// model="good" → fakeclaude exits 0 (no special behaviour for "good").
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "good")
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "good", "")
 
 	ctx := context.Background()
 	if err := adapter.ProbeModel(ctx); err != nil {
@@ -269,7 +269,7 @@ func TestProbeModel_ValidModel(t *testing.T) {
 func TestProbeModel_BadModel(t *testing.T) {
 	bin := helperBinary(t)
 	// model="badmodel" → fakeclaude writes "issue with the selected model" to stderr and exits 1.
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "badmodel")
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "badmodel", "")
 
 	ctx := context.Background()
 	err := adapter.ProbeModel(ctx)
@@ -290,7 +290,7 @@ func TestProbeModel_BadModel(t *testing.T) {
 func TestProbeModel_Deadline(t *testing.T) {
 	bin := helperBinary(t)
 	// model="hangmodel" → fakeclaude sleeps indefinitely, simulating an unresponsive model.
-	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "hangmodel")
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "hangmodel", "")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
 	defer cancel()
