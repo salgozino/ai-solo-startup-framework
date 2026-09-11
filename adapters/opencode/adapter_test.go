@@ -245,7 +245,7 @@ func TestNoAgentFlag_OmitsFlag(t *testing.T) {
 // returned error on non-zero exit (spec: Subprocess fails with stderr output).
 func TestRunTask_StderrInError(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
 
 	ctx := context.Background()
 	// "fail-stderr" causes fakeopencode to write a diagnostic line to stderr then exit 1.
@@ -266,7 +266,7 @@ func TestRunTask_StderrInError(t *testing.T) {
 // (spec: Subprocess fails with empty stderr).
 func TestRunTask_EmptyStderrOnFail(t *testing.T) {
 	bin := helperBinary(t)
-	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
 
 	ctx := context.Background()
 	// "fail" exits 1 without writing anything to stderr.
