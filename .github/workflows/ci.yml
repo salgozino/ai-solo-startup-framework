@@ -30,6 +30,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Check formatting
+        run: |
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "These files need gofmt:"
+            echo "$files" | sed 's/^/  /'
+            echo ""
+            echo "Run: gofmt -w ."
+            exit 1
+          fi
+
       - name: Build
         run: go build ./...
 
