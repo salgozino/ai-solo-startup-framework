@@ -9,6 +9,7 @@ package a2a
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net"
@@ -86,7 +87,7 @@ func (a authInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext
 	}
 
 	token, hasPrefix := strings.CutPrefix(vals[0], bearerPrefix)
-	if !hasPrefix || token != a.token {
+	if !hasPrefix || subtle.ConstantTimeCompare([]byte(token), []byte(a.token)) != 1 {
 		return ctx, nil, fmt.Errorf("%w: invalid bearer token", sdka2a.ErrUnauthenticated)
 	}
 
