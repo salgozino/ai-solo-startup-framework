@@ -31,6 +31,9 @@ func TestLoad(t *testing.T) {
 				if c.Tenant != "acme" {
 					t.Errorf("Tenant = %q; want %q", c.Tenant, "acme")
 				}
+				if c.AuthTokenEnv != "A2A_AUTH_TOKEN" {
+					t.Errorf("AuthTokenEnv = %q; want %q", c.AuthTokenEnv, "A2A_AUTH_TOKEN")
+				}
 				if len(c.Agents) != 2 {
 					t.Fatalf("len(Agents) = %d; want 2", len(c.Agents))
 				}
@@ -58,6 +61,12 @@ func TestLoad(t *testing.T) {
 					t.Errorf("RiskPolicy[telegram_send].Risk = %q; want %q", p.Risk, "risky")
 				}
 			},
+		},
+		{
+			name:        "missing auth_token_env is rejected",
+			file:        "testdata/missing_auth_token_env.yaml",
+			wantErr:     true,
+			errContains: "auth_token_env",
 		},
 		{
 			name:        "inline token is rejected at load time",
@@ -160,7 +169,7 @@ func TestLoad(t *testing.T) {
 	// Creates a temp YAML that references an absolute path to the prompt file.
 	for i, tc := range tests {
 		if tc.name == "absolute system_prompt path used as-is" {
-			yaml := "tenant: acme\nagents:\n  - name: ceo\n    role: ceo\n    provider: claude-code\n    system_prompt: " + absSystemPrompt + "\n"
+			yaml := "tenant: acme\nauth_token_env: A2A_AUTH_TOKEN\nagents:\n  - name: ceo\n    role: ceo\n    provider: claude-code\n    system_prompt: " + absSystemPrompt + "\n"
 			tmpFile := filepath.Join(t.TempDir(), "abs_prompt.yaml")
 			if err := os.WriteFile(tmpFile, []byte(yaml), 0o644); err != nil {
 				t.Fatalf("write temp yaml: %v", err)

@@ -142,6 +142,9 @@ type wireOptions struct {
 	storeDir string
 	// stderr captures log/error output in tests; uses os.Stderr when nil.
 	stderr io.Writer
+	// authTokenOverride, when non-empty, bypasses env-var resolution for the A2A
+	// Bearer token. Used in tests to avoid setting environment variables.
+	authTokenOverride string
 }
 
 // materializeAgents creates and starts one agentRuntime per agent in cfg.
@@ -175,6 +178,16 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) ([]*agentRun
 	storeBase := opts.storeDir
 	if storeBase == "" {
 		storeBase = filepath.Join(os.TempDir(), "company-store-"+cfg.Tenant)
+	}
+
+	// Resolve the shared A2A auth token: use the override when provided (tests),
+	// otherwise look up the env var declared in company.yaml.
+	authToken := opts.authTokenOverride
+	if authToken == "" {
+		authToken = os.Getenv(cfg.AuthTokenEnv)
+	}
+	if authToken == "" {
+		return nil, fmt.Errorf("wire: env var %q (auth_token_env) is not set or empty", cfg.AuthTokenEnv)
 	}
 
 	runtimes := make([]*agentRuntime, 0, len(cfg.Agents))
@@ -226,7 +239,7 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) ([]*agentRun
 			PolicyConfig: cfg.RiskPolicy,
 		})
 
-		srv, err := transa2a.New(sup)
+		srv, err := transa2a.New(sup, authToken)
 		if err != nil {
 			return nil, fmt.Errorf("wire: transport for %q: %w", agCfg.Name, err)
 		}

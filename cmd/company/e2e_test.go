@@ -15,11 +15,14 @@ import (
 	"github.com/salgozino/ai-solo-startup-framework/core/port/fake"
 )
 
+const testToken = "test-bearer-token"
+
 // e2eConfig builds a minimal two-agent CompanyConfig for E2E tests.
 // The gateway is always injected as a fake via wireOptions.gatewayOverride.
 func e2eConfig(tenant string) *config.CompanyConfig {
 	return &config.CompanyConfig{
-		Tenant: tenant,
+		Tenant:       tenant,
+		AuthTokenEnv: "A2A_AUTH_TOKEN",
 		Agents: []config.AgentConfig{
 			{Name: "ceo", Role: "ceo", Provider: "claude-code"},
 			{Name: "worker", Role: "engineer", Provider: "claude-code"},
@@ -48,10 +51,11 @@ func TestE2E_MultiTenantIsolation(t *testing.T) {
 
 	acmeCfg := e2eConfig("acme")
 	acmeRuntimes, err := materializeAgents(acmeCfg, wireOptions{
-		providerOverride: acmeProvider,
-		gatewayOverride:  acmeGW,
-		storeDir:         t.TempDir(),
-		stderr:           &bytes.Buffer{},
+		providerOverride:  acmeProvider,
+		gatewayOverride:   acmeGW,
+		storeDir:          t.TempDir(),
+		stderr:            &bytes.Buffer{},
+		authTokenOverride: testToken,
 	})
 	if err != nil {
 		t.Fatalf("acme materializeAgents: %v", err)
@@ -69,10 +73,11 @@ func TestE2E_MultiTenantIsolation(t *testing.T) {
 
 	betaCfg := e2eConfig("beta")
 	betaRuntimes, err := materializeAgents(betaCfg, wireOptions{
-		providerOverride: betaProvider,
-		gatewayOverride:  betaGW,
-		storeDir:         t.TempDir(),
-		stderr:           &bytes.Buffer{},
+		providerOverride:  betaProvider,
+		gatewayOverride:   betaGW,
+		storeDir:          t.TempDir(),
+		stderr:            &bytes.Buffer{},
+		authTokenOverride: testToken,
 	})
 	if err != nil {
 		t.Fatalf("beta materializeAgents: %v", err)
@@ -139,10 +144,11 @@ func TestE2E_HardDeny_WorkerTelegramSend(t *testing.T) {
 	// Two-agent company: ceo + worker.
 	cfg := e2eConfig("acme")
 	runtimes, err := materializeAgents(cfg, wireOptions{
-		providerOverride: workerProvider,
-		gatewayOverride:  gw,
-		storeDir:         t.TempDir(),
-		stderr:           &bytes.Buffer{},
+		providerOverride:  workerProvider,
+		gatewayOverride:   gw,
+		storeDir:          t.TempDir(),
+		stderr:            &bytes.Buffer{},
+		authTokenOverride: testToken,
 	})
 	if err != nil {
 		t.Fatalf("materializeAgents: %v", err)
@@ -223,10 +229,11 @@ func TestE2E_RejectFlow_CEO_TelegramSend(t *testing.T) {
 
 	cfg := e2eConfig("acme")
 	runtimes, err := materializeAgents(cfg, wireOptions{
-		providerOverride: ceoProvider,
-		gatewayOverride:  gw,
-		storeDir:         t.TempDir(),
-		stderr:           &bytes.Buffer{},
+		providerOverride:  ceoProvider,
+		gatewayOverride:   gw,
+		storeDir:          t.TempDir(),
+		stderr:            &bytes.Buffer{},
+		authTokenOverride: testToken,
 	})
 	if err != nil {
 		t.Fatalf("materializeAgents: %v", err)
@@ -330,10 +337,11 @@ func TestE2E_ApproveFlow_CEO_TelegramSend(t *testing.T) {
 
 	cfg := e2eConfig("acme")
 	runtimes, err := materializeAgents(cfg, wireOptions{
-		providerOverride: ceoProvider,
-		gatewayOverride:  gw,
-		storeDir:         t.TempDir(),
-		stderr:           &bytes.Buffer{},
+		providerOverride:  ceoProvider,
+		gatewayOverride:   gw,
+		storeDir:          t.TempDir(),
+		stderr:            &bytes.Buffer{},
+		authTokenOverride: testToken,
 	})
 	if err != nil {
 		t.Fatalf("materializeAgents: %v", err)
@@ -455,10 +463,11 @@ func TestE2E_CallerRecipientIgnored(t *testing.T) {
 
 	cfg := e2eConfig("acme")
 	runtimes, err := materializeAgents(cfg, wireOptions{
-		providerOverride: ceoProvider,
-		gatewayOverride:  gw,
-		storeDir:         t.TempDir(),
-		stderr:           &bytes.Buffer{},
+		providerOverride:  ceoProvider,
+		gatewayOverride:   gw,
+		storeDir:          t.TempDir(),
+		stderr:            &bytes.Buffer{},
+		authTokenOverride: testToken,
 	})
 	if err != nil {
 		t.Fatalf("materializeAgents: %v", err)

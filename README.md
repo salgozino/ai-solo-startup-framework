@@ -22,6 +22,7 @@ Create a `company.yaml`:
 
 ```yaml
 tenant: acme
+auth_token_env: COMPANY_A2A_TOKEN   # required: Bearer token env var for the A2A transport
 
 agents:
   - name: ceo
@@ -105,6 +106,8 @@ When `system_prompt` is absent, agents start normally with only the isolation fl
 ### 3. Set environment variables
 
 ```bash
+# COMPANY_A2A_TOKEN authenticates every A2A request (Bearer auth) — required
+export COMPANY_A2A_TOKEN="your-a2a-bearer-token"
 export TELEGRAM_BOT_TOKEN="your-bot-token"
 export TELEGRAM_OWNER_ID="your-telegram-user-id"
 ```

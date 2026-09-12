@@ -1,10 +1,8 @@
 tenant: acme
-auth_token_env: A2A_AUTH_TOKEN
 agents:
   - name: ceo
     role: ceo
     provider: claude-code
-    system_prompt: agents/missing.md
 gateways:
   telegram:
     token_env: TELEGRAM_BOT_TOKEN

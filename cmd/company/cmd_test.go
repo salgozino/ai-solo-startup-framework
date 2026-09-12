@@ -46,6 +46,7 @@ gateways:
 func TestLoad_AcceptsEnvVarRef(t *testing.T) {
 	yaml := `
 tenant: acme
+auth_token_env: A2A_AUTH_TOKEN
 agents:
   - name: ceo
     role: ceo
@@ -87,7 +88,8 @@ func TestMaterialize_TwoAgentStartsTwoGoroutines(t *testing.T) {
 	gw := &fake.Gateway{}
 
 	cfg := &config.CompanyConfig{
-		Tenant: "acme",
+		Tenant:       "acme",
+		AuthTokenEnv: "A2A_AUTH_TOKEN",
 		Agents: []config.AgentConfig{
 			{Name: "ceo", Role: "ceo", Provider: "claude-code"},
 			{Name: "worker", Role: "engineer", Provider: "claude-code"},
@@ -96,10 +98,11 @@ func TestMaterialize_TwoAgentStartsTwoGoroutines(t *testing.T) {
 	}
 
 	runtimes, err := materializeAgents(cfg, wireOptions{
-		providerOverride: provider,
-		gatewayOverride:  gw,
-		storeDir:         t.TempDir(),
-		stderr:           &bytes.Buffer{},
+		providerOverride:  provider,
+		gatewayOverride:   gw,
+		storeDir:          t.TempDir(),
+		stderr:            &bytes.Buffer{},
+		authTokenOverride: "test-bearer-token",
 	})
 	if err != nil {
 		t.Fatalf("materializeAgents: %v", err)
