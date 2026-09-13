@@ -233,10 +233,12 @@ tenant's `company.yaml` materializes without collision). v1 = one tenant, but no
 **Two VERIFIED caveats from the SDK:**
 1. `Tenant` is `omitempty`, so an empty tenant is indistinguishable from an absent one. Since our key's
    second segment must never be empty, a `CallInterceptor` rejects `req.Tenant == ""` at the edge.
-2. The tenant is **client-asserted, not authenticated.** It is a routing and partition key only, never
-   an authorization boundary on its own. Authorization pairs it with `CallContext.User`. Writing this
-   down because treating a client-supplied string as a security boundary is the classic multi-tenant
-   breach.
+2. The tenant is client-asserted on the wire, but `tenantInterceptor` (`transport/a2a/server.go`)
+   validates it against the tenant this server instance is actually bound to (`sup.Addr().Tenant()`)
+   before any handler runs; any mismatch is rejected outright. That makes tenant a security boundary
+   at the single-server level — one process still serves exactly one tenant, so this is not a
+   multi-tenant identity/claims system, but a client can no longer forge a different tenant and have
+   it routed or stored under that value (issue #9).
 
 Server side the value arrives as `ExecutorContext.Tenant`; `a2aclient.NewFromCard` propagates it
 outbound automatically, so the spec §8.3.2 client MUST is satisfied without custom transport code.

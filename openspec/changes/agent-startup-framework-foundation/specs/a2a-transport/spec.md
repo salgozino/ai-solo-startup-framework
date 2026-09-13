@@ -47,12 +47,14 @@ Each supervisor MUST support `SendMessage`, `GetTask`, `ListTasks`, `CancelTask`
 
 Every A2A request MUST carry a `tenant` value, and a supervisor MUST reject any request whose
 tenant is present-but-empty at the transport edge, because an empty and an absent tenant are
-otherwise indistinguishable.
+otherwise indistinguishable. The claimed tenant MUST also exactly match the tenant the receiving
+supervisor is bound to; any other non-empty tenant MUST be rejected as a forgery attempt rather
+than routed elsewhere, because tenant is a security boundary, not just a storage key.
 
-#### Scenario: A request with a non-empty tenant is accepted
+#### Scenario: A request matching the supervisor's own tenant is accepted
 
-- GIVEN a client sends a `SendMessage` request with `tenant: acme`
-- WHEN the supervisor receives it
+- GIVEN a supervisor is bound to tenant `acme`
+- WHEN a client sends a `SendMessage` request with `tenant: acme`
 - THEN the request is accepted and routed under the `acme` tenant
 
 #### Scenario: A request with an empty tenant is rejected at the edge
@@ -61,6 +63,13 @@ otherwise indistinguishable.
 - WHEN the supervisor receives it
 - THEN the request is rejected before it reaches task processing, and no task is created or
   modified under any tenant
+
+#### Scenario: A request claiming a different tenant is rejected
+
+- GIVEN a supervisor is bound to tenant `acme`
+- WHEN a client sends a `SendMessage` request with `tenant: evil-corp`
+- THEN the request is rejected before it reaches task processing, and no task is created or
+  modified under the `evil-corp` tenant
 
 ### Requirement: Push Notifications Stream Task State in Real Time
 

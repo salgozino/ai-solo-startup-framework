@@ -4,7 +4,9 @@
 //   - GET  /.well-known/agent-card.json — public Agent Card
 //
 // The CallInterceptor embedded here rejects any request whose tenant field is
-// empty before task processing begins (satisfies spec: "empty tenant rejected").
+// empty, or whose tenant does not match the tenant this server instance is
+// bound to, before task processing begins (satisfies spec: "empty tenant
+// rejected" and issue #9: "tenant must be a security boundary").
 package a2a
 
 import (
@@ -32,17 +34,25 @@ type Server struct {
 	baseURL string
 }
 
-// tenantInterceptor rejects requests whose tenant field is empty.
-// An empty and absent tenant are indistinguishable in the A2A wire format
-// (both serialize as omitempty), so we must reject empty at the edge.
+// tenantInterceptor rejects requests whose tenant field is empty, and
+// requests whose claimed tenant does not match the tenant this server
+// instance is bound to. An empty and absent tenant are indistinguishable in
+// the A2A wire format (both serialize as omitempty), so we must reject empty
+// at the edge. Each Server is permanently bound to a single tenant (one
+// machine, one tenant at a time — see authenticatedUserID), so any other
+// non-empty tenant claim is a forgery attempt, not a routing choice.
 type tenantInterceptor struct {
 	a2asrv.PassthroughCallInterceptor
+	tenant string
 }
 
 // Before implements a2asrv.CallInterceptor.
-func (tenantInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
+func (t tenantInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
 	if callCtx.Tenant() == "" {
 		return ctx, nil, fmt.Errorf("%w: tenant must not be empty", sdka2a.ErrInvalidParams)
+	}
+	if callCtx.Tenant() != t.tenant {
+		return ctx, nil, fmt.Errorf("%w: tenant %q does not match this server's tenant", sdka2a.ErrInvalidParams, callCtx.Tenant())
 	}
 	return ctx, nil, nil
 }
@@ -101,6 +111,9 @@ func New(sup *supervisor.Supervisor, authToken string) (*Server, error) {
 	if authToken == "" {
 		return nil, fmt.Errorf("a2a server: auth_token must not be empty")
 	}
+	if sup.Addr().Tenant() == "" {
+		return nil, fmt.Errorf("a2a server: supervisor has no tenant configured")
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -119,7 +132,7 @@ func New(sup *supervisor.Supervisor, authToken string) (*Server, error) {
 	})
 
 	handler := a2asrv.NewHandler(sup,
-		a2asrv.WithCallInterceptors(authInterceptor{token: authToken}, tenantInterceptor{}),
+		a2asrv.WithCallInterceptors(authInterceptor{token: authToken}, tenantInterceptor{tenant: sup.Addr().Tenant()}),
 		a2asrv.WithTaskStore(store),
 	)
 
