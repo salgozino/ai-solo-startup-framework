@@ -42,6 +42,32 @@ func TestNew_EmptyToken_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestNew_EmptySupervisorTenant_ReturnsError asserts that New() fails fast
+// with a clear error when the supervisor's address has no tenant configured,
+// instead of silently constructing a server that rejects every request with
+// a confusing "tenant does not match" error. address.A2AAddress is `type
+// A2AAddress string` (exported, not a bare-string-hiding wrapper), so any
+// code in the module — including this test — can assign a name-only or empty
+// string to it directly, bypassing the address.New/Parse tenant-non-empty
+// guards. This simulates a Supervisor built from a hand-constructed
+// supervisor.Config with a misconfigured Addr.
+func TestNew_EmptySupervisorTenant_ReturnsError(t *testing.T) {
+	var addr address.A2AAddress = "ceo" // no "/tenant" suffix: Tenant() == ""
+	store, err := supervisor.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	sup := supervisor.New(supervisor.Config{
+		Addr:     addr,
+		Provider: &fake.Provider{ReturnTaskID: "task-1"},
+		Store:    store,
+	})
+	_, newErr := transa2a.New(sup, testToken)
+	if newErr == nil {
+		t.Fatal("expected error from New() with empty supervisor tenant, got nil")
+	}
+}
+
 func newTestSupervisor(t *testing.T, name, tenant string) (*supervisor.Supervisor, *transa2a.Server) {
 	t.Helper()
 	if testing.Short() {
@@ -232,63 +258,165 @@ func TestAgentCardDiscoverable(t *testing.T) {
 	}
 }
 
-// TestEmptyTenantRejected asserts that a SendMessage request with an empty
-// tenant is rejected before task processing begins
-// (satisfies "Empty tenant rejected at the edge").
-func TestEmptyTenantRejected(t *testing.T) {
+// TestTenantInterceptor_Before covers the tenantInterceptor.Before logic:
+// an empty tenant and a tenant that does not match the server's own tenant
+// are both rejected with codeInvalidParams, while a tenant matching the
+// server's own tenant is accepted (satisfies "Empty tenant rejected at the
+// edge" and issue #9: "tenant must be a security boundary, not just a
+// storage key").
+func TestTenantInterceptor_Before(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration: skipping in -short mode")
 	}
 
 	_, srv := newTestSupervisor(t, "ceo", "acme")
 
-	// Build a JSON-RPC SendMessage request with tenant:"" (empty). The
-	// Authorization header is valid so this exercises tenantInterceptor,
-	// not authInterceptor.
-	body := `{
-		"jsonrpc":"2.0",
-		"id":1,
-		"method":"SendMessage",
-		"params":{
-			"tenant":"",
-			"message":{
-				"messageId":"msg-1",
-				"role":"ROLE_USER",
-				"parts":[{"text":"hello"}]
+	cases := []struct {
+		name    string
+		tenant  string
+		wantErr bool
+	}{
+		{name: "empty tenant", tenant: "", wantErr: true},
+		{name: "mismatched tenant", tenant: "evil-corp", wantErr: true},
+		{name: "matching tenant", tenant: "acme", wantErr: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// The Authorization header is valid so this exercises
+			// tenantInterceptor, not authInterceptor.
+			body := fmt.Sprintf(`{
+				"jsonrpc":"2.0",
+				"id":1,
+				"method":"SendMessage",
+				"params":{
+					"tenant":%q,
+					"message":{
+						"messageId":"msg-1",
+						"role":"ROLE_USER",
+						"parts":[{"text":"hello"}]
+					}
+				}
+			}`, tc.tenant)
+
+			req, _ := http.NewRequest(http.MethodPost, srv.BaseURL()+"/invoke", strings.NewReader(body)) //nolint:noctx
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+testToken)
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("POST: %v", err)
 			}
-		}
-	}`
+			defer resp.Body.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, srv.BaseURL()+"/invoke", strings.NewReader(body)) //nolint:noctx
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+testToken)
+			var rpcResp struct {
+				Error *struct {
+					Code    int    `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("POST: %v", err)
+			if tc.wantErr {
+				if rpcResp.Error == nil {
+					t.Fatalf("expected JSON-RPC error response for tenant %q, got success", tc.tenant)
+				}
+				if rpcResp.Error.Code != codeInvalidParams {
+					t.Errorf("expected error code %d, got code %d: %s",
+						codeInvalidParams, rpcResp.Error.Code, rpcResp.Error.Message)
+				}
+				return
+			}
+			if rpcResp.Error != nil {
+				t.Errorf("expected success for tenant %q, got JSON-RPC error: %s", tc.tenant, rpcResp.Error.Message)
+			}
+		})
 	}
-	defer resp.Body.Close()
+}
 
-	// The JSON-RPC response should be an error (interceptor rejected).
-	var rpcResp struct {
-		Error *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
+// TestTenantInterceptor_Before_BoundToSupervisorOwnTenant asserts that the
+// interceptor's accepted tenant tracks the specific supervisor's own address
+// (sup.Addr().Tenant()) rather than a fixed literal. Every other test in this
+// file binds a server to tenant "acme", so a mutant hardcoding
+// tenantInterceptor{tenant: "acme"} in New() would still pass the rest of the
+// suite; binding this server to "beta" instead and checking that "beta" is
+// accepted while the otherwise-universal "acme" is rejected closes that gap.
+func TestTenantInterceptor_Before_BoundToSupervisorOwnTenant(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: skipping in -short mode")
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
-		t.Fatalf("decode response: %v", err)
+
+	_, srv := newTestSupervisor(t, "ceo", "beta")
+
+	cases := []struct {
+		name    string
+		tenant  string
+		wantErr bool
+	}{
+		{name: "own tenant (beta) accepted", tenant: "beta", wantErr: false},
+		{name: "other server's tenant (acme) rejected", tenant: "acme", wantErr: true},
 	}
-	if rpcResp.Error == nil {
-		t.Fatal("expected JSON-RPC error response for empty tenant, got success")
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{
+				"jsonrpc":"2.0",
+				"id":1,
+				"method":"SendMessage",
+				"params":{
+					"tenant":%q,
+					"message":{
+						"messageId":"msg-1",
+						"role":"ROLE_USER",
+						"parts":[{"text":"hello"}]
+					}
+				}
+			}`, tc.tenant)
+
+			req, _ := http.NewRequest(http.MethodPost, srv.BaseURL()+"/invoke", strings.NewReader(body)) //nolint:noctx
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+testToken)
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("POST: %v", err)
+			}
+			defer resp.Body.Close()
+
+			var rpcResp struct {
+				Error *struct {
+					Code    int    `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+
+			if tc.wantErr {
+				if rpcResp.Error == nil {
+					t.Fatalf("expected JSON-RPC error response for tenant %q, got success", tc.tenant)
+				}
+				if rpcResp.Error.Code != codeInvalidParams {
+					t.Errorf("expected error code %d, got code %d: %s",
+						codeInvalidParams, rpcResp.Error.Code, rpcResp.Error.Message)
+				}
+				return
+			}
+			if rpcResp.Error != nil {
+				t.Errorf("expected success for tenant %q, got JSON-RPC error: %s", tc.tenant, rpcResp.Error.Message)
+			}
+		})
 	}
 }
 
 // codeUnauthenticated is a2a-go's JSON-RPC error code for a2a.ErrUnauthenticated
 // (see internal/jsonrpc.codeToError). codeInvalidParams is the code for
 // a2a.ErrInvalidParams, which is what tenantInterceptor returns for an empty
-// tenant. Distinguishing these two codes is what lets a test prove which
-// interceptor rejected a request.
+// tenant and for a mismatched tenant. Distinguishing these two codes is what
+// lets a test prove which interceptor rejected a request.
 const (
 	codeUnauthenticated = -31401
 	codeInvalidParams   = -32602
