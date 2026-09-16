@@ -51,7 +51,7 @@ three implementers simultaneously; all four Go source files **must land in the s
 Spec coverage: `provider-adapter` delta spec — all four scenarios (supervisor reads capabilities,
 operator override, provider default, fake.Provider conforms).
 
-### 1.1 [RED] Write failing capability contract tests in `core/port/contract_test.go`
+### 1.1 [x] [RED] Write failing capability contract tests in `core/port/contract_test.go`
 
 Add to `core/port/contract_test.go` (package `port_test`):
 
@@ -67,7 +67,7 @@ Expected failure: **compile error** — `port.ProviderCapabilities` undefined;
 
 Command: `go test ./core/port/...`
 
-### 1.2 [RED] Write failing supervisor budget-override tests in `core/supervisor/supervisor_test.go`
+### 1.2 [x] [RED] Write failing supervisor budget-override tests in `core/supervisor/supervisor_test.go`
 
 Add to `core/supervisor/supervisor_test.go` (package `supervisor` — internal, can call unexported helpers):
 
@@ -84,7 +84,7 @@ Expected failure: **compile error** — `port.ProviderCapabilities` undefined; `
 
 Command: `go test ./core/supervisor/...`
 
-### 1.3 [GREEN] Add `ProviderCapabilities` and `Capabilities()` to `core/port/provider.go`
+### 1.3 [x] [GREEN] Add `ProviderCapabilities` and `Capabilities()` to `core/port/provider.go`
 
 Modify `core/port/provider.go`:
 
@@ -103,7 +103,7 @@ Modify `core/port/provider.go`:
 After this change `go test ./core/port/...` fails: `fake.Provider` is missing `Capabilities()`
 (caught by `var _ port.Provider = (*Provider)(nil)` at line 69 of `fake_provider.go`).
 
-### 1.4 [GREEN] Implement `Capabilities()` on `fake.Provider` in `core/port/fake/fake_provider.go`
+### 1.4 [x] [GREEN] Implement `Capabilities()` on `fake.Provider` in `core/port/fake/fake_provider.go`
 
 Modify `core/port/fake/fake_provider.go`:
 
@@ -116,7 +116,7 @@ The `var _ port.Provider = (*Provider)(nil)` check at line 69 must remain unchan
 
 Command: `go test ./core/port/...` — capability tests now green.
 
-### 1.5 [GREEN] Add `Capabilities()` stub to `adapters/claudecode/adapter.go`
+### 1.5 [x] [GREEN] Add `Capabilities()` stub to `adapters/claudecode/adapter.go`
 
 Modify `adapters/claudecode/adapter.go`:
 
@@ -126,7 +126,7 @@ Modify `adapters/claudecode/adapter.go`:
 
 Command: `go test ./adapters/claudecode/...`
 
-### 1.6 [GREEN] Add `Capabilities()` stub to `adapters/opencode/adapter.go`
+### 1.6 [x] [GREEN] Add `Capabilities()` stub to `adapters/opencode/adapter.go`
 
 Modify `adapters/opencode/adapter.go`:
 
@@ -136,7 +136,7 @@ Modify `adapters/opencode/adapter.go`:
 
 Command: `go test ./adapters/opencode/...`
 
-### 1.7 [GREEN] Add `effectiveBudget()` to `core/supervisor/supervisor.go` and wire into context assembly
+### 1.7 [x] [GREEN] Add `effectiveBudget()` to `core/supervisor/supervisor.go` and wire into context assembly
 
 Modify `core/supervisor/supervisor.go`:
 
@@ -150,7 +150,7 @@ After this change, `TestEffectiveBudget_*` tests must be green.
 
 Command: `go test ./core/supervisor/...`
 
-### 1.8 [VERIFY] Full Slice 1 green check
+### 1.8 [x] [VERIFY] Full Slice 1 green check
 
 Run:
 ```
