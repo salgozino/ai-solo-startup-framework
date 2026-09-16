@@ -366,7 +366,7 @@ Threat-matrix coverage: Subprocess argv (token absent), Ephemeral config (mtime 
 > **Size note**: Phase 3 is estimated at 560–720 authored lines. `size:exception` expected from
 > maintainer before apply.
 
-- [ ] 3.1 [RED] Write failing MCP-aware tests for claudecode adapter in `adapters/claudecode/adapter_test.go`
+- [x] 3.1 [RED] Write failing MCP-aware tests for claudecode adapter in `adapters/claudecode/adapter_test.go`
 
 Add to `adapters/claudecode/adapter_test.go` (package `claudecode_test`):
 
@@ -386,7 +386,7 @@ registry or server URL.
 
 Command: `go test ./adapters/claudecode/...`
 
-- [ ] 3.2 [RED] Write failing threat-matrix tests for claudecode adapter in `adapters/claudecode/adapter_test.go`
+- [x] 3.2 [RED] Write failing threat-matrix tests for claudecode adapter in `adapters/claudecode/adapter_test.go`
 
 Add:
 
@@ -408,7 +408,7 @@ Expected failure: compile error.
 
 Command: `go test ./adapters/claudecode/...`
 
-- [ ] 3.3 [RED] Write failing MCP-aware tests for opencode adapter in `adapters/opencode/adapter_test.go`
+- [x] 3.3 [RED] Write failing MCP-aware tests for opencode adapter in `adapters/opencode/adapter_test.go`
 
 Add to `adapters/opencode/adapter_test.go` (package `opencode_test`):
 
@@ -431,7 +431,7 @@ Expected failure: compile error.
 
 Command: `go test ./adapters/opencode/...`
 
-- [ ] 3.4 [GREEN] Extend `adapters/claudecode/testdata/fakeclaude/main.go` to call MCP when instructed
+- [x] 3.4 [GREEN] Extend `adapters/claudecode/testdata/fakeclaude/main.go` to call MCP when instructed
 
 Modify `adapters/claudecode/testdata/fakeclaude/main.go`:
 
@@ -446,7 +446,7 @@ Modify `adapters/claudecode/testdata/fakeclaude/main.go`:
 - When env var `FAKECLAUDE_DUMP_ARGV=1` is set: write `os.Args` as newline-separated strings
   to the path given in `FAKECLAUDE_ARGV_FILE` before producing normal output (for token-absent-from-argv test).
 
-- [ ] 3.5 [GREEN] Extend `adapters/opencode/testdata/fakeopencode/main.go` to call MCP when instructed
+- [x] 3.5 [GREEN] Extend `adapters/opencode/testdata/fakeopencode/main.go` to call MCP when instructed
 
 Modify `adapters/opencode/testdata/fakeopencode/main.go`:
 
@@ -459,7 +459,7 @@ Modify `adapters/opencode/testdata/fakeopencode/main.go`:
      text-only extraction by the adapter).
 - When `FAKEOPENCODE_DUMP_ARGV=1`: write argv to `FAKEOPENCODE_ARGV_FILE`.
 
-- [ ] 3.6 [GREEN] Modify `adapters/claudecode/adapter.go` — add MCP mint/drain and ephemeral config
+- [x] 3.6 [GREEN] Modify `adapters/claudecode/adapter.go` — add MCP mint/drain and ephemeral config
 
 Modify `adapters/claudecode/adapter.go`:
 
@@ -501,7 +501,7 @@ Modify `adapters/claudecode/adapter.go`:
 - Replace zero-stub `Capabilities()` with real implementation: return
   `port.ProviderCapabilities{ContextBudget: a.contextBudget, ActionKinds: a.policyActionKinds}`.
 
-- [ ] 3.7 [GREEN] Modify `adapters/opencode/adapter.go` — add MCP mint/drain and ephemeral config
+- [x] 3.7 [GREEN] Modify `adapters/opencode/adapter.go` — add MCP mint/drain and ephemeral config
 
 Modify `adapters/opencode/adapter.go`:
 
@@ -520,7 +520,7 @@ Modify `adapters/opencode/adapter.go`:
   5. After `cmd.Wait()`: if `handle != nil`, call `handle.Drain()` → `result.ActionIntents`.
 - Replace zero-stub `Capabilities()` with real implementation.
 
-- [ ] 3.8 [GREEN] Modify `cmd/company/wire.go` — start MCP server before agents
+- [x] 3.8 [GREEN] Modify `cmd/company/wire.go` — start MCP server before agents
 
 Modify `cmd/company/wire.go`:
 
@@ -539,7 +539,7 @@ Modify `cmd/company/wire.go`:
 - The returned `[]*agentRuntime` should include the server reference or the caller receives it
   via a new return value / via `opts.mcpServer` for shutdown.
 
-- [ ] 3.9 [GREEN] Update `cmd/company/main.go` — add MCP server shutdown to lifecycle
+- [x] 3.9 [GREEN] Update `cmd/company/main.go` — add MCP server shutdown to lifecycle
 
 Modify `cmd/company/main.go` in `runMaterialize`:
 
@@ -548,7 +548,7 @@ Modify `cmd/company/main.go` in `runMaterialize`:
 - Add `defer mcpSrv.Shutdown(ctx)` to the shutdown sequence alongside `uiSrv.Shutdown`.
 - The MCP server startup log line: `fmt.Fprintf(opts.stderr, "mcp: server listening on %s\n", srv.Addr())`.
 
-- [ ] 3.10 [VERIFY] Full Slice 3 verification
+- [x] 3.10 [VERIFY] Full Slice 3 verification
 
 Run:
 ```
