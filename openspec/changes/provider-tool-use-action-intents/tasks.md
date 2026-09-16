@@ -565,7 +565,7 @@ build without errors.
 
 ## Phase 4: Cleanup and Documentation
 
-- [ ] 4.1 Document opencode `--format json` version floor
+- [x] 4.1 Document opencode `--format json` version floor
 
 Modify `AGENTS.md` (or a new `docs/adapter-compatibility.md` if preferred) to add:
 
@@ -575,7 +575,7 @@ Modify `AGENTS.md` (or a new `docs/adapter-compatibility.md` if preferred) to ad
 This closes design Open Questions item: "opencode --format json version floor unverified upstream —
 document '1.18.31 verified'".
 
-- [ ] 4.2 Final full regression check
+- [x] 4.2 Final full regression check
 
 Run:
 ```

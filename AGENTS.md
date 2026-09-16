@@ -18,4 +18,18 @@ go test ./...
 
 It's very important to run all the tests before pushing a PR. There is a CI that will block the PRs, so we should validate before pushing.
 
+# Provider CLI compatibility
+
+The provider adapters drive external agent CLIs as subprocesses and parse their structured output.
+
+- **opencode**: the adapter requires `--format json` NDJSON output support. Verified locally with
+  `opencode 1.18.31`; no upstream confirmation of the exact floor is available as of this change.
+  Older versions that do not emit NDJSON on `--format json` will yield empty parsed output.
+- **claude**: the adapter requires `--mcp-config`, `--strict-mcp-config`, and
+  `--output-format stream-json`. It never requests `--json-schema`.
+
+Both adapters receive MCP configuration ephemerally per invocation — claude through a `0600`
+temp file removed on exit, opencode through the subprocess-scoped `OPENCODE_CONFIG_CONTENT`
+environment variable. Neither adapter reads or writes a persisted user config.
+
 
