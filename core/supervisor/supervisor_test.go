@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/salgozino/ai-solo-startup-framework/core/port"
+	"github.com/salgozino/ai-solo-startup-framework/core/port/fake"
 )
 
 // fsm lifecycle tests
@@ -140,6 +141,50 @@ func TestAssembleBoundedContext_EmptyMessages(t *testing.T) {
 	}
 	if len(bc.Messages) != 0 {
 		t.Errorf("expected 0 messages, got %d", len(bc.Messages))
+	}
+}
+
+// effectiveBudget tests
+
+// TestEffectiveBudget_OverrideTakesPrecedence verifies that a non-zero Config.ContextBudget
+// takes precedence over the provider's declared budget.
+// Spec: provider-adapter – "An operator-configured override takes precedence".
+func TestEffectiveBudget_OverrideTakesPrecedence(t *testing.T) {
+	s := &Supervisor{cfg: Config{
+		ContextBudget: 200,
+		Provider: &fake.Provider{
+			ReturnCapabilities: port.ProviderCapabilities{ContextBudget: 8000},
+		},
+	}}
+	if got := s.effectiveBudget(); got != 200 {
+		t.Fatalf("expected 200 (operator override), got %d", got)
+	}
+}
+
+// TestEffectiveBudget_FallsBackToProvider verifies that a zero Config.ContextBudget causes
+// the supervisor to use the provider's declared budget.
+// Spec: provider-adapter – "The provider-declared budget is the default absent an override".
+func TestEffectiveBudget_FallsBackToProvider(t *testing.T) {
+	s := &Supervisor{cfg: Config{
+		ContextBudget: 0,
+		Provider: &fake.Provider{
+			ReturnCapabilities: port.ProviderCapabilities{ContextBudget: 8000},
+		},
+	}}
+	if got := s.effectiveBudget(); got != 8000 {
+		t.Fatalf("expected 8000 (provider fallback), got %d", got)
+	}
+}
+
+// TestEffectiveBudget_BothZero verifies that when both Config.ContextBudget and the
+// provider's declared budget are zero, effectiveBudget returns 0 (no cap).
+func TestEffectiveBudget_BothZero(t *testing.T) {
+	s := &Supervisor{cfg: Config{
+		ContextBudget: 0,
+		Provider:      &fake.Provider{},
+	}}
+	if got := s.effectiveBudget(); got != 0 {
+		t.Fatalf("expected 0 (no cap), got %d", got)
 	}
 }
 

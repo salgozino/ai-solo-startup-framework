@@ -396,6 +396,18 @@ func (s *Supervisor) executeWithPolicy(
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil) //nolint
 }
 
+// effectiveBudget returns the context budget to use for context assembly.
+// When Config.ContextBudget is non-zero (operator override), it takes precedence.
+// When zero, the provider's declared ContextBudget is used (zero means no cap).
+// Spec: provider-adapter – "An operator-configured override takes precedence";
+// "The provider-declared budget is the default absent an override".
+func (s *Supervisor) effectiveBudget() int {
+	if s.cfg.ContextBudget != 0 {
+		return s.cfg.ContextBudget
+	}
+	return s.cfg.Provider.Capabilities().ContextBudget
+}
+
 // executeDelegation is the A2A peer-routing path (used when no PolicyEngine is configured).
 // The supervisor resolves a peer agent and delegates the task via SendMessage.
 func (s *Supervisor) executeDelegation(
@@ -408,7 +420,7 @@ func (s *Supervisor) executeDelegation(
 
 	// Assemble bounded context from prior messages.
 	history := buildHistory(execCtx)
-	bc := assembleBoundedContext(history, s.cfg.ContextBudget)
+	bc := assembleBoundedContext(history, s.effectiveBudget())
 
 	// Dispatch to the provider (A2A network client).
 	targetAddr, err := s.cfg.Provider.ResolveAgent(ctx, roleOf(s.cfg.Addr))
