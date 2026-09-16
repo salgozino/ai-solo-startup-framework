@@ -195,10 +195,26 @@ type wireOptions struct {
 	mcpServer *transmcp.Server
 }
 
+// mcpServerAddr safely reads srv.Addr(), converting a panic from a never-Start()ed
+// server (nil listener) into a plain error. *transmcp.Server.Addr() dereferences its
+// listener directly, so a test (or future caller) that injects a *transmcp.Server via
+// wireOptions.mcpServer without calling Start() first would otherwise crash
+// materializeAgents. This guard lives here — at the injection site in cmd/company —
+// rather than inside transport/mcp, which is Phase 2 / PR 2 code and must stay
+// untouched on this branch.
+func mcpServerAddr(srv *transmcp.Server) (addr string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("mcp server address unavailable (server was not started): %v", r)
+		}
+	}()
+	return srv.Addr(), nil
+}
+
 // materializeAgents creates and starts one agentRuntime per agent in cfg.
 // The CEO supervisor's runtime is returned first if len(runtimes) > 0.
 // Callers are responsible for shutting down all returned servers on exit.
-func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) ([]*agentRuntime, error) {
+func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []*agentRuntime, err error) {
 	if opts.stderr == nil {
 		opts.stderr = os.Stderr
 	}
@@ -208,14 +224,14 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) ([]*agentRun
 	if opts.gatewayOverride != nil {
 		gw = opts.gatewayOverride
 	} else if tg := cfg.Gateways.Telegram; tg != nil {
-		var err error
 		recipientEnv := tg.RecipientEnv
 		if recipientEnv == "" {
 			recipientEnv = "TELEGRAM_OWNER_ID"
 		}
-		gw, err = telegram.New(tg.TokenEnv, recipientEnv)
-		if err != nil {
-			return nil, fmt.Errorf("wire: telegram gateway: %w", err)
+		var gwErr error
+		gw, gwErr = telegram.New(tg.TokenEnv, recipientEnv)
+		if gwErr != nil {
+			return nil, fmt.Errorf("wire: telegram gateway: %w", gwErr)
 		}
 	}
 
@@ -225,13 +241,33 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) ([]*agentRun
 	// Start the single long-lived MCP server before any supervisor is marked ready.
 	// Bind failure aborts materialize immediately — no adapter is invoked
 	// (spec: mcp-tool-server "Server startup failure aborts materialize").
+	ownedMCP := opts.mcpServer == nil
 	mcpSrv := opts.mcpServer
-	if mcpSrv == nil {
+	if ownedMCP {
 		mcpSrv = transmcp.New(cfg.Tenant, cfg.RiskPolicy, transmcp.NewRegistry())
-		if err := mcpSrv.Start("127.0.0.1:0"); err != nil {
-			return nil, fmt.Errorf("wire: mcp server: %w", err)
+		if startErr := mcpSrv.Start("127.0.0.1:0"); startErr != nil {
+			return nil, fmt.Errorf("wire: mcp server: %w", startErr)
 		}
-		fmt.Fprintf(opts.stderr, "mcp: server listening on %s\n", mcpSrv.Addr())
+	}
+
+	// Ensure the MCP server this call started is torn down on every error path out of
+	// this function. A server injected via opts.mcpServer is owned by the caller (tests)
+	// and must never be shut down here (threat: "MCP server leaks on partial materialize
+	// failure" — every return nil, err below this point previously left an owned,
+	// already-bound listener leaked on the unknown-provider, A2A-start-failure, and
+	// probe-failure paths).
+	defer func() {
+		if err != nil && ownedMCP && mcpSrv != nil {
+			_ = mcpSrv.Shutdown(context.Background())
+		}
+	}()
+
+	mcpAddr, addrErr := mcpServerAddr(mcpSrv)
+	if addrErr != nil {
+		return nil, fmt.Errorf("wire: mcp server: %w", addrErr)
+	}
+	if ownedMCP {
+		fmt.Fprintf(opts.stderr, "mcp: server listening on %s\n", mcpAddr)
 	}
 	mcpActionKinds := policyKindKeys(cfg.RiskPolicy)
 
@@ -251,7 +287,7 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) ([]*agentRun
 		return nil, fmt.Errorf("wire: env var %q (auth_token_env) is not set or empty", cfg.AuthTokenEnv)
 	}
 
-	runtimes := make([]*agentRuntime, 0, len(cfg.Agents))
+	runtimes = make([]*agentRuntime, 0, len(cfg.Agents))
 
 	for _, agCfg := range cfg.Agents {
 		addr, err := address.New(agCfg.Name, cfg.Tenant)
@@ -272,7 +308,7 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) ([]*agentRun
 			case "claude-code":
 				prov = claudecode.New("claude", claudecode.Options{
 					MCPRegistry:       &claudeRegistryMinter{reg: mcpSrv.Registry()},
-					MCPServerAddr:     mcpSrv.Addr(),
+					MCPServerAddr:     mcpAddr,
 					Tenant:            cfg.Tenant,
 					AgentName:         agCfg.Name,
 					PolicyActionKinds: mcpActionKinds,
@@ -280,7 +316,7 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) ([]*agentRun
 			case "opencode":
 				prov = opencode.New("opencode", opencode.Options{
 					MCPRegistry:       &opencodeRegistryMinter{reg: mcpSrv.Registry()},
-					MCPServerAddr:     mcpSrv.Addr(),
+					MCPServerAddr:     mcpAddr,
 					Tenant:            cfg.Tenant,
 					AgentName:         agCfg.Name,
 					PolicyActionKinds: mcpActionKinds,
