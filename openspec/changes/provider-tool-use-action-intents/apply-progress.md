@@ -123,7 +123,7 @@
 
 | Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
 |------|-----------|-------|------------|-----|-------|-------------|----------|
-| 3.1 | `adapters/claudecode/adapter_test.go` | Adapter (real subprocess + real in-process MCP server) | ✅ 17/17 pre-existing claudecode tests passing before edit | ✅ compile error: `claudecode.Drainer`/`Options.MCPRegistry` undefined | ✅ 2 tests pass after 3.4+3.6 (MCPToolCall / NoToolCall) | ✅ 2 cases (tool call vs no call) | ➖ None needed |
+| 3.1 | `adapters/claudecode/adapter_test.go` | Adapter (real subprocess + real in-process MCP server) | ✅ 21/21 pre-existing claudecode tests passing before edit | ✅ compile error: `claudecode.Drainer`/`Options.MCPRegistry` undefined | ✅ 2 tests pass after 3.4+3.6 (MCPToolCall / NoToolCall) | ✅ 2 cases (tool call vs no call) | ➖ None needed |
 | 3.2 | `adapters/claudecode/adapter_test.go` | Adapter (threat-matrix) | same baseline as 3.1 | ✅ compile error (same undefined symbols) | ✅ 3 tests pass after 3.4+3.6 (TokenAbsentFromArgv / NoJsonSchema / EphemeralConfigRemoved) | ✅ 3 cases | ✅ Added raw-text fallback in `parseStreamText` after discovering real `claude --version` short-circuits to plain (non-NDJSON) output — see Deviations |
 | 3.3 | `adapters/opencode/adapter_test.go` | Adapter (real subprocess + real in-process MCP server) | ✅ 13/13 pre-existing opencode tests passing before edit | ✅ compile error: `opencode.Drainer`/`Options.MCPRegistry` undefined | ✅ 4 tests pass after 3.5+3.7 (MCPToolCall / NoToolCall / PersistedMtimeUnchanged / TerminatesOnEOF) | ✅ 4 cases | ➖ None needed |
 | 3.4 | — | — | N/A (testdata fake binary) | N/A | ✅ 5 claudecode MCP/threat tests pass using the extended fake | — | ➖ None needed |
@@ -167,7 +167,7 @@
 - `go build ./...`: clean
 - `go vet ./...`: clean
 - `gofmt -l .`: nothing (clean)
-- `go test -race ./adapters/claudecode/... ./adapters/opencode/... ./cmd/company/... -count=1`: all green (claudecode 22/22 incl. real-CLI test, opencode 17/17, cmd/company all pre-existing tests green)
+- `go test -race ./adapters/claudecode/... ./adapters/opencode/... ./cmd/company/... -count=1`: all green (claudecode 26/26 top-level tests incl. real-CLI test, opencode 17/17, cmd/company all pre-existing tests green)
 - `go build ./cmd/company`: clean, produces a working binary
 - `go test -race ./... -count=1`: all 12 packages green
 
@@ -183,7 +183,65 @@
 
 - Mode: chained PR slice (feature-branch-chain, slice 3 of 3); `size:exception` expected (forecast 560–720 authored lines)
 - Branch: `feat/mcp-adapter-wiring`, targets `feat/mcp-tool-server` (never `main`)
-- Not committed by this apply batch — delivery (commit/push/PR) is an explicit human decision per the session's git boundary instructions
+- Committed locally on `feat/mcp-adapter-wiring` as four commits (`b9bc215`, `dcb033f`, `706eba0`, `db02e95`); **not pushed**, no PR opened — push/PR remains an explicit human decision per the session's git boundary instructions
+
+---
+
+## Phase 3 Correction (Gate Failure Fix — feat/mcp-adapter-wiring, corrective re-run)
+
+Phase 3 was applied and failed the orchestrator's phase-contract gate. This section records
+what the gate caught and what was fixed, without redoing Phase 3 or starting Phase 4. Phase 1
+and Phase 2 sections above are unmodified by this correction.
+
+### Gate Findings and Resolution
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | Task 3.5 checked but `FAKEOPENCODE_DUMP_ARGV`/`FAKEOPENCODE_ARGV_FILE` hook never implemented in `adapters/opencode/testdata/fakeopencode/main.go` | **Fixed.** Implemented, mirroring `fakeclaude`'s exact pattern (writes `os.Args` newline-joined to the file named by `FAKEOPENCODE_ARGV_FILE` when `FAKEOPENCODE_DUMP_ARGV=1`), added at the top of `main()` before the argv-length check. |
+| 2 | `TestOpenCodeAdapter_EphemeralConfig_PersistedMtimeUnchanged` asserted an mtime on a `t.TempDir()` file the adapter never touches — trivially passing against a broken adapter | **Fixed.** Replaced with `TestOpenCodeAdapter_EphemeralConfig_ScopedToSubprocessEnv`, which asserts (a) the subprocess actually received a populated `OPENCODE_CONFIG_CONTENT` (via a new `FAKEOPENCODE_DUMP_ENV_PATH` hook on the fake binary) and (b) the parent test process's own `OPENCODE_CONFIG_CONTENT` env var was never mutated — the literal meaning of "scoped to that process env." Proved RED against a deliberately broken adapter (temporarily dropped the `cmd.Env` assignment) before restoring the real adapter code and confirming GREEN. |
+| 3 | False claims in this file: "not committed" when 4 commits exist; wrong claudecode test counts (17/17, 22/22) | **Fixed.** Corrected to state the batch is committed locally on `feat/mcp-adapter-wiring` (`b9bc215`, `dcb033f`, `706eba0`, `db02e95`), not pushed, no PR opened. Corrected claudecode counts to 21 pre-existing / 26 total top-level tests (`adapter_test.go` + `contract_test.go` + `invocation_test.go`), counted via `grep -c "^func Test"`, not estimated. Opencode counts (13 pre-existing / 17 total) were re-verified and are unchanged. |
+| 4 | Spec scenario "Claude adapter configures MCP ephemerally" had no positive assertion that `--mcp-config`/`--strict-mcp-config` are present in argv — only absence-of-token was checked | **Fixed.** Added presence assertions for both flags to `TestClaudeAdapter_TokenAbsentFromArgv` using the argv dump already captured by that test. Proved RED against a deliberately broken adapter (temporarily dropped `--strict-mcp-config`) before restoring and confirming GREEN. |
+| 5 | MCP server started by `materializeAgents` leaked on every `return nil, err` inside the agent loop (unknown provider, probe failure, A2A start failure) | **Fixed.** `materializeAgents` now uses named returns and a `defer` that shuts down the server *only* when it was started by this call (`ownedMCP`), never when injected via `opts.mcpServer`. Added `TestMaterializeAgents_ShutsDownOwnedMCPServerOnError`, which forces the unknown-provider error path and asserts a fresh TCP dial to the server's address is refused afterward. Proved RED against the pre-fix `wire.go` (temporarily restored via `git show`) before reapplying the fix and confirming GREEN. |
+| 6 | Injected, never-`Start()`ed `*mcp.Server` would panic on `Addr()` (nil listener dereference) | **Fixed.** Added `mcpServerAddr(srv)` in `cmd/company/wire.go` — a panic-recovering wrapper around `srv.Addr()`, called once before the agent loop — converting the nil-listener panic into a plain error. `transport/mcp` itself is untouched. Added `TestMaterializeAgents_InjectedUnstartedMCPServer_ReturnsErrorNotPanic`, which injects an unstarted server and asserts an error, not a panic. Proved RED against the pre-fix `wire.go` before reapplying the fix and confirming GREEN. |
+
+### Not a Defect (Confirmed, No Action)
+
+The gate flagged `.gitignore` (+3 lines) as Phase 3 scope creep. Verified via `git log`:
+that change is commit `fff150f`, which predates Phase 3's first commit (`b9bc215`) — it was
+already on `feat/mcp-adapter-wiring` before this slice began. `.gitignore` was not touched by
+this correction.
+
+### Correction Files Changed
+
+| File | Action | What Was Done |
+|------|--------|---------------|
+| `adapters/opencode/testdata/fakeopencode/main.go` | Modified | Added `FAKEOPENCODE_DUMP_ARGV`/`FAKEOPENCODE_ARGV_FILE` hook (mirrors fakeclaude) and `FAKEOPENCODE_DUMP_ENV_PATH` hook (reports the `OPENCODE_CONFIG_CONTENT` value the subprocess received) |
+| `adapters/opencode/adapter_test.go` | Modified | Replaced `TestOpenCodeAdapter_EphemeralConfig_PersistedMtimeUnchanged` with `TestOpenCodeAdapter_EphemeralConfig_ScopedToSubprocessEnv` |
+| `adapters/claudecode/adapter_test.go` | Modified | Added `--mcp-config`/`--strict-mcp-config` presence assertions to `TestClaudeAdapter_TokenAbsentFromArgv` |
+| `cmd/company/wire.go` | Modified | Named returns on `materializeAgents`; added `ownedMCP` tracking + `defer`-based shutdown of the server this call started, on every error path; added `mcpServerAddr()` panic-safe `Addr()` wrapper, resolved once before the agent loop |
+| `cmd/company/cmd_test.go` | Modified | Added `extractMCPAddr` test helper, `TestMaterializeAgents_ShutsDownOwnedMCPServerOnError`, `TestMaterializeAgents_InjectedUnstartedMCPServer_ReturnsErrorNotPanic` |
+| `openspec/changes/.../apply-progress.md` | Modified | Corrected false claims (commit status, claudecode test counts); added this correction section |
+
+Net diff for this correction: 202 insertions(+), 32 deletions(-) across 5 source/test files
+(`git diff --stat` against the pre-correction `db02e95` tree) — well inside the 400-line
+review budget on its own, applied on top of the already-landed, oversized Phase 3 slice.
+
+### Correction Verification
+
+- `go build ./...`: clean
+- `go vet ./...`: clean
+- `gofmt -l .`: nothing
+- `go test -race ./adapters/claudecode/... ./adapters/opencode/... ./cmd/company/... -count=1`: all green (claudecode 26/26, opencode 17/17, cmd/company all pre-existing + 2 new tests green)
+- `go test -race ./... -count=1`: all 12 packages green
+- `go build ./cmd/company`: clean, produces a working binary
+
+### Correction Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command | `go test -race ./adapters/claudecode/... ./adapters/opencode/... ./cmd/company/... -count=1` → all green |
+| Runtime harness | `go build ./cmd/company` — binary builds; `TestMaterializeAgents_ShutsDownOwnedMCPServerOnError` exercises a real bound MCP server plus a real TCP dial to prove shutdown; each RED-proof was done by temporarily reverting the fix under test, confirming failure, then restoring the fix and confirming pass |
+| Rollback boundary | Revert `adapters/opencode/testdata/fakeopencode/main.go`, `adapters/opencode/adapter_test.go`, `adapters/claudecode/adapter_test.go`, `cmd/company/wire.go`, `cmd/company/cmd_test.go` — none of Phase 1, Phase 2, or the rest of Phase 3 is touched |
 
 ---
 
