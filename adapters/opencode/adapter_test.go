@@ -22,7 +22,36 @@ import (
 	"time"
 
 	"github.com/salgozino/ai-solo-startup-framework/adapters/opencode"
+	"github.com/salgozino/ai-solo-startup-framework/config"
+	transportmcp "github.com/salgozino/ai-solo-startup-framework/transport/mcp"
 )
+
+// registryMinter adapts *transportmcp.Registry to opencode.TokenMinter.
+// See adapters/claudecode/adapter_test.go's registryMinter for why this wrapper
+// (with an exported Drainer/TokenMinter pair) is required instead of the
+// unexported interfaces tasks.md originally sketched: Go requires a method's
+// declared return type to be identical to the interface's declared return
+// type, and unexported types cannot be named outside their declaring package.
+type registryMinter struct {
+	reg *transportmcp.Registry
+}
+
+func (m *registryMinter) Mint(tenant, agent, taskID string, exp time.Time) (string, opencode.Drainer) {
+	return m.reg.Mint(tenant, agent, taskID, exp)
+}
+
+// startTestMCPServer starts an in-process MCP server with a single
+// "telegram_send" tool for tenant "acme" and registers cleanup.
+func startTestMCPServer(t *testing.T) (*transportmcp.Server, *transportmcp.Registry) {
+	t.Helper()
+	registry := transportmcp.NewRegistry()
+	srv := transportmcp.New("acme", map[string]config.Policy{"telegram_send": {}}, registry)
+	if err := srv.Start("127.0.0.1:0"); err != nil {
+		t.Fatalf("start mcp server: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	return srv, registry
+}
 
 // helperBinary builds the fakeopencode binary once per test run and returns its path.
 func helperBinary(t *testing.T) string {
@@ -288,3 +317,117 @@ func TestRunTask_EmptyStderrOnFail(t *testing.T) {
 // model from missing prompt (both produce the same generic error). The opencode
 // adapter intentionally does not implement modelProber; materializeAgents skips
 // the probe for it. See adapters/opencode/adapter.go for details.
+
+// ---- Phase 3: MCP tool use and action intent emission (spec: provider-action-intent-emission) ----
+
+// TestOpenCodeAdapter_MCPToolCall_PopulatesActionIntents proves the real adapter path is wired:
+// a fake opencode binary performs an actual MCP tools/call over HTTP against a running server,
+// and RunTask returns the intent recorded by the server's sink — not a hand-constructed fixture.
+func TestOpenCodeAdapter_MCPToolCall_PopulatesActionIntents(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	adapter := opencode.New(bin, opencode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "", "")
+
+	t.Setenv("FAKEOPENCODE_CALL_MCP", "1")
+
+	result, err := adapter.RunTask(context.Background(), "task-mcp", "hello")
+	if err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if len(result.ActionIntents) != 1 {
+		t.Fatalf("expected 1 action intent, got %d: %+v", len(result.ActionIntents), result.ActionIntents)
+	}
+	if result.ActionIntents[0].Kind != "telegram_send" {
+		t.Errorf("expected Kind=telegram_send, got %q", result.ActionIntents[0].Kind)
+	}
+}
+
+// TestOpenCodeAdapter_NoToolCall_EmptyIntents verifies that a completed invocation which
+// never calls the MCP tool yields empty ActionIntents and a nil error.
+func TestOpenCodeAdapter_NoToolCall_EmptyIntents(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	adapter := opencode.New(bin, opencode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "", "")
+
+	result, err := adapter.RunTask(context.Background(), "task-no-mcp", "hello")
+	if err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if len(result.ActionIntents) != 0 {
+		t.Errorf("expected empty ActionIntents, got %+v", result.ActionIntents)
+	}
+}
+
+// TestOpenCodeAdapter_EphemeralConfig_PersistedMtimeUnchanged verifies spec "OpenCode adapter
+// configures MCP ephemerally": a persisted config file the adapter never touches keeps its
+// original mtime, proving MCP configuration is scoped to the subprocess env only.
+func TestOpenCodeAdapter_EphemeralConfig_PersistedMtimeUnchanged(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	persistedPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(persistedPath, []byte(`{"existing":"config"}`), 0o600); err != nil {
+		t.Fatalf("write persisted config: %v", err)
+	}
+	before, err := os.Stat(persistedPath)
+	if err != nil {
+		t.Fatalf("stat before: %v", err)
+	}
+
+	adapter := opencode.New(bin, opencode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "", "")
+
+	if _, err := adapter.RunTask(context.Background(), "task-persisted", "hello"); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	after, err := os.Stat(persistedPath)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
+	}
+	if !before.ModTime().Equal(after.ModTime()) {
+		t.Errorf("persisted opencode config mtime changed: before=%v after=%v", before.ModTime(), after.ModTime())
+	}
+}
+
+// TestOpenCodeAdapter_TerminatesOnEOF_NoHang verifies spec "OpenCode adapter terminates its
+// reader on process exit, not a sentinel event": RunTask must return promptly once the
+// subprocess closes stdout, without waiting on any dedicated terminal event line.
+func TestOpenCodeAdapter_TerminatesOnEOF_NoHang(t *testing.T) {
+	bin := helperBinary(t)
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := adapter.RunTask(context.Background(), "task-eof", "hello")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunTask: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("RunTask did not return within 1 second — reader hung waiting for a sentinel event")
+	}
+}

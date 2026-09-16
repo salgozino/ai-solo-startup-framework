@@ -10,14 +10,52 @@
 // can verify the isolation flag was passed correctly.
 // When --model is present, it prepends "model:<model>|" to the output.
 // When --agent is present, it prepends "agent:<agent>|" to the output.
+// --format consumes its value but is otherwise ignored; the adapter always parses
+// stdout as NDJSON now, so the default-case output below is always wrapped as a
+// single `{"type":"text","text":"..."}` line.
+//
+// MCP-related test hook: FAKEOPENCODE_CALL_MCP=1 reads OPENCODE_CONFIG_CONTENT
+// (the env var the adapter sets, mirroring what the real opencode CLI reads),
+// extracts the server URL and bearer token, and performs a real MCP tools/call
+// for "telegram_send" before producing normal output.
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/oauth2"
 )
+
+// mcpConfigFile mirrors the MCP config JSON the opencode adapter puts in
+// OPENCODE_CONFIG_CONTENT: {"mcpServers": {"framework": {"type": "http", "url": "...",
+// "headers": {"Authorization": "Bearer ..."}}}}.
+type mcpConfigFile struct {
+	MCPServers map[string]mcpServerEntry `json:"mcpServers"`
+}
+
+type mcpServerEntry struct {
+	Type    string            `json:"type"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers"`
+}
+
+// staticOAuthHandler feeds a fixed bearer token to the go-sdk MCP client.
+type staticOAuthHandler struct{ token string }
+
+func (h *staticOAuthHandler) TokenSource(_ context.Context) (oauth2.TokenSource, error) {
+	return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: h.token}), nil
+}
+
+func (h *staticOAuthHandler) Authorize(_ context.Context, _ *http.Request, _ *http.Response) error {
+	return nil
+}
 
 func main() {
 	if len(os.Args) < 3 {
@@ -25,8 +63,8 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Args: [run [--pure] [--model <model>] [--agent <agent>]] <input>
-	// Parse flags, then take the last argument as the prompt.
+	// Args: [run [--pure] [--model <model>] [--agent <agent>] [--format <format>]] <input>
+	// Parse flags, then take the last positional argument as the prompt.
 	var model string
 	var agent string
 	pure := false
@@ -46,6 +84,10 @@ func main() {
 			if i+1 < len(os.Args) {
 				agent = os.Args[i+1]
 				i++
+			}
+		case "--format":
+			if i+1 < len(os.Args) {
+				i++ // e.g. "json"; the fake always emits NDJSON now
 			}
 		default:
 			input = os.Args[i]
@@ -83,9 +125,14 @@ func main() {
 		time.Sleep(24 * time.Hour)
 
 	case "large":
+		// Emit 1 MiB of raw data so the adapter's io.LimitReader is triggered and takes
+		// the truncation-marker path (which bypasses NDJSON parsing entirely).
 		fmt.Print(strings.Repeat("x", 1<<20))
 
 	default:
+		if os.Getenv("FAKEOPENCODE_CALL_MCP") == "1" {
+			callMCPTool()
+		}
 		output := input
 		if agent != "" {
 			output = "agent:" + agent + "|" + output
@@ -96,6 +143,57 @@ func main() {
 		if pure {
 			output = "pure:1|" + output
 		}
-		fmt.Print(output)
+		emitNDJSONText(output)
 	}
+}
+
+// emitNDJSONText prints a single NDJSON line: {"type":"text","text":"..."},
+// mimicking a simplified slice of the real opencode --format json event stream
+// for text-only extraction by the adapter.
+func emitNDJSONText(text string) {
+	line, err := json.Marshal(map[string]string{"type": "text", "text": text})
+	if err != nil {
+		fmt.Print(text)
+		return
+	}
+	fmt.Println(string(line))
+}
+
+// callMCPTool reads the MCP config the adapter placed in OPENCODE_CONFIG_CONTENT,
+// connects to the MCP server it describes, and calls the "telegram_send" tool once.
+// Errors are swallowed — the test asserts on the server-side sink, not this call.
+func callMCPTool() {
+	raw := os.Getenv("OPENCODE_CONFIG_CONTENT")
+	if raw == "" {
+		return
+	}
+	var cfg mcpConfigFile
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return
+	}
+	entry, ok := cfg.MCPServers["framework"]
+	if !ok {
+		return
+	}
+	token := strings.TrimPrefix(entry.Headers["Authorization"], "Bearer ")
+
+	transport := &gomcp.StreamableClientTransport{
+		Endpoint:     entry.URL,
+		OAuthHandler: &staticOAuthHandler{token: token},
+	}
+	client := gomcp.NewClient(&gomcp.Implementation{Name: "fakeopencode"}, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		return
+	}
+	defer session.Close()
+
+	_, _ = session.CallTool(ctx, &gomcp.CallToolParams{
+		Name:      "telegram_send",
+		Arguments: map[string]any{"body": "test-intent"},
+	})
 }
