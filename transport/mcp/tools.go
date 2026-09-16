@@ -1,0 +1,135 @@
+package mcp
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"sort"
+
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/salgozino/ai-solo-startup-framework/config"
+	"github.com/salgozino/ai-solo-startup-framework/core/port"
+)
+
+// buildToolDescription returns the spec-mandated disclosure text for a tool of the given kind.
+// Design Decision C: description must state it records intent and does not execute.
+func buildToolDescription(kind string) string {
+	return fmt.Sprintf(
+		"Calling this tool records an intent for %s for later policy classification and does not execute the action. Call once; the outcome is unavailable this turn.",
+		kind,
+	)
+}
+
+// dedupeKey builds a deterministic key from token + kind + a sorted-key JSON encoding of payload.
+// Identical (token, kind, payload) triples produce the same key, enabling repeat-call detection.
+func dedupeKey(token, kind string, payload map[string]any) string {
+	keys := make([]string, 0, len(payload))
+	for k := range payload {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	sorted := make(map[string]any, len(payload))
+	for _, k := range keys {
+		sorted[k] = payload[k]
+	}
+	b, _ := json.Marshal(sorted)
+	return token + "\x00" + kind + "\x00" + string(b)
+}
+
+// buildAckResult returns the acknowledge-without-execute CallToolResult.
+// isError is always false (errors trigger model retry; we want acknowledgment).
+// Design Decision C text format and StructuredContent layout.
+func buildAckResult(receipt, kind string, duplicate bool) *gomcp.CallToolResult {
+	msg := fmt.Sprintf(
+		"Recorded intent %s as %s. Pending classification; outcome unavailable this turn. Do not call again. Report as requested, not completed.",
+		kind, receipt,
+	)
+	return &gomcp.CallToolResult{
+		Content: []gomcp.Content{
+			&gomcp.TextContent{Text: msg},
+		},
+		StructuredContent: map[string]any{
+			"receipt":   receipt,
+			"kind":      kind,
+			"status":    "recorded",
+			"duplicate": duplicate,
+		},
+	}
+}
+
+// newReceipt generates a random 16-byte base64url receipt ID.
+func newReceipt() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("mcp: tools: crypto/rand.Read: %v", err))
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// registerTools adds one MCP tool per policy key to srv.
+// Each tool handler:
+//  1. Resolves the bearer token from TokenInfo.UserID to an invocation.
+//  2. Checks dedupe (returns existing receipt if this is a repeat call).
+//  3. Records the ActionIntent in the invocation sink.
+//  4. Returns the acknowledge-without-execute result.
+func registerTools(srv *gomcp.Server, tenant string, policies map[string]config.Policy, registry *Registry) {
+	for kind := range policies {
+		kind := kind // capture loop variable
+
+		gomcp.AddTool(srv,
+			&gomcp.Tool{
+				Name:        kind,
+				Description: buildToolDescription(kind),
+			},
+			func(ctx context.Context, req *gomcp.CallToolRequest, args map[string]any) (*gomcp.CallToolResult, any, error) {
+				if req.Extra == nil || req.Extra.TokenInfo == nil {
+					return &gomcp.CallToolResult{
+						IsError: true,
+						Content: []gomcp.Content{&gomcp.TextContent{Text: "no auth token present"}},
+					}, nil, nil
+				}
+
+				token := req.Extra.TokenInfo.UserID
+				inv, err := registry.Resolve(token, tenant)
+				if err != nil {
+					// Tenant mismatch or other resolve failure.
+					return &gomcp.CallToolResult{
+						IsError: true,
+						Content: []gomcp.Content{&gomcp.TextContent{Text: "unauthorized: " + err.Error()}},
+					}, nil, nil
+				}
+
+				dkey := dedupeKey(token, kind, args)
+
+				inv.mu.Lock()
+				existingReceipt, isDupe := inv.dedupe[dkey]
+				if isDupe {
+					inv.mu.Unlock()
+					return buildAckResult(existingReceipt, kind, true), nil, nil
+				}
+
+				// New invocation: record intent.
+				receipt := newReceipt()
+				inv.dedupe[dkey] = receipt
+				inv.mu.Unlock()
+
+				intent := port.ActionIntent{
+					Kind:    kind,
+					Payload: args,
+				}
+				if err := inv.sink.Record(intent); err != nil {
+					return &gomcp.CallToolResult{
+						IsError: true,
+						Content: []gomcp.Content{&gomcp.TextContent{Text: "intent sink full: " + err.Error()}},
+					}, nil, nil
+				}
+
+				return buildAckResult(receipt, kind, false), nil, nil
+			},
+		)
+	}
+}
