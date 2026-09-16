@@ -372,21 +372,28 @@ func TestOpenCodeAdapter_NoToolCall_EmptyIntents(t *testing.T) {
 	}
 }
 
-// TestOpenCodeAdapter_EphemeralConfig_PersistedMtimeUnchanged verifies spec "OpenCode adapter
-// configures MCP ephemerally": a persisted config file the adapter never touches keeps its
-// original mtime, proving MCP configuration is scoped to the subprocess env only.
-func TestOpenCodeAdapter_EphemeralConfig_PersistedMtimeUnchanged(t *testing.T) {
+// TestOpenCodeAdapter_EphemeralConfig_ScopedToSubprocessEnv verifies spec "OpenCode adapter
+// configures MCP ephemerally" / threat-matrix "OPENCODE_CONFIG_CONTENT scoped to that process
+// env": the adapter must deliver MCP configuration to the subprocess environment only — via
+// cmd.Env, never os.Setenv — so the parent (test) process is never mutated.
+//
+// This replaces an earlier version of this test that wrote a config.json into an
+// unrelated t.TempDir() and asserted its mtime was unchanged; nothing connected that path
+// to the adapter, so the assertion passed identically against a broken adapter that called
+// os.Setenv and rewrote a real persisted config file. The property actually required by the
+// spec/threat-matrix — subprocess-only scoping — is asserted directly here using the
+// FAKEOPENCODE_DUMP_ENV_PATH hook, which reports what OPENCODE_CONFIG_CONTENT value the
+// subprocess itself received.
+func TestOpenCodeAdapter_EphemeralConfig_ScopedToSubprocessEnv(t *testing.T) {
 	bin := helperBinary(t)
 	srv, registry := startTestMCPServer(t)
 
-	persistedPath := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(persistedPath, []byte(`{"existing":"config"}`), 0o600); err != nil {
-		t.Fatalf("write persisted config: %v", err)
+	if v := os.Getenv("OPENCODE_CONFIG_CONTENT"); v != "" {
+		t.Fatalf("test process already has OPENCODE_CONFIG_CONTENT set (test pollution): %q", v)
 	}
-	before, err := os.Stat(persistedPath)
-	if err != nil {
-		t.Fatalf("stat before: %v", err)
-	}
+
+	dumpFile := filepath.Join(t.TempDir(), "env-dump.txt")
+	t.Setenv("FAKEOPENCODE_DUMP_ENV_PATH", dumpFile)
 
 	adapter := opencode.New(bin, opencode.Options{
 		OutputLimit:   1 << 20,
@@ -396,16 +403,23 @@ func TestOpenCodeAdapter_EphemeralConfig_PersistedMtimeUnchanged(t *testing.T) {
 		AgentName:     "ceo",
 	}, "", "", "")
 
-	if _, err := adapter.RunTask(context.Background(), "task-persisted", "hello"); err != nil {
+	if _, err := adapter.RunTask(context.Background(), "task-env-scope", "hello"); err != nil {
 		t.Fatalf("RunTask: %v", err)
 	}
 
-	after, err := os.Stat(persistedPath)
+	// Property 1: the subprocess actually received a populated OPENCODE_CONFIG_CONTENT.
+	raw, err := os.ReadFile(dumpFile)
 	if err != nil {
-		t.Fatalf("stat after: %v", err)
+		t.Fatalf("read env dump: %v", err)
 	}
-	if !before.ModTime().Equal(after.ModTime()) {
-		t.Errorf("persisted opencode config mtime changed: before=%v after=%v", before.ModTime(), after.ModTime())
+	if !strings.Contains(string(raw), "mcpServers") {
+		t.Errorf("subprocess did not receive a populated OPENCODE_CONFIG_CONTENT: dump=%q", string(raw))
+	}
+
+	// Property 2: the parent (test) process environment was never mutated. This is
+	// precisely what "scoped to that process env" means — cmd.Env only, never os.Setenv.
+	if v := os.Getenv("OPENCODE_CONFIG_CONTENT"); v != "" {
+		t.Errorf("OPENCODE_CONFIG_CONTENT leaked into the parent process env: %q", v)
 	}
 }
 

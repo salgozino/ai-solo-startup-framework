@@ -444,6 +444,17 @@ func TestClaudeAdapter_TokenAbsentFromArgv(t *testing.T) {
 	if strings.Contains(string(raw), token) {
 		t.Errorf("bearer token leaked into subprocess argv: dump=%q", string(raw))
 	}
+
+	// Positive assertion (spec: "Claude adapter configures MCP ephemerally"): the adapter
+	// must actually pass --mcp-config and --strict-mcp-config when MCP is wired. Without
+	// this, a regression that silently dropped --strict-mcp-config (weakening the CLI to
+	// also read the user's real, persisted MCP config) would go undetected by this test.
+	if !strings.Contains(string(raw), "--mcp-config") {
+		t.Errorf("expected argv to contain --mcp-config; dump=%q", string(raw))
+	}
+	if !strings.Contains(string(raw), "--strict-mcp-config") {
+		t.Errorf("expected argv to contain --strict-mcp-config; dump=%q", string(raw))
+	}
 }
 
 // TestClaudeAdapter_NoJsonSchema_InArgv verifies spec "Claude adapter does not request

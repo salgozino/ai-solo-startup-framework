@@ -14,10 +14,18 @@
 // stdout as NDJSON now, so the default-case output below is always wrapped as a
 // single `{"type":"text","text":"..."}` line.
 //
-// MCP-related test hook: FAKEOPENCODE_CALL_MCP=1 reads OPENCODE_CONFIG_CONTENT
-// (the env var the adapter sets, mirroring what the real opencode CLI reads),
-// extracts the server URL and bearer token, and performs a real MCP tools/call
-// for "telegram_send" before producing normal output.
+// MCP-related test hooks (mirrors fakeclaude's hooks so both fakes stay consistent):
+//
+//	FAKEOPENCODE_DUMP_ARGV=1 + FAKEOPENCODE_ARGV_FILE=<path>
+//	    writes os.Args (newline-separated) to <path> before any other behavior.
+//	FAKEOPENCODE_DUMP_ENV_PATH=<path>
+//	    writes the value of the OPENCODE_CONFIG_CONTENT env var this process actually
+//	    received to <path>, letting tests observe that MCP configuration reached the
+//	    subprocess env (as opposed to being unset, or leaked via a persisted file).
+//	FAKEOPENCODE_CALL_MCP=1
+//	    reads OPENCODE_CONFIG_CONTENT (the env var the adapter sets, mirroring what the
+//	    real opencode CLI reads), extracts the server URL and bearer token, and performs
+//	    a real MCP tools/call for "telegram_send" before producing normal output.
 package main
 
 import (
@@ -58,6 +66,15 @@ func (h *staticOAuthHandler) Authorize(_ context.Context, _ *http.Request, _ *ht
 }
 
 func main() {
+	if os.Getenv("FAKEOPENCODE_DUMP_ARGV") == "1" {
+		if f := os.Getenv("FAKEOPENCODE_ARGV_FILE"); f != "" {
+			_ = os.WriteFile(f, []byte(strings.Join(os.Args, "\n")), 0o600)
+		}
+	}
+	if dumpPath := os.Getenv("FAKEOPENCODE_DUMP_ENV_PATH"); dumpPath != "" {
+		_ = os.WriteFile(dumpPath, []byte(os.Getenv("OPENCODE_CONFIG_CONTENT")), 0o600)
+	}
+
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "fakeopencode: expected run <argument>")
 		os.Exit(2)
