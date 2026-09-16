@@ -18,11 +18,60 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/salgozino/ai-solo-startup-framework/adapters/claudecode"
+	"github.com/salgozino/ai-solo-startup-framework/config"
+	transportmcp "github.com/salgozino/ai-solo-startup-framework/transport/mcp"
 )
+
+// registryMinter adapts *transportmcp.Registry to claudecode.TokenMinter.
+// It exists in the test package (not production code) because Go requires a
+// method's declared return type to be IDENTICAL to the interface's declared
+// return type for interface satisfaction (no covariant return types):
+// *transportmcp.Registry.Mint returns (string, *transportmcp.Handle), which
+// does not literally match claudecode.TokenMinter.Mint's declared
+// (string, claudecode.Drainer) signature even though *transportmcp.Handle
+// structurally satisfies claudecode.Drainer. This wrapper's Mint method
+// spells the exact return type so it satisfies the interface.
+type registryMinter struct {
+	reg *transportmcp.Registry
+}
+
+func (m *registryMinter) Mint(tenant, agent, taskID string, exp time.Time) (string, claudecode.Drainer) {
+	return m.reg.Mint(tenant, agent, taskID, exp)
+}
+
+// spyMinter wraps registryMinter and records every minted token so tests can
+// assert the token never leaks into subprocess argv.
+type spyMinter struct {
+	reg    *transportmcp.Registry
+	mu     sync.Mutex
+	tokens []string
+}
+
+func (m *spyMinter) Mint(tenant, agent, taskID string, exp time.Time) (string, claudecode.Drainer) {
+	token, handle := m.reg.Mint(tenant, agent, taskID, exp)
+	m.mu.Lock()
+	m.tokens = append(m.tokens, token)
+	m.mu.Unlock()
+	return token, handle
+}
+
+// startTestMCPServer starts an in-process MCP server with a single
+// "telegram_send" tool for tenant "acme" and registers cleanup.
+func startTestMCPServer(t *testing.T) (*transportmcp.Server, *transportmcp.Registry) {
+	t.Helper()
+	registry := transportmcp.NewRegistry()
+	srv := transportmcp.New("acme", map[string]config.Policy{"telegram_send": {}}, registry)
+	if err := srv.Start("127.0.0.1:0"); err != nil {
+		t.Fatalf("start mcp server: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	return srv, registry
+}
 
 // helperBinary builds the fakeclaude binary once per test run and returns its path.
 // The binary is placed in t.TempDir() so it is cleaned up automatically.
@@ -302,5 +351,155 @@ func TestProbeModel_Deadline(t *testing.T) {
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("expected errors.Is(err, context.DeadlineExceeded); got: %v", err)
+	}
+}
+
+// ---- Phase 3: MCP tool use and action intent emission (spec: provider-action-intent-emission) ----
+
+// TestClaudeAdapter_MCPToolCall_PopulatesActionIntents proves the real adapter path is wired:
+// a fake claude binary performs an actual MCP tools/call over HTTP against a running server,
+// and RunTask returns the intent recorded by the server's sink — not a hand-constructed fixture.
+func TestClaudeAdapter_MCPToolCall_PopulatesActionIntents(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	adapter := claudecode.New(bin, claudecode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "")
+
+	t.Setenv("FAKECLAUDE_CALL_MCP", "1")
+
+	result, err := adapter.RunTask(context.Background(), "task-mcp", "hello")
+	if err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if len(result.ActionIntents) != 1 {
+		t.Fatalf("expected 1 action intent, got %d: %+v", len(result.ActionIntents), result.ActionIntents)
+	}
+	if result.ActionIntents[0].Kind != "telegram_send" {
+		t.Errorf("expected Kind=telegram_send, got %q", result.ActionIntents[0].Kind)
+	}
+}
+
+// TestClaudeAdapter_NoToolCall_EmptyIntents verifies that a completed invocation which never
+// calls the MCP tool yields empty ActionIntents and a nil error (not an erroneous result).
+func TestClaudeAdapter_NoToolCall_EmptyIntents(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	adapter := claudecode.New(bin, claudecode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "")
+
+	result, err := adapter.RunTask(context.Background(), "task-no-mcp", "hello")
+	if err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if len(result.ActionIntents) != 0 {
+		t.Errorf("expected empty ActionIntents, got %+v", result.ActionIntents)
+	}
+}
+
+// TestClaudeAdapter_TokenAbsentFromArgv verifies threat-matrix case "Subprocess argv":
+// the bearer token is delivered in an HTTP header (via the ephemeral MCP config file),
+// never as a literal subprocess argv element.
+func TestClaudeAdapter_TokenAbsentFromArgv(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+	spy := &spyMinter{reg: registry}
+
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	t.Setenv("FAKECLAUDE_DUMP_ARGV", "1")
+	t.Setenv("FAKECLAUDE_ARGV_FILE", argvFile)
+
+	adapter := claudecode.New(bin, claudecode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   spy,
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "")
+
+	if _, err := adapter.RunTask(context.Background(), "task-argv-check", "hello"); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	if len(spy.tokens) != 1 {
+		t.Fatalf("expected exactly 1 minted token, got %d", len(spy.tokens))
+	}
+	token := spy.tokens[0]
+
+	raw, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv dump: %v", err)
+	}
+	if strings.Contains(string(raw), token) {
+		t.Errorf("bearer token leaked into subprocess argv: dump=%q", string(raw))
+	}
+}
+
+// TestClaudeAdapter_NoJsonSchema_InArgv verifies spec "Claude adapter does not request
+// --json-schema": that flag ends the turn and cannot carry free-form Output alongside intents.
+func TestClaudeAdapter_NoJsonSchema_InArgv(t *testing.T) {
+	bin := helperBinary(t)
+
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	t.Setenv("FAKECLAUDE_DUMP_ARGV", "1")
+	t.Setenv("FAKECLAUDE_ARGV_FILE", argvFile)
+
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "", "")
+
+	if _, err := adapter.RunTask(context.Background(), "task-no-schema", "hello"); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	raw, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv dump: %v", err)
+	}
+	if strings.Contains(string(raw), "--json-schema") {
+		t.Errorf("argv must never contain --json-schema: %q", string(raw))
+	}
+}
+
+// TestClaudeAdapter_EphemeralConfig_TempFileRemoved verifies spec "Claude adapter configures
+// MCP ephemerally": the temp MCP config file is removed after the subprocess exits.
+func TestClaudeAdapter_EphemeralConfig_TempFileRemoved(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	dumpFile := filepath.Join(t.TempDir(), "mcp-config-path.txt")
+	t.Setenv("FAKECLAUDE_DUMP_MCP_CONFIG_PATH", dumpFile)
+
+	adapter := claudecode.New(bin, claudecode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "")
+
+	if _, err := adapter.RunTask(context.Background(), "task-ephemeral", "hello"); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	raw, err := os.ReadFile(dumpFile)
+	if err != nil {
+		t.Fatalf("read mcp config path dump: %v", err)
+	}
+	cfgPath := strings.TrimSpace(string(raw))
+	if cfgPath == "" {
+		t.Fatal("fakeclaude did not report the MCP config path it saw")
+	}
+	if _, statErr := os.Stat(cfgPath); !os.IsNotExist(statErr) {
+		t.Errorf("expected ephemeral MCP config temp file to be removed after RunTask, stat err=%v", statErr)
 	}
 }
