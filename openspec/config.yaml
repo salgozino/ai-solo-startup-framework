@@ -6,23 +6,25 @@ schema: spec-driven
 
 context: |
   Project: ai-solo-startup-framework
-  Stack: UNDECIDED — no language, framework, or runtime chosen yet
-  Architecture: UNDECIDED — multi-agent framework (CEO, CTO, engineer, designer roles)
-  Testing: UNAVAILABLE — no test runner detected (empty directory)
-  Git: NOT INITIALIZED — pending prerequisite
+  Stack: Go 1.25.0 — company definitions in YAML, agent skills in Markdown
+  Architecture: ports-and-adapters; A2A protocol (a2a-go SDK v2.5.0) for agent communication;
+    multi-agent framework (CEO, CTO, engineer, designer roles) supervised in-process
+  Testing: `go test ./...` — strict TDD is mandatory for this project
+  Git: initialized; remote origin at github.com/salgozino/ai-solo-startup-framework
+  CI: required check "Build, vet and test" — gofmt, go build, go vet, go test -race
   Delivery: auto-chain | review_budget_lines: 400
 
 testing:
-  strict_tdd: false
-  reason: "No test runner detected. Directory is empty and no stack has been chosen."
-  test_runner: ~
-  unit: false
-  integration: false
-  e2e: false
-  coverage: false
-  linter: false
-  type_checker: false
-  formatter: false
+  strict_tdd: true
+  reason: "Go toolchain present with tests across core, adapters, transport, gateways, ui and cmd."
+  test_runner: "go test ./..."
+  unit: true
+  integration: true
+  e2e: true
+  coverage: true
+  linter: true
+  type_checker: true
+  formatter: true
 
 sdd:
   execution_mode: interactive
@@ -46,16 +48,16 @@ rules:
   tasks:
     - Group by phase, use hierarchical numbering
     - Keep tasks completable in one session
-    - Flag tasks that require stack decision before they can start
   apply:
     guidelines:
-      - Follow existing code patterns once a stack is chosen
-      - Do not invent stack choices during apply — consult the proposal
-    tdd: false
-    test_command: ""
+      - Follow existing ports-and-adapters patterns; keep core free of transport details
+      - Run gofmt before finishing; CI enforces formatting
+    tdd: true
+    test_command: "go test ./..."
   verify:
-    test_command: ""
-    build_command: ""
+    test_command: "go test ./... -count=1 -race"
+    build_command: "go build ./..."
+    vet_command: "go vet ./..."
     coverage_threshold: 0
   archive:
     - Warn before merging destructive deltas
