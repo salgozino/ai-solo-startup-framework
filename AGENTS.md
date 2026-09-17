@@ -29,6 +29,17 @@ The provider adapters drive external agent CLIs as subprocesses and parse their 
   `modelProber` structural probe loop in `cmd/company/wire.go` — and fails materialize loudly,
   naming the flag and this version floor, instead of letting the flag fail silently on every
   `RunTask` call at runtime.
+  NDJSON event shape: every event shares one envelope — `type`, `timestamp`, `sessionID`,
+  and a nested `part` object — and the assistant's text lives at **`part.text`**, never at
+  the top level. Verified against `opencode 1.18.31`: the complete top-level field set is
+  exactly `['part','sessionID','timestamp','type']`. `parseStreamText` reads `part.text`
+  from events whose top-level `type` is `"text"`. Its raw-stdout fallback is gated on
+  "this was not an event stream at all", NOT on "extraction was empty" — a well-formed
+  stream carrying only lifecycle or `error` events must yield empty output, because
+  dumping the envelope would return the raw NDJSON as the agent's answer.
+  `testdata/fakeopencode` emits this full envelope on purpose: it previously emitted a
+  simplified `{"type":"text","text":...}` shape that does not exist, which kept the suite
+  green while the adapter could not parse a single real response.
   MCP config shape: opencode's own schema (https://opencode.ai/config.json), NOT Claude's
   `mcpServers` shape — the root `Config` type declares `additionalProperties: false`, so an
   unrecognized top-level key such as `mcpServers` invalidates the whole config and the server

@@ -11,8 +11,10 @@
 // When --model is present, it prepends "model:<model>|" to the output.
 // When --agent is present, it prepends "agent:<agent>|" to the output.
 // --format consumes its value but is otherwise ignored; the adapter always parses
-// stdout as NDJSON now, so the default-case output below is always wrapped as a
-// single `{"type":"text","text":"..."}` line.
+// stdout as NDJSON now, so the default-case output below is always emitted as the
+// real opencode event stream: a step_start line, a text line whose content lives at
+// part.text (NOT at the top level), and a step_finish line. See emitNDJSONText for
+// the captured ground truth this mirrors.
 //
 // MCP-related test hooks (mirrors fakeclaude's hooks so both fakes stay consistent):
 //
@@ -168,6 +170,24 @@ func main() {
 		// the truncation-marker path (which bypasses NDJSON parsing entirely).
 		fmt.Print(strings.Repeat("x", 1<<20))
 
+	case "raw-text":
+		// Emit plain, non-NDJSON stdout and exit 0, so the adapter's raw-text fallback
+		// is the only way to preserve the output. Exercises the "not an event stream
+		// at all" branch of the parser's recognised flag.
+		fmt.Println("plain text, not an event stream")
+
+	case "error-event":
+		// Emit a well-formed event stream that carries NO text part: a step_start, the
+		// real captured error-event shape, and a step_finish. The error envelope below
+		// is the actual shape the CLI writes to stdout.
+		//
+		// Exits 0 deliberately. In real runs an error event accompanies a non-zero exit
+		// (which the adapter already maps to a failure before parsing), so this sentinel
+		// is a parser-level probe of the recognised/empty-text branch, NOT a claim that
+		// the real CLI exits 0 here. It proves the envelope is never concatenated into
+		// Output when extraction legitimately yields nothing.
+		emitNDJSONErrorStream()
+
 	default:
 		if os.Getenv("FAKEOPENCODE_CALL_MCP") == "1" {
 			contactMCP(true)
@@ -188,16 +208,125 @@ func main() {
 	}
 }
 
-// emitNDJSONText prints a single NDJSON line: {"type":"text","text":"..."},
-// mimicking a simplified slice of the real opencode --format json event stream
-// for text-only extraction by the adapter.
+// streamEnvelope mirrors the real opencode `--format json` NDJSON event envelope,
+// captured from opencode 1.18.31 via `opencode run --format json "Reply with exactly: OK"`.
+// Every event — step_start, text, step_finish — carries the SAME top-level shape
+// (type, timestamp, sessionID, part) and the text content lives at part.text.
+// There is no top-level "text" field on any event.
+//
+// This fake deliberately emits the full envelope rather than a convenient simplified
+// shape: a test double that mirrors the adapter's own assumptions instead of the CLI's
+// real output lets a broken parser stay green, which is exactly how the top-level-"text"
+// parsing bug survived its own test suite.
+type streamEnvelope struct {
+	Type      string     `json:"type"`
+	Timestamp int64      `json:"timestamp"`
+	SessionID string     `json:"sessionID"`
+	Part      streamPart `json:"part"`
+}
+
+// streamPart is the nested per-event payload. Fields absent from a given event type
+// are omitted, matching the real stream (e.g. only text parts carry "text"/"time",
+// only step_finish parts carry "cost"/"reason"/"tokens").
+type streamPart struct {
+	ID        string      `json:"id"`
+	MessageID string      `json:"messageID"`
+	SessionID string      `json:"sessionID"`
+	Type      string      `json:"type"`
+	Text      string      `json:"text,omitempty"`
+	Time      *partTime   `json:"time,omitempty"`
+	Cost      *float64    `json:"cost,omitempty"`
+	Reason    string      `json:"reason,omitempty"`
+	Tokens    *partTokens `json:"tokens,omitempty"`
+}
+
+type partTime struct {
+	Start int64 `json:"start"`
+	End   int64 `json:"end"`
+}
+
+type partTokens struct {
+	Input  int `json:"input"`
+	Output int `json:"output"`
+}
+
+// emitNDJSONText prints the real three-line opencode event stream for a single
+// assistant turn: step_start, text (content at part.text), step_finish.
+// The adapter must extract exactly `text` from this and nothing else — not the
+// envelope, not the surrounding lifecycle events.
 func emitNDJSONText(text string) {
-	line, err := json.Marshal(map[string]string{"type": "text", "text": text})
+	const (
+		sessionID = "ses_fakeopencode"
+		messageID = "msg_fakeopencode"
+	)
+	ts := time.Now().UnixMilli()
+	cost := 0.0
+
+	events := []streamEnvelope{
+		{
+			Type: "step_start", Timestamp: ts, SessionID: sessionID,
+			Part: streamPart{ID: "prt_step_start", MessageID: messageID, SessionID: sessionID, Type: "step_start"},
+		},
+		{
+			Type: "text", Timestamp: ts, SessionID: sessionID,
+			Part: streamPart{
+				ID: "prt_text", MessageID: messageID, SessionID: sessionID, Type: "text",
+				Text: text, Time: &partTime{Start: ts, End: ts},
+			},
+		},
+		{
+			Type: "step_finish", Timestamp: ts, SessionID: sessionID,
+			Part: streamPart{
+				ID: "prt_step_finish", MessageID: messageID, SessionID: sessionID, Type: "step_finish",
+				Cost: &cost, Reason: "stop", Tokens: &partTokens{Input: 1, Output: 1},
+			},
+		},
+	}
+
+	for _, ev := range events {
+		line, err := json.Marshal(ev)
+		if err != nil {
+			// Last-resort: never silently emit nothing, or the adapter's raw-text
+			// fallback assertion would pass for the wrong reason.
+			fmt.Print(text)
+			return
+		}
+		fmt.Println(string(line))
+	}
+}
+
+// emitNDJSONErrorStream prints a well-formed event stream that contains no text part.
+// The error line mirrors the real captured shape, which shares the same top-level
+// envelope as every other event but carries an "error" object instead of a text part:
+//
+//	{"type":"error","timestamp":...,"sessionID":...,
+//	 "error":{"name":"...","data":{"message":"...","ref":"..."}}}
+func emitNDJSONErrorStream() {
+	const sessionID = "ses_fakeopencode"
+	ts := time.Now().UnixMilli()
+
+	start, err := json.Marshal(streamEnvelope{
+		Type: "step_start", Timestamp: ts, SessionID: sessionID,
+		Part: streamPart{ID: "prt_step_start", MessageID: "msg_fakeopencode", SessionID: sessionID, Type: "step_start"},
+	})
 	if err != nil {
-		fmt.Print(text)
 		return
 	}
-	fmt.Println(string(line))
+	fmt.Println(string(start))
+
+	errLine, err := json.Marshal(map[string]any{
+		"type":      "error",
+		"timestamp": ts,
+		"sessionID": sessionID,
+		"error": map[string]any{
+			"name": "ProviderAuthError",
+			"data": map[string]any{"message": "simulated provider error", "ref": "err_fakeopencode"},
+		},
+	})
+	if err != nil {
+		return
+	}
+	fmt.Println(string(errLine))
 }
 
 // contactMCP reads the MCP config the adapter placed in OPENCODE_CONFIG_CONTENT and

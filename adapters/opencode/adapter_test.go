@@ -735,3 +735,93 @@ func TestOpenCodeMCPConfig_MatchesRealCLISchemaContract(t *testing.T) {
 		t.Errorf("expected bearer token in \"headers\".\"Authorization\", got %q", got)
 	}
 }
+
+// TestRunTask_ExtractsTextFromRealEventEnvelope pins the actual opencode `--format json`
+// contract: text content lives at part.text on events whose top-level type is "text".
+// There is no top-level "text" field on any event (verified against opencode 1.18.31 —
+// the top-level field set is exactly ['part','sessionID','timestamp','type']).
+//
+// Regression guard: a parser that reads a top-level "text" extracts the empty string from
+// every line, which silently drops the adapter into its raw-text fallback and sets
+// ProviderResult.Output to the ENTIRE raw NDJSON dump. That failure mode is invisible to a
+// test asserting only "Output is non-empty", so this test asserts both directions —
+// Output IS the model's text, and Output is NOT the envelope.
+func TestRunTask_ExtractsTextFromRealEventEnvelope(t *testing.T) {
+	bin := helperBinary(t)
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
+
+	result, err := adapter.RunTask(context.Background(), "task-envelope", "Reply with exactly: OK")
+	if err != nil {
+		t.Fatalf("RunTask: unexpected error: %v", err)
+	}
+
+	// fakeopencode always prepends "pure:1|" because --pure is unconditional.
+	const want = "pure:1|Reply with exactly: OK"
+	if result.Output != want {
+		t.Errorf("expected Output to be the model text %q, got %q", want, result.Output)
+	}
+
+	// Explicitly assert Output is not the raw NDJSON dump. Each of these tokens appears
+	// only in the event envelope, never in the model's text, so any of them leaking into
+	// Output means the stream was concatenated verbatim instead of parsed.
+	for _, envelopeOnly := range []string{"sessionID", "step_start", "step_finish", "\"part\"", "timestamp", "messageID"} {
+		if strings.Contains(result.Output, envelopeOnly) {
+			t.Errorf("Output leaked raw NDJSON envelope token %q — the stream was dumped, not parsed: %q", envelopeOnly, result.Output)
+		}
+	}
+
+	// A parsed single-turn stream is one line of text, never the multi-line raw stream.
+	if strings.Contains(result.Output, "\n") {
+		t.Errorf("Output contains a newline — raw multi-line NDJSON leaked into the result: %q", result.Output)
+	}
+}
+
+// TestRunTask_RawTextFallbackBranches pins both sides of the condition that decides
+// whether the raw-text fallback fires. The fallback is gated on "was this an opencode
+// event stream at all", NOT on "did extraction come back empty" — an empty extraction
+// from a well-formed stream is a real answer, and dumping the envelope instead would
+// hand the caller machine noise.
+func TestRunTask_RawTextFallbackBranches(t *testing.T) {
+	bin := helperBinary(t)
+
+	tests := []struct {
+		name   string
+		input  string
+		assert func(t *testing.T, output string)
+	}{
+		{
+			name:  "non-NDJSON stdout is preserved by the fallback",
+			input: "raw-text",
+			assert: func(t *testing.T, output string) {
+				// Not an event stream, so losing this text would be a regression.
+				if !strings.Contains(output, "plain text, not an event stream") {
+					t.Errorf("expected raw stdout to survive via the fallback, got %q", output)
+				}
+			},
+		},
+		{
+			name:  "well-formed stream with no text part yields empty output, not the envelope",
+			input: "error-event",
+			assert: func(t *testing.T, output string) {
+				if output != "" {
+					t.Errorf("expected empty Output for a recognised stream carrying no text part, got %q", output)
+				}
+				// Belt and braces: the error envelope must never be concatenated in.
+				if strings.Contains(output, "ProviderAuthError") || strings.Contains(output, "sessionID") {
+					t.Errorf("error-event envelope leaked into Output: %q", output)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
+			result, err := adapter.RunTask(context.Background(), "task-fallback", tt.input)
+			if err != nil {
+				t.Fatalf("RunTask(%q): unexpected error: %v", tt.input, err)
+			}
+			tt.assert(t, result.Output)
+		})
+	}
+}

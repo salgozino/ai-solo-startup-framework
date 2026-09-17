@@ -290,10 +290,15 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 		// Fall back to the legacy raw-truncation behaviour rather than failing to parse.
 		output = parseOutput(buf.Bytes(), n, a.limit)
 	} else {
-		output = parseStreamText(buf.Bytes())
-		if output == "" {
-			// Not every opencode invocation emits NDJSON text lines; fall back to the
-			// raw trimmed text rather than losing it.
+		text, recognised := parseStreamText(buf.Bytes())
+		output = text
+		if !recognised {
+			// The output was not an opencode event stream at all; fall back to the raw
+			// trimmed text rather than losing it. This is gated on `recognised`, not on
+			// an empty extraction: a well-formed stream that yields no text (only
+			// lifecycle or error events) must stay empty here, because dumping the raw
+			// NDJSON envelope into Output hands the caller machine noise instead of the
+			// agent's answer.
 			if raw := strings.TrimRight(buf.String(), "\n"); raw != "" {
 				output = raw
 			}
@@ -329,19 +334,46 @@ func parseOutput(raw []byte, n, limit int64) string {
 	return text
 }
 
-// streamEvent is a permissive envelope for the opencode --format json lines this adapter
-// cares about: a bare {"type":"text","text":"..."} line. Only text content is ever
-// extracted (spec: "ActionIntents Are Collected From the Sink, Never From Stream Parsing").
+// streamEvent is the opencode --format json NDJSON event envelope. Every event on the
+// stream — step_start, text, step_finish, error — shares this same top-level shape, and
+// the assistant's text lives at part.text. Verified against opencode 1.18.31, where the
+// complete top-level field set of every emitted event is exactly
+// ['part','sessionID','timestamp','type']: there is NO top-level "text" field anywhere.
+//
+// Only text content is ever extracted (spec: "ActionIntents Are Collected From the Sink,
+// Never From Stream Parsing"), so no tool_use-shaped field is modelled here on purpose.
+// The "error" event's payload is likewise not modelled — non-zero exit codes are the
+// adapter's failure signal, and an error event must never be concatenated into Output.
 type streamEvent struct {
-	Type string `json:"type"`
+	Type string      `json:"type"`
+	Part *streamPart `json:"part,omitempty"`
+}
+
+// streamPart is the nested per-event payload. Only the fields this adapter reads are
+// declared; every other key on the real part object is deliberately ignored.
+type streamPart struct {
 	Text string `json:"text,omitempty"`
 }
 
-// parseStreamText extracts and concatenates all text content from an NDJSON stream of
-// streamEvent lines. Lines that fail to parse are skipped rather than aborting the whole
-// result — a single malformed line should not erase everything else the CLI produced.
-func parseStreamText(raw []byte) string {
+// parseStreamText extracts and concatenates, in stream order, the text of every "text"
+// event in an NDJSON stream. Lines that fail to parse are skipped rather than aborting the
+// whole result — a single malformed line should not erase everything else the CLI produced.
+//
+// The second return value reports whether at least one line was recognised as an opencode
+// event envelope. It distinguishes the two cases the caller must treat differently:
+//
+//	recognised == true  → this really is an opencode NDJSON stream. The extracted text is
+//	                      authoritative even when empty (e.g. a stream carrying only
+//	                      lifecycle or error events), so the caller must NOT fall back to
+//	                      dumping the raw bytes.
+//	recognised == false → the output was never an event stream at all; the caller's
+//	                      raw-text fallback is the only way to avoid losing it.
+//
+// Without that distinction an empty extraction is ambiguous, and the caller silently
+// returns the entire raw NDJSON dump as the agent's answer.
+func parseStreamText(raw []byte) (string, bool) {
 	var sb strings.Builder
+	recognised := false
 	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -351,11 +383,17 @@ func parseStreamText(raw []byte) string {
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			continue
 		}
-		if ev.Type == "text" {
-			sb.WriteString(ev.Text)
+		// A bare JSON value with no "type" is not an opencode event; do not let it
+		// vouch for the whole stream being well-formed.
+		if ev.Type == "" {
+			continue
+		}
+		recognised = true
+		if ev.Type == "text" && ev.Part != nil {
+			sb.WriteString(ev.Part.Text)
 		}
 	}
-	return sb.String()
+	return sb.String(), recognised
 }
 
 // buildMCPConfigJSON marshals the MCP server descriptor placed in OPENCODE_CONFIG_CONTENT,
