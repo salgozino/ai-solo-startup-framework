@@ -6,7 +6,9 @@
 //	"large"  — prints 1 MiB of 'x' characters then exits 0
 //	anything else — prints the argument as output text then exits 0
 //
-// When --safe-mode is present, it prepends "safe:1|" to the output.
+// When --setting-sources and --disable-slash-commands are both present (the isolation
+// substitute for --safe-mode — see adapters/claudecode/adapter.go), it prepends "iso:1|"
+// to the output.
 // When --model is present, it prepends "model:<model>|" to the output.
 // When --system-prompt-file is present, it prepends "sysprompt:<path>|" to the output.
 // --no-session-persistence, --strict-mcp-config, --verbose are consumed silently.
@@ -84,20 +86,27 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Args: [-p [--safe-mode] [--no-session-persistence] [--model <model>]
-	//        [--system-prompt-file <path>] [--mcp-config <path>] [--strict-mcp-config]
-	//        [--output-format <format>] [--verbose]] <input>
+	// Args: [-p [--no-session-persistence] [--setting-sources <sources>]
+	//        [--disable-slash-commands] [--model <model>] [--system-prompt-file <path>]
+	//        [--mcp-config <path>] [--strict-mcp-config] [--output-format <format>]
+	//        [--verbose]] <input>
 	// Parse flags, then take the last positional argument as the prompt.
 	var model string
 	var systemPromptFile string
-	safeMode := false
+	settingSourcesSeen := false
+	disableSlashCommands := false
 	input := ""
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "-p":
 			// skip
-		case "--safe-mode":
-			safeMode = true
+		case "--setting-sources":
+			if i+1 < len(os.Args) {
+				settingSourcesSeen = true
+				i++ // consume the value (e.g. "")
+			}
+		case "--disable-slash-commands":
+			disableSlashCommands = true
 		case "--no-session-persistence", "--strict-mcp-config", "--verbose":
 			// consumed silently
 		case "--model":
@@ -172,8 +181,8 @@ func main() {
 		if model != "" {
 			output = "model:" + model + "|" + output
 		}
-		if safeMode {
-			output = "safe:1|" + output
+		if settingSourcesSeen && disableSlashCommands {
+			output = "iso:1|" + output
 		}
 		emitNDJSONText(output)
 	}

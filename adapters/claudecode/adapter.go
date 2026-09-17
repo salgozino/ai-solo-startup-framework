@@ -125,7 +125,9 @@ type Adapter struct {
 // claudeBin must be a path to the claude executable (or a test double).
 // model is optional; when non-empty it is passed as --model <model>.
 // systemPromptPath is optional; when non-empty it is passed as --system-prompt-file <path>.
-// --safe-mode and --no-session-persistence are always included unconditionally.
+// --no-session-persistence, --setting-sources "", and --disable-slash-commands are always
+// included unconditionally (see RunTask's doc comment for why --safe-mode is deliberately
+// NOT one of them).
 func New(claudeBin string, opts Options, model string, systemPromptPath string) *Adapter {
 	limit := opts.OutputLimit
 	if limit <= 0 {
@@ -165,11 +167,35 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 	// This is the primary guard against argument injection (threat-matrix case a).
 	// -p requests non-interactive mode: claude processes the prompt and prints output to stdout,
 	// then exits. Without -p, claude starts an interactive REPL which blocks forever.
-	// --safe-mode disables all customizations (skills, MCP, CLAUDE.md, hooks) while
-	// preserving the user's auth/keychain — unlike --bare which requires ANTHROPIC_API_KEY.
+	//
+	// --safe-mode is deliberately NOT passed. Per `claude --help` (verified against the
+	// installed 2.1.268 CLI), --safe-mode disables "CLAUDE.md, skills, plugins, hooks, MCP
+	// servers, custom commands and agents, output styles, workflows, custom themes,
+	// keybindings" as one bundle — MCP servers are explicitly in that disabled set, so
+	// combining --safe-mode with --mcp-config/--strict-mcp-config below made the MCP
+	// endpoint unreachable, which the never-contacted guard at the end of this function
+	// then turned into a hard failure on every MCP-wired invocation.
+	//
+	// No flag combination in the installed CLI replicates --safe-mode's full isolation
+	// while leaving MCP enabled: --bare disables a similar bundle but also restricts
+	// Anthropic auth to ANTHROPIC_API_KEY/apiKeyHelper only (OAuth and keychain are never
+	// read), which would break the adapter's existing auth story; --restricted strips
+	// Bash/code-execution tools the agents need. --setting-sources "" and
+	// --disable-slash-commands are the closest available substitute: they skip
+	// user/project/local settings.json (where hooks and permission overrides normally
+	// live) and the user's own installed skills, respectively. --strict-mcp-config
+	// (appended below when MCP is wired) already restricts MCP to only this adapter's own
+	// --mcp-config, so ambient user MCP servers stay excluded either way.
+	//
+	// KNOWN ISOLATION REGRESSION (decision item — see AGENTS.md "Provider CLI
+	// compatibility"): CLAUDE.md auto-discovery, plugins, custom commands/agents, and
+	// output styles/workflows/themes/keybindings are NOT covered by any known flag and now
+	// load normally for every invocation. This is an explicit, accepted tradeoff to make
+	// MCP reachable at all, not an oversight.
+	//
 	// --no-session-persistence prevents writing session transcripts to disk.
 	// A fresh exec.Cmd per call → stateless across invocations (task 5.5).
-	args := []string{"-p", "--safe-mode", "--no-session-persistence"}
+	args := []string{"-p", "--no-session-persistence", "--setting-sources", "", "--disable-slash-commands"}
 	if a.model != "" {
 		args = append(args, "--model", a.model)
 	}

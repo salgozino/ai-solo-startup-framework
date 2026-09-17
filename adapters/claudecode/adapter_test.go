@@ -114,8 +114,8 @@ func TestArgvSlice_ShellMetacharactersAreLiteral(t *testing.T) {
 		t.Fatalf("RunTask with metachar input: unexpected error: %v", err)
 	}
 	// With argv-as-slice: fakeclaude echoes the full string as one token, no newline inside.
-	// The output has a "safe:1|" prefix (isolation flag is always present) then the literal input.
-	expected := "safe:1|" + maliciousInput
+	// The output has an "iso:1|" prefix (isolation flags are always present) then the literal input.
+	expected := "iso:1|" + maliciousInput
 	if result.Output != expected {
 		t.Errorf("expected literal output %q, got %q", expected, result.Output)
 	}
@@ -173,21 +173,25 @@ func TestNonZeroExit_MapsToError(t *testing.T) {
 	}
 }
 
-// TestSafeModeFlag_AlwaysPresent verifies that --safe-mode is unconditionally included
-// in the claude invocation regardless of other settings (spec: Unconditional Isolation).
-func TestSafeModeFlag_AlwaysPresent(t *testing.T) {
+// TestIsolationFlags_AlwaysPresent verifies that the --safe-mode substitute flags
+// (--setting-sources "" and --disable-slash-commands) are unconditionally included in the
+// claude invocation regardless of other settings (spec: Unconditional Isolation) — this
+// adapter no longer passes --safe-mode itself; see TestClaudeAdapter_MCPFlags_
+// NeverCombinedWithDisablingFlag below for the JD-2 regression guard on that removal.
+func TestIsolationFlags_AlwaysPresent(t *testing.T) {
 	bin := helperBinary(t)
-	// No system prompt, no model — safe-mode must still be set.
+	// No system prompt, no model — isolation flags must still be set.
 	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "", "")
 
 	ctx := context.Background()
-	result, err := adapter.RunTask(ctx, "task-safe", "hello")
+	result, err := adapter.RunTask(ctx, "task-iso", "hello")
 	if err != nil {
 		t.Fatalf("RunTask: unexpected error: %v", err)
 	}
-	// fakeclaude prepends "safe:1|" when --safe-mode is passed.
-	if !strings.HasPrefix(result.Output, "safe:1|") {
-		t.Errorf("expected output to start with \"safe:1|\", got %q", result.Output)
+	// fakeclaude prepends "iso:1|" when both --setting-sources and --disable-slash-commands
+	// are passed.
+	if !strings.HasPrefix(result.Output, "iso:1|") {
+		t.Errorf("expected output to start with \"iso:1|\", got %q", result.Output)
 	}
 }
 
@@ -236,8 +240,8 @@ func TestModelFlag_PassedToCLI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTask with model: unexpected error: %v", err)
 	}
-	// fakeclaude prepends "safe:1|" (always, --safe-mode) then "model:<model>|" when --model is passed.
-	expected := "safe:1|model:anthropic/claude-sonnet-4-20250514|hello"
+	// fakeclaude prepends "iso:1|" (always) then "model:<model>|" when --model is passed.
+	expected := "iso:1|model:anthropic/claude-sonnet-4-20250514|hello"
 	if result.Output != expected {
 		t.Errorf("expected output %q, got %q", expected, result.Output)
 	}
@@ -296,9 +300,9 @@ func TestNoModelFlag_OmitsFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTask without model: unexpected error: %v", err)
 	}
-	// Without model, fakeclaude echoes input with only the safe-mode prefix.
-	if result.Output != "safe:1|hello" {
-		t.Errorf("expected output %q, got %q", "safe:1|hello", result.Output)
+	// Without model, fakeclaude echoes input with only the isolation-flags prefix.
+	if result.Output != "iso:1|hello" {
+		t.Errorf("expected output %q, got %q", "iso:1|hello", result.Output)
 	}
 }
 
@@ -631,5 +635,83 @@ func TestClaudeAdapter_DeadMCPServer_FailsLoudInsteadOfSilentSuccess(t *testing.
 
 	if _, statErr := os.Stat(argvFile); !os.IsNotExist(statErr) {
 		t.Errorf("expected the claude subprocess to never be invoked when the MCP server is dead, but argv dump exists (stat err=%v)", statErr)
+	}
+}
+
+// containsArg reports whether want appears as an exact element of argv.
+func containsArg(argv []string, want string) bool {
+	for _, a := range argv {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestClaudeAdapter_MCPFlags_NeverCombinedWithDisablingFlag is the falsifiable JD-2
+// regression test for the finding that --safe-mode disables MCP servers on the real CLI
+// (per `claude --help`, verified against the installed 2.1.268 binary: --safe-mode disables
+// "CLAUDE.md, skills, plugins, hooks, MCP servers, custom commands and agents, output
+// styles, workflows, custom themes, keybindings" as one bundle), so combining it with
+// --mcp-config/--strict-mcp-config made the MCP endpoint permanently unreachable and every
+// MCP-wired RunTask call fail via the never-contacted guard.
+//
+// It reads the real subprocess argv (FAKECLAUDE_DUMP_ARGV), independent of fakeclaude's own
+// flag-handling logic, and asserts directly against argv content — not against fakeclaude's
+// self-reported behavior — so it stays falsifiable against a regression that reintroduces
+// --safe-mode (or swaps in an equally MCP-disabling flag such as --bare) alongside the MCP
+// flags. It also asserts the isolation substitute (--setting-sources ""/
+// --disable-slash-commands) is present, since dropping --safe-mode entirely without any
+// replacement would be a silent, undocumented isolation regression.
+func TestClaudeAdapter_MCPFlags_NeverCombinedWithDisablingFlag(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	t.Setenv("FAKECLAUDE_DUMP_ARGV", "1")
+	t.Setenv("FAKECLAUDE_ARGV_FILE", argvFile)
+	// Model a CLI that actually reaches the MCP endpoint, so this test stays focused on
+	// argv contents rather than tripping the never-contacted check.
+	t.Setenv("FAKECLAUDE_CONNECT_MCP_ONLY", "1")
+
+	adapter := claudecode.New(bin, claudecode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "")
+
+	if _, err := adapter.RunTask(context.Background(), "task-mcp-flags", "hello"); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	raw, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv dump: %v", err)
+	}
+	argv := strings.Split(string(raw), "\n")
+
+	if !containsArg(argv, "--mcp-config") || !containsArg(argv, "--strict-mcp-config") {
+		t.Fatalf("expected --mcp-config and --strict-mcp-config in argv when MCP is wired; argv=%v", argv)
+	}
+
+	for _, disabling := range []string{"--safe-mode", "--bare"} {
+		if containsArg(argv, disabling) {
+			t.Errorf("argv combines MCP flags (--mcp-config/--strict-mcp-config) with %q, which disables MCP servers on the real CLI — MCP would never be reachable; argv=%v", disabling, argv)
+		}
+	}
+
+	if !containsArg(argv, "--disable-slash-commands") {
+		t.Errorf("expected --disable-slash-commands (isolation substitute for --safe-mode) in argv; argv=%v", argv)
+	}
+	foundEmptySettingSources := false
+	for i, a := range argv {
+		if a == "--setting-sources" && i+1 < len(argv) && argv[i+1] == "" {
+			foundEmptySettingSources = true
+		}
+	}
+	if !foundEmptySettingSources {
+		t.Errorf("expected --setting-sources \"\" (isolation substitute for --safe-mode) in argv; argv=%v", argv)
 	}
 }

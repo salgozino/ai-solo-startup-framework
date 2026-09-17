@@ -42,4 +42,33 @@ Both adapters receive MCP configuration ephemerally per invocation — claude th
 temp file removed on exit, opencode through the subprocess-scoped `OPENCODE_CONFIG_CONTENT`
 environment variable. Neither adapter reads or writes a persisted user config.
 
+## claude adapter isolation flags (decision item)
+
+The claude adapter deliberately does **not** pass `--safe-mode`. Per `claude --help`
+(verified against the installed 2.1.268 CLI), `--safe-mode` disables "CLAUDE.md, skills,
+plugins, hooks, MCP servers, custom commands and agents, output styles, workflows, custom
+themes, keybindings" as one bundle — MCP servers are explicitly included, so combining
+`--safe-mode` with `--mcp-config`/`--strict-mcp-config` made the MCP endpoint permanently
+unreachable and every MCP-wired `RunTask` invocation fail.
+
+No flag combination in the installed CLI replicates `--safe-mode`'s full isolation while
+leaving MCP enabled:
+- `--bare` disables a similar bundle but also restricts Anthropic auth to
+  `ANTHROPIC_API_KEY`/`apiKeyHelper` only (OAuth and keychain are never read), which would
+  break the adapter's existing auth story.
+- `--restricted` strips Bash/code-execution tools the agents need to do their job.
+
+The adapter instead passes `--setting-sources ""` (skips user/project/local `settings.json`,
+where hooks and permission overrides normally live) and `--disable-slash-commands` (skips
+the user's own installed skills) as the closest available substitute, alongside
+`--strict-mcp-config` (already required above), which independently ensures MCP comes only
+from the adapter's own `--mcp-config`, never the user's ambient MCP config.
+
+**Known isolation regression (accepted tradeoff, not an oversight):** CLAUDE.md
+auto-discovery, plugins, custom commands/agents, and output styles/workflows/themes/
+keybindings are not covered by any known flag and now load normally for every invocation.
+This is a decision item for the orchestrator: it may be revisited if a future CLI version
+adds a more granular disable flag, or if the composition root should set `cmd.Dir` to a
+directory known not to contain a `CLAUDE.md`.
+
 
