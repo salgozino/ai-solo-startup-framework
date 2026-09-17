@@ -513,6 +513,17 @@ Modify `adapters/opencode/adapter.go`:
      subprocess `Env` as `append(os.Environ(), "OPENCODE_CONFIG_CONTENT="+configJSON)` (subprocess-scoped;
      do NOT call `os.Setenv`) (design: Threat matrix – "`OPENCODE_CONFIG_CONTENT` scoped to
      that process env").
+     JSON format: `{"mcp": {"framework": {"type": "remote", "url": "http://<addr>", "enabled":
+     true, "headers": {"Authorization": "Bearer <token>"}}}}`. This is NOT the `mcpServers`/`"http"`
+     shape shown in step 3.6.2 above — that shape is Claude-specific. OpenCode's own schema
+     (https://opencode.ai/config.json) declares `additionalProperties: false` on the root `Config`
+     type, so an unrecognized top-level key such as `mcpServers` silently invalidates the whole
+     config; the top-level key must be `mcp`, and the entry `type` must be the enum value `"remote"`,
+     never `"http"`. **Correction note**: an earlier draft of this task copied the claude shape
+     verbatim here by mistake, which JD-1 (round 1 judgment-day review) caught as a live defect in
+     `adapters/opencode/adapter.go` before it shipped; this doc entry is corrected to match the
+     shape the code actually emits, so a future implementer reading this task does not reintroduce
+     the same defect.
   3. Add `--format json` to argv for NDJSON output.
   4. Switch output parsing: read NDJSON line-by-line; extract text from relevant event fields;
      stop on EOF or process exit — **not** on any dedicated terminal event line
