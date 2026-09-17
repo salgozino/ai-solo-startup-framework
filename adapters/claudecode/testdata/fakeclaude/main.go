@@ -26,6 +26,10 @@
 //	    reads the ephemeral MCP config JSON from FAKECLAUDE_MCP_CONFIG, extracts the
 //	    server URL and bearer token, and performs a real MCP tools/call for
 //	    "telegram_send" before producing normal output.
+//	FAKECLAUDE_CONNECT_MCP_ONLY=1
+//	    same as FAKECLAUDE_CALL_MCP but stops after the MCP handshake, calling no tool.
+//	    This represents the healthy "the agent reached the server and chose not to call a
+//	    tool" case, which must stay distinguishable from never reaching the server at all.
 package main
 
 import (
@@ -157,7 +161,9 @@ func main() {
 
 	default:
 		if os.Getenv("FAKECLAUDE_CALL_MCP") == "1" {
-			callMCPTool()
+			contactMCP(true)
+		} else if os.Getenv("FAKECLAUDE_CONNECT_MCP_ONLY") == "1" {
+			contactMCP(false)
 		}
 		output := input
 		if systemPromptFile != "" {
@@ -185,11 +191,12 @@ func emitNDJSONText(text string) {
 	fmt.Println(string(line))
 }
 
-// callMCPTool reads the ephemeral MCP config the adapter wrote, connects to the MCP
-// server it describes, and calls the "telegram_send" tool once. Errors are swallowed —
-// this simulates a real CLI attempting the call; the test asserts on the server-side
-// sink, not on this call's outcome.
-func callMCPTool() {
+// contactMCP reads the ephemeral MCP config the adapter wrote and connects to the MCP
+// server it describes. When callTool is true it also calls the "telegram_send" tool once;
+// when false it completes the handshake and stops, simulating an agent that reached the
+// server but chose not to call any tool. Errors are swallowed — this simulates a real CLI
+// attempting the call; the test asserts on the server-side state, not on this outcome.
+func contactMCP(callTool bool) {
 	cfgPath := os.Getenv("FAKECLAUDE_MCP_CONFIG")
 	if cfgPath == "" {
 		return
@@ -222,6 +229,10 @@ func callMCPTool() {
 		return
 	}
 	defer session.Close()
+
+	if !callTool {
+		return
+	}
 
 	_, _ = session.CallTool(ctx, &gomcp.CallToolParams{
 		Name:      "telegram_send",

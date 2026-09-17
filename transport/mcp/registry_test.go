@@ -2,6 +2,7 @@
 package mcp
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -104,6 +105,51 @@ func TestRegistry_ForeignTenantRejected(t *testing.T) {
 	_, err := reg.Resolve(token, "beta")
 	if err == nil {
 		t.Error("Resolve with foreign tenant: expected error, got nil")
+	}
+}
+
+// TestRegistry_ContactedTracksTokenVerification proves the registry records whether the
+// minted token was ever presented to the MCP server. TokenVerifier runs for every
+// authenticated HTTP request, including the MCP initialize handshake, so it is the
+// truest available signal that the CLI actually reached the endpoint with our token.
+//
+// Without this signal an adapter cannot distinguish "the agent chose not to call a tool"
+// from "the agent never reached the MCP server at all": both produce an empty sink.
+// Contacted must also survive Drain, because the adapter reads it after draining.
+func TestRegistry_ContactedTracksTokenVerification(t *testing.T) {
+	reg := NewRegistry()
+	token, handle := reg.Mint("acme", "worker", "t5", time.Now().Add(time.Hour))
+
+	if handle.Contacted() {
+		t.Error("freshly minted handle: expected Contacted()=false, got true")
+	}
+
+	verify := reg.TokenVerifier()
+	if _, err := verify(context.Background(), token, nil); err != nil {
+		t.Fatalf("TokenVerifier: unexpected error: %v", err)
+	}
+	if !handle.Contacted() {
+		t.Error("after a successful token verification: expected Contacted()=true, got false")
+	}
+
+	handle.Drain()
+	if !handle.Contacted() {
+		t.Error("after Drain: expected Contacted() to remain true, got false")
+	}
+}
+
+// TestRegistry_ContactedStaysFalseForRejectedToken verifies that a failed verification
+// (unknown token) never marks any invocation as contacted.
+func TestRegistry_ContactedStaysFalseForRejectedToken(t *testing.T) {
+	reg := NewRegistry()
+	_, handle := reg.Mint("acme", "worker", "t6", time.Now().Add(time.Hour))
+
+	verify := reg.TokenVerifier()
+	if _, err := verify(context.Background(), "never-minted-token", nil); err == nil {
+		t.Fatal("TokenVerifier with unknown token: expected error, got nil")
+	}
+	if handle.Contacted() {
+		t.Error("after a rejected verification: expected Contacted()=false, got true")
 	}
 }
 

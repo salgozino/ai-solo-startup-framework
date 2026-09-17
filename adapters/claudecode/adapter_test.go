@@ -387,11 +387,17 @@ func TestClaudeAdapter_MCPToolCall_PopulatesActionIntents(t *testing.T) {
 	}
 }
 
-// TestClaudeAdapter_NoToolCall_EmptyIntents verifies that a completed invocation which never
-// calls the MCP tool yields empty ActionIntents and a nil error (not an erroneous result).
+// TestClaudeAdapter_NoToolCall_EmptyIntents verifies that a completed invocation which
+// reached the MCP endpoint and simply called no tool yields empty ActionIntents and a nil
+// error (not an erroneous result). This is the regression guard for the never-contacted
+// check below: that check must only fire when the endpoint was never reached, never on
+// this healthy outcome.
 func TestClaudeAdapter_NoToolCall_EmptyIntents(t *testing.T) {
 	bin := helperBinary(t)
 	srv, registry := startTestMCPServer(t)
+
+	// The CLI completes the MCP handshake but calls no tool.
+	t.Setenv("FAKECLAUDE_CONNECT_MCP_ONLY", "1")
 
 	adapter := claudecode.New(bin, claudecode.Options{
 		OutputLimit:   1 << 20,
@@ -410,6 +416,42 @@ func TestClaudeAdapter_NoToolCall_EmptyIntents(t *testing.T) {
 	}
 }
 
+// TestClaudeAdapter_NeverContactedMCP_FailsLoudInsteadOfSilentSuccess is RED for the
+// finding that a CLI which never reaches the MCP endpoint at all produces a result
+// byte-identical to the healthy "the agent chose not to call a tool" case: Output set,
+// nil error, empty ActionIntents.
+//
+// MCPHealthCheck cannot catch this: the server here is alive and healthy, it was simply
+// never contacted (config shape ignored by the CLI, handshake failure, bearer rejected,
+// subprocess killed before the call). The registry already knows the minted token was
+// never presented, so the adapter must consult it rather than reporting success for an
+// invocation whose tool calls could not have been recorded.
+func TestClaudeAdapter_NeverContactedMCP_FailsLoudInsteadOfSilentSuccess(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	adapter := claudecode.New(bin, claudecode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "")
+
+	// Neither FAKECLAUDE_CALL_MCP nor FAKECLAUDE_CONNECT_MCP_ONLY is set: the subprocess
+	// exits successfully without ever touching the MCP endpoint.
+	_, err := adapter.RunTask(context.Background(), "task-never-contacted", "hello")
+	if err == nil {
+		t.Fatal("expected RunTask to fail loudly when the CLI never contacted the MCP endpoint, got nil error (silent false success)")
+	}
+	if !strings.Contains(err.Error(), srv.Addr()) {
+		t.Errorf("expected the error to name the MCP server address %q so an operator can act, got: %v", srv.Addr(), err)
+	}
+	if !strings.Contains(err.Error(), "task-never-contacted") {
+		t.Errorf("expected the error to name the task ID so an operator can act, got: %v", err)
+	}
+}
+
 // TestClaudeAdapter_TokenAbsentFromArgv verifies threat-matrix case "Subprocess argv":
 // the bearer token is delivered in an HTTP header (via the ephemeral MCP config file),
 // never as a literal subprocess argv element.
@@ -421,6 +463,9 @@ func TestClaudeAdapter_TokenAbsentFromArgv(t *testing.T) {
 	argvFile := filepath.Join(t.TempDir(), "argv.txt")
 	t.Setenv("FAKECLAUDE_DUMP_ARGV", "1")
 	t.Setenv("FAKECLAUDE_ARGV_FILE", argvFile)
+	// Model a CLI that actually reaches the MCP endpoint, so this test stays focused on
+	// argv contents rather than tripping the never-contacted check.
+	t.Setenv("FAKECLAUDE_CONNECT_MCP_ONLY", "1")
 
 	adapter := claudecode.New(bin, claudecode.Options{
 		OutputLimit:   1 << 20,
@@ -515,6 +560,9 @@ func TestClaudeAdapter_EphemeralConfig_TempFileRemoved(t *testing.T) {
 
 	dumpFile := filepath.Join(t.TempDir(), "mcp-config-path.txt")
 	t.Setenv("FAKECLAUDE_DUMP_MCP_CONFIG_PATH", dumpFile)
+	// Model a CLI that actually reaches the MCP endpoint, so this test stays focused on
+	// temp-file cleanup rather than tripping the never-contacted check.
+	t.Setenv("FAKECLAUDE_CONNECT_MCP_ONLY", "1")
 
 	adapter := claudecode.New(bin, claudecode.Options{
 		OutputLimit:   1 << 20,

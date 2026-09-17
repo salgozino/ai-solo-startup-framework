@@ -43,6 +43,10 @@ const defaultMintTimeout = 24 * time.Hour
 // recorded for it. Idempotent — a second Drain call returns nil without panicking.
 type Drainer interface {
 	Drain() []port.ActionIntent
+	// Contacted reports whether the agent CLI ever reached the MCP server with this
+	// invocation's bearer token. An empty sink alone cannot distinguish "the agent chose
+	// not to call a tool" from "the agent never reached the MCP server at all".
+	Contacted() bool
 }
 
 // TokenMinter mints a per-invocation MCP bearer token bound to {tenant, agent, taskID}.
@@ -283,6 +287,16 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 		// Sink is authoritative: ActionIntents come only from the MCP server's sink,
 		// never from parsing tool_use events out of the stream above.
 		result.ActionIntents = handle.Drain()
+
+		// An empty sink is ambiguous on its own. MCPHealthCheck above only catches a
+		// server that died; a server that is alive but was never reached (config shape
+		// ignored by the CLI, handshake failure, bearer rejected, subprocess killed
+		// before the call) leaves no signal there. The registry does know whether the
+		// minted token was ever presented, so consult it rather than reporting a
+		// success that is byte-identical to "the agent made no tool calls".
+		if len(result.ActionIntents) == 0 && !handle.Contacted() {
+			return port.ProviderResult{}, fmt.Errorf("claudecode: mcp endpoint %s was never contacted by the CLI for task %q; refusing to report success for an invocation whose tool calls could not have been recorded", a.mcpServerAddr, taskID)
+		}
 	}
 	return result, nil
 }

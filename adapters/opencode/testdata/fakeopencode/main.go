@@ -26,6 +26,10 @@
 //	    reads OPENCODE_CONFIG_CONTENT (the env var the adapter sets, mirroring what the
 //	    real opencode CLI reads), extracts the server URL and bearer token, and performs
 //	    a real MCP tools/call for "telegram_send" before producing normal output.
+//	FAKEOPENCODE_CONNECT_MCP_ONLY=1
+//	    same as FAKEOPENCODE_CALL_MCP but stops after the MCP handshake, calling no tool.
+//	    This represents the healthy "the agent reached the server and chose not to call a
+//	    tool" case, which must stay distinguishable from never reaching the server at all.
 //
 // ProbeModel test hooks (simulate CLI capability/version behavior, independent of model):
 //
@@ -164,7 +168,9 @@ func main() {
 
 	default:
 		if os.Getenv("FAKEOPENCODE_CALL_MCP") == "1" {
-			callMCPTool()
+			contactMCP(true)
+		} else if os.Getenv("FAKEOPENCODE_CONNECT_MCP_ONLY") == "1" {
+			contactMCP(false)
 		}
 		output := input
 		if agent != "" {
@@ -192,10 +198,12 @@ func emitNDJSONText(text string) {
 	fmt.Println(string(line))
 }
 
-// callMCPTool reads the MCP config the adapter placed in OPENCODE_CONFIG_CONTENT,
-// connects to the MCP server it describes, and calls the "telegram_send" tool once.
-// Errors are swallowed — the test asserts on the server-side sink, not this call.
-func callMCPTool() {
+// contactMCP reads the MCP config the adapter placed in OPENCODE_CONFIG_CONTENT and
+// connects to the MCP server it describes. When callTool is true it also calls the
+// "telegram_send" tool once; when false it completes the handshake and stops, simulating
+// an agent that reached the server but chose not to call any tool.
+// Errors are swallowed — the test asserts on the server-side state, not this call.
+func contactMCP(callTool bool) {
 	raw := os.Getenv("OPENCODE_CONFIG_CONTENT")
 	if raw == "" {
 		return
@@ -224,6 +232,10 @@ func callMCPTool() {
 		return
 	}
 	defer session.Close()
+
+	if !callTool {
+		return
+	}
 
 	_, _ = session.CallTool(ctx, &gomcp.CallToolParams{
 		Name:      "telegram_send",

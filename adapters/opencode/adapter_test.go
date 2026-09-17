@@ -426,10 +426,15 @@ func TestOpenCodeAdapter_MCPToolCall_PopulatesActionIntents(t *testing.T) {
 }
 
 // TestOpenCodeAdapter_NoToolCall_EmptyIntents verifies that a completed invocation which
-// never calls the MCP tool yields empty ActionIntents and a nil error.
+// reached the MCP endpoint and simply called no tool yields empty ActionIntents and a nil
+// error. This is the regression guard for the never-contacted check below: that check must
+// only fire when the endpoint was never reached, never on this healthy outcome.
 func TestOpenCodeAdapter_NoToolCall_EmptyIntents(t *testing.T) {
 	bin := helperBinary(t)
 	srv, registry := startTestMCPServer(t)
+
+	// The CLI completes the MCP handshake but calls no tool.
+	t.Setenv("FAKEOPENCODE_CONNECT_MCP_ONLY", "1")
 
 	adapter := opencode.New(bin, opencode.Options{
 		OutputLimit:   1 << 20,
@@ -445,6 +450,42 @@ func TestOpenCodeAdapter_NoToolCall_EmptyIntents(t *testing.T) {
 	}
 	if len(result.ActionIntents) != 0 {
 		t.Errorf("expected empty ActionIntents, got %+v", result.ActionIntents)
+	}
+}
+
+// TestOpenCodeAdapter_NeverContactedMCP_FailsLoudInsteadOfSilentSuccess is RED for the
+// finding that a CLI which never reaches the MCP endpoint at all produces a result
+// byte-identical to the healthy "the agent chose not to call a tool" case: Output set,
+// nil error, empty ActionIntents.
+//
+// MCPHealthCheck cannot catch this: the server here is alive and healthy, it was simply
+// never contacted (config shape ignored by the CLI, handshake failure, bearer rejected,
+// subprocess killed before the call). The registry already knows the minted token was
+// never presented, so the adapter must consult it rather than reporting success for an
+// invocation whose tool calls could not have been recorded.
+func TestOpenCodeAdapter_NeverContactedMCP_FailsLoudInsteadOfSilentSuccess(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	adapter := opencode.New(bin, opencode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "", "")
+
+	// Neither FAKEOPENCODE_CALL_MCP nor FAKEOPENCODE_CONNECT_MCP_ONLY is set: the
+	// subprocess exits successfully without ever touching the MCP endpoint.
+	_, err := adapter.RunTask(context.Background(), "task-never-contacted", "hello")
+	if err == nil {
+		t.Fatal("expected RunTask to fail loudly when the CLI never contacted the MCP endpoint, got nil error (silent false success)")
+	}
+	if !strings.Contains(err.Error(), srv.Addr()) {
+		t.Errorf("expected the error to name the MCP server address %q so an operator can act, got: %v", srv.Addr(), err)
+	}
+	if !strings.Contains(err.Error(), "task-never-contacted") {
+		t.Errorf("expected the error to name the task ID so an operator can act, got: %v", err)
 	}
 }
 
@@ -494,6 +535,9 @@ func TestOpenCodeAdapter_EphemeralConfig_ScopedToSubprocessEnv(t *testing.T) {
 
 	dumpFile := filepath.Join(t.TempDir(), "env-dump.txt")
 	t.Setenv("FAKEOPENCODE_DUMP_ENV_PATH", dumpFile)
+	// Model a CLI that actually reaches the MCP endpoint, so this test stays focused on
+	// env scoping rather than tripping the never-contacted check.
+	t.Setenv("FAKEOPENCODE_CONNECT_MCP_ONLY", "1")
 
 	adapter := opencode.New(bin, opencode.Options{
 		OutputLimit:   1 << 20,
