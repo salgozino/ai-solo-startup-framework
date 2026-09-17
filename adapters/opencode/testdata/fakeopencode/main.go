@@ -26,6 +26,15 @@
 //	    reads OPENCODE_CONFIG_CONTENT (the env var the adapter sets, mirroring what the
 //	    real opencode CLI reads), extracts the server URL and bearer token, and performs
 //	    a real MCP tools/call for "telegram_send" before producing normal output.
+//
+// ProbeModel test hooks (simulate CLI capability/version behavior, independent of model):
+//
+//	FAKEOPENCODE_REJECT_FORMAT_FLAG=1
+//	    simulates a CLI build that does not support --format: if --format is present in
+//	    argv, prints a flag-rejection error to stderr and exits 2, regardless of input.
+//	FAKEOPENCODE_PROBE_HANG=1
+//	    simulates a CLI that never returns for the probe invocation — sleeps until killed
+//	    by the caller's context deadline.
 package main
 
 import (
@@ -74,6 +83,9 @@ func main() {
 	if dumpPath := os.Getenv("FAKEOPENCODE_DUMP_ENV_PATH"); dumpPath != "" {
 		_ = os.WriteFile(dumpPath, []byte(os.Getenv("OPENCODE_CONFIG_CONTENT")), 0o600)
 	}
+	if os.Getenv("FAKEOPENCODE_PROBE_HANG") == "1" {
+		time.Sleep(24 * time.Hour)
+	}
 
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "fakeopencode: expected run <argument>")
@@ -103,6 +115,10 @@ func main() {
 				i++
 			}
 		case "--format":
+			if os.Getenv("FAKEOPENCODE_REJECT_FORMAT_FLAG") == "1" {
+				fmt.Fprintln(os.Stderr, "Error: unknown flag: --format")
+				os.Exit(2)
+			}
 			if i+1 < len(os.Args) {
 				i++ // e.g. "json"; the fake always emits NDJSON now
 			}

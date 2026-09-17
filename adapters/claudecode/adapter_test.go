@@ -540,3 +540,48 @@ func TestClaudeAdapter_EphemeralConfig_TempFileRemoved(t *testing.T) {
 		t.Errorf("expected ephemeral MCP config temp file to be removed after RunTask, stat err=%v", statErr)
 	}
 }
+
+// TestClaudeAdapter_DeadMCPServer_FailsLoudInsteadOfSilentSuccess is RED for the finding
+// that a dead MCP server produced a silent false success: with no health check, RunTask
+// would spawn the subprocess, find no tool calls were made (because the server that would
+// have served them is dead), and return a nil error with empty ActionIntents — identical
+// to the ordinary "the agent chose not to call a tool" outcome. An operator has no way to
+// tell those two situations apart.
+//
+// The health check is a plain func() error (in production, wire.go passes the real
+// transport/mcp Server.Err() method value — see transport/mcp/server_internal_test.go's
+// TestServer_AbnormalDeath_IsObservable for proof that Err() itself reports the death). This
+// test only needs to prove the adapter *consults and obeys* whatever MCPHealthCheck reports:
+// a dead server must surface as an explicit RunTask error, and — because the check runs
+// before the subprocess starts — the subprocess must never even be invoked (asserted via the
+// FAKECLAUDE_DUMP_ARGV hook: no dump file means fakeclaude never ran).
+func TestClaudeAdapter_DeadMCPServer_FailsLoudInsteadOfSilentSuccess(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	t.Setenv("FAKECLAUDE_DUMP_ARGV", "1")
+	t.Setenv("FAKECLAUDE_ARGV_FILE", argvFile)
+
+	simulatedDeath := errors.New("simulated mcp server death")
+	adapter := claudecode.New(bin, claudecode.Options{
+		OutputLimit:    1 << 20,
+		MCPRegistry:    &registryMinter{reg: registry},
+		MCPServerAddr:  srv.Addr(),
+		Tenant:         "acme",
+		AgentName:      "ceo",
+		MCPHealthCheck: func() error { return simulatedDeath },
+	}, "", "")
+
+	_, err := adapter.RunTask(context.Background(), "task-dead-mcp", "hello")
+	if err == nil {
+		t.Fatal("expected RunTask to fail loudly when the MCP server is dead, got nil error (silent false success)")
+	}
+	if !errors.Is(err, simulatedDeath) {
+		t.Errorf("expected RunTask error to wrap the health check error, got: %v", err)
+	}
+
+	if _, statErr := os.Stat(argvFile); !os.IsNotExist(statErr) {
+		t.Errorf("expected the claude subprocess to never be invoked when the MCP server is dead, but argv dump exists (stat err=%v)", statErr)
+	}
+}

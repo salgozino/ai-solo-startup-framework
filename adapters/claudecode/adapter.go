@@ -91,6 +91,13 @@ type Options struct {
 	// ContextBudget is returned by Capabilities().ContextBudget.
 	ContextBudget int
 	TokenLifetime time.Duration // overrides defaultMintTimeout when non-zero (test-only knob)
+	// MCPHealthCheck reports the MCP server's health when non-nil (production: the running
+	// transport/mcp Server's Err() method value). RunTask consults it before spawning the
+	// subprocess whenever MCPRegistry is configured: a non-nil result aborts the invocation
+	// with an explicit error instead of running an agent whose tool calls could never
+	// reach a live server, which would otherwise return a false "success" with empty
+	// ActionIntents indistinguishable from "the agent made no tool calls".
+	MCPHealthCheck func() error
 }
 
 // Adapter implements port.Provider by running an ephemeral claude CLI process per task.
@@ -107,6 +114,7 @@ type Adapter struct {
 	policyActionKinds []string
 	contextBudget     int
 	tokenLifetime     time.Duration
+	mcpHealthCheck    func() error
 }
 
 // New returns an Adapter that invokes claudeBin as the claude CLI.
@@ -135,6 +143,7 @@ func New(claudeBin string, opts Options, model string, systemPromptPath string) 
 		policyActionKinds: opts.PolicyActionKinds,
 		contextBudget:     opts.ContextBudget,
 		tokenLifetime:     lifetime,
+		mcpHealthCheck:    opts.MCPHealthCheck,
 	}
 }
 
@@ -167,6 +176,15 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 	var handle Drainer
 	var mcpConfigPath string
 	if a.mcpRegistry != nil {
+		// Consult the MCP server's health before ever spawning the subprocess. Checking
+		// after the fact (post-Drain) would still return a nil error with empty
+		// ActionIntents whenever the agent's own turn happened not to call a tool —
+		// exactly the false "success" this check exists to eliminate.
+		if a.mcpHealthCheck != nil {
+			if healthErr := a.mcpHealthCheck(); healthErr != nil {
+				return port.ProviderResult{}, fmt.Errorf("claudecode: mcp server unavailable, refusing to run task without a working MCP endpoint: %w", healthErr)
+			}
+		}
 		deadline, ok := ctx.Deadline()
 		if !ok {
 			deadline = time.Now().Add(a.tokenLifetime)

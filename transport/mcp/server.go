@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -75,6 +76,10 @@ func (s *Server) Start(addr string) error {
 	go func() {
 		if serveErr := s.httpSrv.Serve(ln); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			s.serveErr.Store(serveErr)
+			// Immediate operator-visible signal at the point of death. Err() (below)
+			// additionally lets production callers (see cmd/company/wire.go's
+			// MCPHealthCheck wiring) detect and act on this per task, not just in logs.
+			log.Printf("mcp: server for tenant %q died abnormally: %v", s.tenant, serveErr)
 		}
 	}()
 	return nil

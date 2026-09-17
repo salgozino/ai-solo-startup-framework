@@ -13,6 +13,7 @@ package opencode_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -327,10 +328,71 @@ func TestRunTask_EmptyStderrOnFail(t *testing.T) {
 	}
 }
 
-// NOTE: ProbeModel tests removed — opencode CLI does not distinguish invalid
-// model from missing prompt (both produce the same generic error). The opencode
-// adapter intentionally does not implement modelProber; materializeAgents skips
-// the probe for it. See adapters/opencode/adapter.go for details.
+// ---- ProbeModel: --format json capability validation (defect: no startup validation) ----
+//
+// opencode's CLI does not distinguish an invalid model from a missing prompt (both produce
+// the same generic error), so ProbeModel here does not validate model names the way
+// claudecode's does. It instead validates a different, previously unchecked precondition:
+// that this opencode build accepts "--format json", the NDJSON flag RunTask unconditionally
+// passes on every invocation (adapter.go). Without this probe, an opencode build that
+// rejects the flag makes every single RunTask call fail at runtime instead of failing once,
+// loudly, at startup.
+
+// TestProbeModel_FormatFlagAccepted_Succeeds verifies that ProbeModel returns nil when the
+// CLI accepts --format json (the ordinary case).
+func TestProbeModel_FormatFlagAccepted_Succeeds(t *testing.T) {
+	bin := helperBinary(t)
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
+
+	if err := adapter.ProbeModel(context.Background()); err != nil {
+		t.Errorf("expected nil error when --format json is accepted, got: %v", err)
+	}
+}
+
+// TestProbeModel_FormatFlagRejected_FailsLoudNamingFlagAndFloor verifies that ProbeModel
+// turns a CLI's rejection of --format json into a loud, actionable startup error naming
+// the flag — instead of leaving it to surface as an opaque failure on every future RunTask.
+func TestProbeModel_FormatFlagRejected_FailsLoudNamingFlagAndFloor(t *testing.T) {
+	bin := helperBinary(t)
+	t.Setenv("FAKEOPENCODE_REJECT_FORMAT_FLAG", "1")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
+
+	err := adapter.ProbeModel(context.Background())
+	if err == nil {
+		t.Fatal("expected error when the CLI rejects --format json, got nil")
+	}
+	if !strings.Contains(err.Error(), "--format") {
+		t.Errorf("expected error to name the --format flag, got: %v", err)
+	}
+}
+
+// TestProbeModel_DeadlineExceeded verifies that a probe which never returns is bounded by
+// ctx, mirroring claudecode's ProbeModel deadline behavior.
+func TestProbeModel_DeadlineExceeded(t *testing.T) {
+	bin := helperBinary(t)
+	t.Setenv("FAKEOPENCODE_PROBE_HANG", "1")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	err := adapter.ProbeModel(ctx)
+	if err == nil {
+		t.Fatal("expected error when probe exceeds deadline, got nil")
+	}
+}
+
+// TestProbeModel_OtherFailure_DoesNotBlockStartup verifies that a non-zero exit unrelated
+// to --format (e.g. the CLI's ordinary missing-prompt validation) does not fail the probe —
+// only rejection of the --format flag itself should abort startup.
+func TestProbeModel_OtherFailure_DoesNotBlockStartup(t *testing.T) {
+	bin := helperBinary(t)
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "anthropic/claude-sonnet-4-20250514", "", "")
+
+	if err := adapter.ProbeModel(context.Background()); err != nil {
+		t.Errorf("expected nil error for an unrelated non-zero exit, got: %v", err)
+	}
+}
 
 // ---- Phase 3: MCP tool use and action intent emission (spec: provider-action-intent-emission) ----
 
@@ -481,5 +543,40 @@ func TestOpenCodeAdapter_TerminatesOnEOF_NoHang(t *testing.T) {
 		}
 	case <-time.After(1 * time.Second):
 		t.Fatal("RunTask did not return within 1 second — reader hung waiting for a sentinel event")
+	}
+}
+
+// TestOpenCodeAdapter_DeadMCPServer_FailsLoudInsteadOfSilentSuccess mirrors
+// claudecode's sibling test: without a health check, a dead MCP server produces a
+// silent false success indistinguishable from "the agent made no tool calls". With
+// MCPHealthCheck wired, RunTask must fail loudly and must never spawn the subprocess.
+func TestOpenCodeAdapter_DeadMCPServer_FailsLoudInsteadOfSilentSuccess(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	t.Setenv("FAKEOPENCODE_DUMP_ARGV", "1")
+	t.Setenv("FAKEOPENCODE_ARGV_FILE", argvFile)
+
+	simulatedDeath := errors.New("simulated mcp server death")
+	adapter := opencode.New(bin, opencode.Options{
+		OutputLimit:    1 << 20,
+		MCPRegistry:    &registryMinter{reg: registry},
+		MCPServerAddr:  srv.Addr(),
+		Tenant:         "acme",
+		AgentName:      "ceo",
+		MCPHealthCheck: func() error { return simulatedDeath },
+	}, "", "", "")
+
+	_, err := adapter.RunTask(context.Background(), "task-dead-mcp", "hello")
+	if err == nil {
+		t.Fatal("expected RunTask to fail loudly when the MCP server is dead, got nil error (silent false success)")
+	}
+	if !errors.Is(err, simulatedDeath) {
+		t.Errorf("expected RunTask error to wrap the health check error, got: %v", err)
+	}
+
+	if _, statErr := os.Stat(argvFile); !os.IsNotExist(statErr) {
+		t.Errorf("expected the opencode subprocess to never be invoked when the MCP server is dead, but argv dump exists (stat err=%v)", statErr)
 	}
 }

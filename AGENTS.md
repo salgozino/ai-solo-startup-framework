@@ -25,6 +25,10 @@ The provider adapters drive external agent CLIs as subprocesses and parse their 
 - **opencode**: the adapter requires `--format json` NDJSON output support. Verified locally with
   `opencode 1.18.31`; no upstream confirmation of the exact floor is available as of this change.
   Older versions that do not emit NDJSON on `--format json` will yield empty parsed output.
+  `Adapter.ProbeModel` (`adapters/opencode/adapter.go`) checks this at startup — via the
+  `modelProber` structural probe loop in `cmd/company/wire.go` — and fails materialize loudly,
+  naming the flag and this version floor, instead of letting the flag fail silently on every
+  `RunTask` call at runtime.
 - **claude**: the adapter requires `--mcp-config`, `--strict-mcp-config`, and
   `--output-format stream-json`. It never requests `--json-schema`.
 

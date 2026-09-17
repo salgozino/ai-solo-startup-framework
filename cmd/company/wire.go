@@ -312,6 +312,11 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 					Tenant:            cfg.Tenant,
 					AgentName:         agCfg.Name,
 					PolicyActionKinds: mcpActionKinds,
+					// mcpSrv.Err reports the shared MCP server's abnormal-death state (see
+					// transport/mcp/server.go). Without this, a dead MCP server left every
+					// RunTask call reporting a false "success" with empty ActionIntents,
+					// indistinguishable from an agent that simply made no tool calls.
+					MCPHealthCheck: mcpSrv.Err,
 				}, agCfg.Model, agCfg.SystemPrompt)
 			case "opencode":
 				prov = opencode.New("opencode", opencode.Options{
@@ -320,6 +325,7 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 					Tenant:            cfg.Tenant,
 					AgentName:         agCfg.Name,
 					PolicyActionKinds: mcpActionKinds,
+					MCPHealthCheck:    mcpSrv.Err,
 				}, agCfg.Model, agCfg.Name, agCfg.SystemPrompt)
 			default:
 				return nil, fmt.Errorf("wire: unknown provider %q for agent %q", agCfg.Provider, agCfg.Name)

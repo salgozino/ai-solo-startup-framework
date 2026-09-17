@@ -87,6 +87,13 @@ type Options struct {
 	// ContextBudget is returned by Capabilities().ContextBudget.
 	ContextBudget int
 	TokenLifetime time.Duration // overrides defaultMintTimeout when non-zero (test-only knob)
+	// MCPHealthCheck reports the MCP server's health when non-nil (production: the running
+	// transport/mcp Server's Err() method value). RunTask consults it before spawning the
+	// subprocess whenever MCPRegistry is configured: a non-nil result aborts the invocation
+	// with an explicit error instead of running an agent whose tool calls could never
+	// reach a live server, which would otherwise return a false "success" with empty
+	// ActionIntents indistinguishable from "the agent made no tool calls".
+	MCPHealthCheck func() error
 }
 
 // Adapter implements port.Provider by running an ephemeral opencode CLI process per task.
@@ -104,6 +111,7 @@ type Adapter struct {
 	policyActionKinds   []string
 	contextBudget       int
 	tokenLifetime       time.Duration
+	mcpHealthCheck      func() error
 }
 
 // New returns an Adapter that invokes opencodeBin as the opencode CLI.
@@ -150,6 +158,7 @@ func New(opencodeBin string, opts Options, model string, agentName string, syste
 		policyActionKinds:   opts.PolicyActionKinds,
 		contextBudget:       opts.ContextBudget,
 		tokenLifetime:       lifetime,
+		mcpHealthCheck:      opts.MCPHealthCheck,
 	}
 }
 
@@ -184,6 +193,15 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 	var handle Drainer
 	var mcpEnv string
 	if a.mcpRegistry != nil {
+		// Consult the MCP server's health before ever spawning the subprocess. Checking
+		// after the fact (post-Drain) would still return a nil error with empty
+		// ActionIntents whenever the agent's own turn happened not to call a tool —
+		// exactly the false "success" this check exists to eliminate.
+		if a.mcpHealthCheck != nil {
+			if healthErr := a.mcpHealthCheck(); healthErr != nil {
+				return port.ProviderResult{}, fmt.Errorf("opencode: mcp server unavailable, refusing to run task without a working MCP endpoint: %w", healthErr)
+			}
+		}
 		deadline, ok := ctx.Deadline()
 		if !ok {
 			deadline = time.Now().Add(a.tokenLifetime)
@@ -343,11 +361,72 @@ func buildMCPConfigJSON(addr, token string) ([]byte, error) {
 	return data, nil
 }
 
-// NOTE: ProbeModel is intentionally NOT implemented for the opencode adapter.
-// Unlike Claude CLI, opencode's "run" command does not distinguish between
-// an invalid model and a missing prompt — both produce the same generic error.
-// Until opencode exposes a model-validation path, this adapter does not satisfy
-// the modelProber interface, and materializeAgents skips the probe for it.
+// requiredCLIFormatFloor documents the opencode CLI version verified locally to accept
+// "--format json" (see AGENTS.md "Provider CLI compatibility"). No upstream changelog
+// confirms the exact minimum version, so this is a soft floor for operator diagnostics,
+// not an enforced version check.
+const requiredCLIFormatFloor = "opencode 1.18.31 (locally verified; no upstream floor confirmation — see AGENTS.md)"
+
+// ProbeModel verifies that the configured opencode binary accepts "--format json", the
+// NDJSON output mode RunTask unconditionally requests on every invocation. Unlike
+// claudecode's ProbeModel, this does not validate model names: opencode's CLI does not
+// distinguish an invalid model from a missing prompt (both produce the same generic
+// error), so model validation is not attempted here.
+//
+// Without this check, installing (or downgrading to) an opencode build that rejects
+// --format json makes RunTask fail for every single task at runtime — a total, silent
+// outage of every opencode-backed agent that only surfaces after an unrelated environment
+// change. ProbeModel turns that into one loud startup failure naming the flag and the
+// verified version floor instead. It satisfies the unexported modelProber interface
+// declared in cmd/company/wire.go (see adapters/claudecode/adapter.go's ProbeModel for the
+// sibling implementation, which probes model validity instead of flag support).
+//
+// The probe passes an empty prompt, mirroring claudecode's technique, so the CLI is
+// expected to exit non-zero either way (missing-prompt validation, or flag rejection) —
+// no real task or model invocation happens. Only a non-zero exit specifically
+// attributable to --format is treated as a probe failure.
+func (a *Adapter) ProbeModel(ctx context.Context) error {
+	args := []string{"run", "--pure", "--format", "json", ""}
+	cmd := exec.CommandContext(ctx, a.opencodeBin, args...) //nolint:gosec // argv slice, no shell
+
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+	cmd.Stdout = io.Discard
+
+	_ = cmd.Run() // always exits non-zero with empty prompt (or the CLI rejects --format)
+
+	if ctx.Err() != nil {
+		return fmt.Errorf("opencode: probe deadline exceeded: %w", ctx.Err())
+	}
+
+	stderr := stderrBuf.String()
+	if isFormatFlagRejection(stderr) {
+		return fmt.Errorf("opencode: CLI at %q does not accept --format json, which every RunTask invocation requires; verified floor: %s\nstderr: %s", a.opencodeBin, requiredCLIFormatFloor, stderr)
+	}
+	// Any other non-zero exit (e.g. the CLI's ordinary missing-prompt validation) means
+	// the flag itself was accepted; unrelated CLI/model problems will still surface on
+	// real invocations, and rejecting startup here would be a false positive.
+	return nil
+}
+
+// isFormatFlagRejection reports whether stderr text indicates the CLI's argument parser
+// rejected --format specifically, rather than failing for an unrelated reason (missing
+// prompt, auth, model errors, etc.). The exact wording is CLI/version-specific and
+// unconfirmed upstream (see AGENTS.md); this matches common flag-rejection phrasings from
+// Go/Cobra-style CLIs and is deliberately conservative — a pattern miss surfaces as no
+// probe error rather than a false failure that would block startup on an unrelated problem.
+func isFormatFlagRejection(stderr string) bool {
+	lower := strings.ToLower(stderr)
+	if !strings.Contains(lower, "--format") {
+		return false
+	}
+	for _, marker := range []string{"unknown flag", "unrecognized flag", "unknown option", "invalid flag", "no such flag", "not a valid flag"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
 
 // ---- port.Provider stub methods (A2A network client side) -------------------
 // The A2A client methods are implemented by transport/a2a, not by this adapter.
