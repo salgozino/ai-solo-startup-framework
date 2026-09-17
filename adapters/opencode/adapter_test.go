@@ -647,6 +647,9 @@ func TestOpenCodeAdapter_DeadMCPServer_FailsLoudInsteadOfSilentSuccess(t *testin
 //   - top-level "mcpServers" key is ABSENT (the invalid, Claude-shaped key that made the
 //     whole config fail opencode's additionalProperties:false root schema)
 //   - the "framework" entry's "type" is the literal string "remote" (not "http")
+//   - the "framework" entry's "enabled" is boolean true (opencode silently never loads a
+//     disabled entry, so a regression that emits "enabled": false would otherwise produce
+//     a healthy-looking config that no tool call can ever reach)
 //   - "url" is set and matches the running MCP server's address
 //   - the bearer token appears in "headers" (never on argv, never in a persisted file)
 func TestOpenCodeMCPConfig_MatchesRealCLISchemaContract(t *testing.T) {
@@ -710,6 +713,9 @@ func TestOpenCodeMCPConfig_MatchesRealCLISchemaContract(t *testing.T) {
 
 	if got, _ := entry["type"].(string); got != "remote" {
 		t.Errorf("expected \"mcp\".\"framework\".\"type\" == \"remote\" (opencode's McpRemoteConfig), got %q", got)
+	}
+	if got, ok := entry["enabled"].(bool); !ok || got != true {
+		t.Errorf("expected \"mcp\".\"framework\".\"enabled\" == boolean true (opencode ignores a disabled entry — it never loads the server), got %v (%T)", entry["enabled"], entry["enabled"])
 	}
 	wantURL := "http://" + srv.Addr()
 	if got, _ := entry["url"].(string); got != wantURL {

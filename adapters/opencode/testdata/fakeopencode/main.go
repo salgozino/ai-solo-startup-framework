@@ -204,6 +204,9 @@ func emitNDJSONText(text string) {
 // connects to the MCP server it describes. When callTool is true it also calls the
 // "telegram_send" tool once; when false it completes the handshake and stops, simulating
 // an agent that reached the server but chose not to call any tool.
+// If the "framework" entry's "enabled" field is false, it does not connect at all — this
+// mirrors the real opencode CLI, which never loads a disabled config entry, so the
+// adapter's never-contacted guard is what must fire in that case.
 // Errors are swallowed — the test asserts on the server-side state, not this call.
 func contactMCP(callTool bool) {
 	raw := os.Getenv("OPENCODE_CONFIG_CONTENT")
@@ -216,6 +219,12 @@ func contactMCP(callTool bool) {
 	}
 	entry, ok := cfg.MCP["framework"]
 	if !ok {
+		return
+	}
+	if !entry.Enabled {
+		// Mirrors the real opencode CLI: a disabled entry in the config schema is never
+		// loaded, so a CLI that received "enabled": false never contacts the server at
+		// all — same as if the entry were missing.
 		return
 	}
 	token := strings.TrimPrefix(entry.Headers["Authorization"], "Bearer ")
