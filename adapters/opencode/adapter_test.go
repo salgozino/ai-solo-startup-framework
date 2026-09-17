@@ -13,6 +13,7 @@ package opencode_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -551,13 +552,19 @@ func TestOpenCodeAdapter_EphemeralConfig_ScopedToSubprocessEnv(t *testing.T) {
 		t.Fatalf("RunTask: %v", err)
 	}
 
-	// Property 1: the subprocess actually received a populated OPENCODE_CONFIG_CONTENT.
+	// Property 1: the subprocess actually received a populated OPENCODE_CONFIG_CONTENT,
+	// keyed "mcp" (opencode's own schema), never "mcpServers" (the Claude-shaped key
+	// this adapter used to emit — see TestOpenCodeMCPConfig_MatchesRealCLISchemaContract
+	// for the full schema assertion).
 	raw, err := os.ReadFile(dumpFile)
 	if err != nil {
 		t.Fatalf("read env dump: %v", err)
 	}
-	if !strings.Contains(string(raw), "mcpServers") {
+	if !strings.Contains(string(raw), `"mcp"`) {
 		t.Errorf("subprocess did not receive a populated OPENCODE_CONFIG_CONTENT: dump=%q", string(raw))
+	}
+	if strings.Contains(string(raw), "mcpServers") {
+		t.Errorf("subprocess received the Claude-shaped \"mcpServers\" key; opencode's schema requires top-level \"mcp\" instead: dump=%q", string(raw))
 	}
 
 	// Property 2: the parent (test) process environment was never mutated. This is
@@ -622,5 +629,103 @@ func TestOpenCodeAdapter_DeadMCPServer_FailsLoudInsteadOfSilentSuccess(t *testin
 
 	if _, statErr := os.Stat(argvFile); !os.IsNotExist(statErr) {
 		t.Errorf("expected the opencode subprocess to never be invoked when the MCP server is dead, but argv dump exists (stat err=%v)", statErr)
+	}
+}
+
+// TestOpenCodeMCPConfig_MatchesRealCLISchemaContract is the falsifiable schema contract
+// test for JD-1 (adapter emits a Claude-shaped config that opencode's real CLI rejects).
+//
+// It deliberately does NOT reuse any type from adapters/opencode/adapter.go (that would
+// only prove the adapter agrees with itself, exactly how the original defect stayed green:
+// the old fakeopencode duplicated the adapter's own mcpConfigFile/mcpServerEntry structs,
+// so both sides silently accepted the wrong "mcpServers"/"http" shape together). Instead it
+// decodes the raw OPENCODE_CONFIG_CONTENT JSON into a generic map[string]any and asserts
+// directly against opencode's published config schema (https://opencode.ai/config.json,
+// $defs.Config: additionalProperties:false, $defs.McpRemoteConfig: type must be "remote"):
+//
+//   - top-level "mcp" key is present
+//   - top-level "mcpServers" key is ABSENT (the invalid, Claude-shaped key that made the
+//     whole config fail opencode's additionalProperties:false root schema)
+//   - the "framework" entry's "type" is the literal string "remote" (not "http")
+//   - "url" is set and matches the running MCP server's address
+//   - the bearer token appears in "headers" (never on argv, never in a persisted file)
+func TestOpenCodeMCPConfig_MatchesRealCLISchemaContract(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+	spy := &spyMinter{reg: registry}
+
+	dumpFile := filepath.Join(t.TempDir(), "env-dump.txt")
+	t.Setenv("FAKEOPENCODE_DUMP_ENV_PATH", dumpFile)
+	// The fake need not actually reach the server for this test — it only asserts on the
+	// JSON shape the adapter handed the subprocess.
+	t.Setenv("FAKEOPENCODE_CONNECT_MCP_ONLY", "1")
+
+	adapter := opencode.New(bin, opencode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   spy,
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "", "")
+
+	if _, err := adapter.RunTask(context.Background(), "task-schema-contract", "hello"); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if len(spy.tokens) != 1 {
+		t.Fatalf("expected exactly 1 minted token, got %d", len(spy.tokens))
+	}
+	token := spy.tokens[0]
+
+	raw, err := os.ReadFile(dumpFile)
+	if err != nil {
+		t.Fatalf("read env dump: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("OPENCODE_CONFIG_CONTENT is not valid JSON: %v; raw=%q", err, string(raw))
+	}
+
+	if _, present := doc["mcpServers"]; present {
+		t.Errorf("config must not contain the Claude-shaped top-level \"mcpServers\" key (invalid under opencode's additionalProperties:false schema): %q", string(raw))
+	}
+
+	mcpRaw, present := doc["mcp"]
+	if !present {
+		t.Fatalf("config must contain the top-level \"mcp\" key required by opencode's schema; raw=%q", string(raw))
+	}
+	mcp, ok := mcpRaw.(map[string]any)
+	if !ok {
+		t.Fatalf("\"mcp\" must be a JSON object, got %T", mcpRaw)
+	}
+
+	entryRaw, present := mcp["framework"]
+	if !present {
+		t.Fatalf("expected an entry named \"framework\" under \"mcp\"; raw=%q", string(raw))
+	}
+	entry, ok := entryRaw.(map[string]any)
+	if !ok {
+		t.Fatalf("\"mcp\".\"framework\" must be a JSON object, got %T", entryRaw)
+	}
+
+	if got, _ := entry["type"].(string); got != "remote" {
+		t.Errorf("expected \"mcp\".\"framework\".\"type\" == \"remote\" (opencode's McpRemoteConfig), got %q", got)
+	}
+	wantURL := "http://" + srv.Addr()
+	if got, _ := entry["url"].(string); got != wantURL {
+		t.Errorf("expected \"mcp\".\"framework\".\"url\" == %q, got %q", wantURL, got)
+	}
+
+	headersRaw, present := entry["headers"]
+	if !present {
+		t.Fatalf("expected \"mcp\".\"framework\".\"headers\" to carry the bearer token; raw=%q", string(raw))
+	}
+	headers, ok := headersRaw.(map[string]any)
+	if !ok {
+		t.Fatalf("\"headers\" must be a JSON object, got %T", headersRaw)
+	}
+	wantAuth := "Bearer " + token
+	if got, _ := headers["Authorization"].(string); got != wantAuth {
+		t.Errorf("expected bearer token in \"headers\".\"Authorization\", got %q", got)
 	}
 }

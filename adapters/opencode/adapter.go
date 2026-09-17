@@ -59,14 +59,20 @@ type TokenMinter interface {
 	Mint(tenant, agent, taskID string, exp time.Time) (string, Drainer)
 }
 
-// mcpConfigFile is the MCP config JSON placed in OPENCODE_CONFIG_CONTENT.
-type mcpConfigFile struct {
-	MCPServers map[string]mcpServerEntry `json:"mcpServers"`
+// opencodeMCPConfig is the MCP config JSON placed in OPENCODE_CONFIG_CONTENT, shaped to
+// match opencode's own config schema (https://opencode.ai/config.json), NOT the Claude
+// Desktop / claudecode adapter's "mcpServers" shape. The two are genuinely different
+// schemas — see buildMCPConfigJSON's doc comment for why — so this type is deliberately
+// not shared with claudecode.mcpConfigFile even though the two once looked identical.
+type opencodeMCPConfig struct {
+	MCP map[string]opencodeMCPServerEntry `json:"mcp"`
 }
 
-type mcpServerEntry struct {
+// opencodeMCPServerEntry mirrors opencode's $defs.McpRemoteConfig entry shape.
+type opencodeMCPServerEntry struct {
 	Type    string            `json:"type"`
 	URL     string            `json:"url"`
+	Enabled bool              `json:"enabled"`
 	Headers map[string]string `json:"headers"`
 }
 
@@ -352,16 +358,27 @@ func parseStreamText(raw []byte) string {
 	return sb.String()
 }
 
-// buildMCPConfigJSON marshals the MCP server descriptor placed in OPENCODE_CONFIG_CONTENT:
+// buildMCPConfigJSON marshals the MCP server descriptor placed in OPENCODE_CONFIG_CONTENT,
+// in the shape opencode's own config schema (https://opencode.ai/config.json) requires:
 //
-//	{"mcpServers": {"framework": {"type": "http", "url": "http://<addr>",
+//	{"mcp": {"framework": {"type": "remote", "url": "http://<addr>", "enabled": true,
 //	  "headers": {"Authorization": "Bearer <token>"}}}}
+//
+// This is deliberately NOT the Claude-shaped {"mcpServers": {...}} envelope the claudecode
+// adapter writes for --mcp-config: opencode's root Config type declares
+// "additionalProperties": false, so an unrecognized top-level key such as "mcpServers"
+// invalidates the whole config rather than being ignored — the server is then silently
+// never registered, and every RunTask call whose subprocess tries to reach it fails via the
+// never-contacted guard below. The correct top-level key is "mcp", entries are
+// McpRemoteConfig (type must be the literal "remote", not "http"), and "enabled" is
+// required for opencode to actually load the entry.
 func buildMCPConfigJSON(addr, token string) ([]byte, error) {
-	cfg := mcpConfigFile{
-		MCPServers: map[string]mcpServerEntry{
+	cfg := opencodeMCPConfig{
+		MCP: map[string]opencodeMCPServerEntry{
 			"framework": {
-				Type: "http",
-				URL:  "http://" + addr,
+				Type:    "remote",
+				URL:     "http://" + addr,
+				Enabled: true,
 				Headers: map[string]string{
 					"Authorization": "Bearer " + token,
 				},

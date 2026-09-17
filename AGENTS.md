@@ -29,8 +29,14 @@ The provider adapters drive external agent CLIs as subprocesses and parse their 
   `modelProber` structural probe loop in `cmd/company/wire.go` — and fails materialize loudly,
   naming the flag and this version floor, instead of letting the flag fail silently on every
   `RunTask` call at runtime.
+  MCP config shape: opencode's own schema (https://opencode.ai/config.json), NOT Claude's
+  `mcpServers` shape — the root `Config` type declares `additionalProperties: false`, so an
+  unrecognized top-level key such as `mcpServers` invalidates the whole config and the server
+  is silently never registered. The adapter emits `{"mcp": {"framework": {"type": "remote",
+  "url": ..., "enabled": true, "headers": {"Authorization": "Bearer <token>"}}}}`.
 - **claude**: the adapter requires `--mcp-config`, `--strict-mcp-config`, and
-  `--output-format stream-json`. It never requests `--json-schema`.
+  `--output-format stream-json`. It never requests `--json-schema`. Its `--mcp-config` file
+  uses the Claude-shaped `mcpServers` envelope, which is unrelated to opencode's schema above.
 
 Both adapters receive MCP configuration ephemerally per invocation — claude through a `0600`
 temp file removed on exit, opencode through the subprocess-scoped `OPENCODE_CONFIG_CONTENT`

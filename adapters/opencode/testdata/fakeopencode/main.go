@@ -54,16 +54,18 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// mcpConfigFile mirrors the MCP config JSON the opencode adapter puts in
-// OPENCODE_CONFIG_CONTENT: {"mcpServers": {"framework": {"type": "http", "url": "...",
-// "headers": {"Authorization": "Bearer ..."}}}}.
-type mcpConfigFile struct {
-	MCPServers map[string]mcpServerEntry `json:"mcpServers"`
+// opencodeMCPConfig mirrors the MCP config JSON the opencode adapter puts in
+// OPENCODE_CONFIG_CONTENT, in opencode's own config schema shape (not Claude's
+// "mcpServers" shape): {"mcp": {"framework": {"type": "remote", "url": "...",
+// "enabled": true, "headers": {"Authorization": "Bearer ..."}}}}.
+type opencodeMCPConfig struct {
+	MCP map[string]opencodeMCPServerEntry `json:"mcp"`
 }
 
-type mcpServerEntry struct {
+type opencodeMCPServerEntry struct {
 	Type    string            `json:"type"`
 	URL     string            `json:"url"`
+	Enabled bool              `json:"enabled"`
 	Headers map[string]string `json:"headers"`
 }
 
@@ -208,11 +210,11 @@ func contactMCP(callTool bool) {
 	if raw == "" {
 		return
 	}
-	var cfg mcpConfigFile
+	var cfg opencodeMCPConfig
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		return
 	}
-	entry, ok := cfg.MCPServers["framework"]
+	entry, ok := cfg.MCP["framework"]
 	if !ok {
 		return
 	}
