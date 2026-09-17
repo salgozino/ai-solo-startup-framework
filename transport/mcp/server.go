@@ -2,9 +2,11 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"sync/atomic"
 
 	mcpauth "github.com/modelcontextprotocol/go-sdk/auth"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -23,6 +25,7 @@ type Server struct {
 	listener net.Listener
 	registry *Registry
 	tenant   string
+	serveErr atomic.Value // abnormal Serve death (not http.ErrServerClosed); see Err
 }
 
 // New creates an MCP Server configured for tenant, registering one tool per policy key.
@@ -70,8 +73,18 @@ func (s *Server) Start(addr string) error {
 	}
 	s.listener = ln
 	go func() {
-		_ = s.httpSrv.Serve(ln)
+		if serveErr := s.httpSrv.Serve(ln); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			s.serveErr.Store(serveErr)
+		}
 	}()
+	return nil
+}
+
+// Err reports the Serve goroutine's abnormal-death error, or nil if healthy/stopped normally.
+func (s *Server) Err() error {
+	if v := s.serveErr.Load(); v != nil {
+		return v.(error)
+	}
 	return nil
 }
 

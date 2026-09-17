@@ -50,12 +50,14 @@ type spyMinter struct {
 	reg    *transportmcp.Registry
 	mu     sync.Mutex
 	tokens []string
+	exp    time.Time
 }
 
 func (m *spyMinter) Mint(tenant, agent, taskID string, exp time.Time) (string, claudecode.Drainer) {
 	token, handle := m.reg.Mint(tenant, agent, taskID, exp)
 	m.mu.Lock()
 	m.tokens = append(m.tokens, token)
+	m.exp = exp
 	m.mu.Unlock()
 	return token, handle
 }
@@ -478,6 +480,30 @@ func TestClaudeAdapter_NoJsonSchema_InArgv(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "--json-schema") {
 		t.Errorf("argv must never contain --json-schema: %q", string(raw))
+	}
+}
+
+// TestClaudeAdapter_MintThenFail_ReleasesEntryAndLifetime: RED for (B) registry leak and (E) ceiling.
+func TestClaudeAdapter_MintThenFail_ReleasesEntryAndLifetime(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+	spy := &spyMinter{reg: registry}
+	adapter := claudecode.New(bin, claudecode.Options{
+		OutputLimit: 1 << 20, MCPRegistry: spy, MCPServerAddr: srv.Addr(), Tenant: "acme", AgentName: "ceo",
+	}, "", "")
+
+	before := time.Now()
+	if _, err := adapter.RunTask(context.Background(), "task-mint-fail", "fail"); err == nil {
+		t.Fatal("expected error for non-zero exit")
+	}
+	if len(spy.tokens) != 1 {
+		t.Fatalf("expected exactly 1 minted token, got %d", len(spy.tokens))
+	}
+	if _, err := registry.Resolve(spy.tokens[0], "acme"); err == nil {
+		t.Error("expected registry entry released after a failed RunTask, but Resolve still succeeded (leak)")
+	}
+	if spy.exp.Sub(before) < time.Hour {
+		t.Errorf("token lifetime too short for a long-running invocation: only %v from mint", spy.exp.Sub(before))
 	}
 }
 

@@ -105,17 +105,13 @@ func registerTools(srv *gomcp.Server, tenant string, policies map[string]config.
 
 				dkey := dedupeKey(token, kind, args)
 
+				// Lock spans check+Record+insert so a failed Record can't leave a false dedupe entry.
 				inv.mu.Lock()
-				existingReceipt, isDupe := inv.dedupe[dkey]
-				if isDupe {
-					inv.mu.Unlock()
+				defer inv.mu.Unlock()
+
+				if existingReceipt, isDupe := inv.dedupe[dkey]; isDupe {
 					return buildAckResult(existingReceipt, kind, true), nil, nil
 				}
-
-				// New invocation: record intent.
-				receipt := newReceipt()
-				inv.dedupe[dkey] = receipt
-				inv.mu.Unlock()
 
 				intent := port.ActionIntent{
 					Kind:    kind,
@@ -128,6 +124,8 @@ func registerTools(srv *gomcp.Server, tenant string, policies map[string]config.
 					}, nil, nil
 				}
 
+				receipt := newReceipt()
+				inv.dedupe[dkey] = receipt
 				return buildAckResult(receipt, kind, false), nil, nil
 			},
 		)

@@ -40,6 +40,20 @@ func (m *registryMinter) Mint(tenant, agent, taskID string, exp time.Time) (stri
 	return m.reg.Mint(tenant, agent, taskID, exp)
 }
 
+// spyMinter records every minted token/expiry for direct assertion.
+type spyMinter struct {
+	reg    *transportmcp.Registry
+	tokens []string
+	exp    time.Time
+}
+
+func (m *spyMinter) Mint(tenant, agent, taskID string, exp time.Time) (string, opencode.Drainer) {
+	token, handle := m.reg.Mint(tenant, agent, taskID, exp)
+	m.tokens = append(m.tokens, token)
+	m.exp = exp
+	return token, handle
+}
+
 // startTestMCPServer starts an in-process MCP server with a single
 // "telegram_send" tool for tenant "acme" and registers cleanup.
 func startTestMCPServer(t *testing.T) (*transportmcp.Server, *transportmcp.Registry) {
@@ -369,6 +383,30 @@ func TestOpenCodeAdapter_NoToolCall_EmptyIntents(t *testing.T) {
 	}
 	if len(result.ActionIntents) != 0 {
 		t.Errorf("expected empty ActionIntents, got %+v", result.ActionIntents)
+	}
+}
+
+// TestOpenCodeAdapter_MintThenFail_ReleasesEntryAndLifetime: RED for (B) registry leak and (E) ceiling.
+func TestOpenCodeAdapter_MintThenFail_ReleasesEntryAndLifetime(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+	spy := &spyMinter{reg: registry}
+	adapter := opencode.New(bin, opencode.Options{
+		OutputLimit: 1 << 20, MCPRegistry: spy, MCPServerAddr: srv.Addr(), Tenant: "acme", AgentName: "ceo",
+	}, "", "", "")
+
+	before := time.Now()
+	if _, err := adapter.RunTask(context.Background(), "task-mint-fail", "fail"); err == nil {
+		t.Fatal("expected error for non-zero exit")
+	}
+	if len(spy.tokens) != 1 {
+		t.Fatalf("expected exactly 1 minted token, got %d", len(spy.tokens))
+	}
+	if _, err := registry.Resolve(spy.tokens[0], "acme"); err == nil {
+		t.Error("expected registry entry released after a failed RunTask, but Resolve still succeeded (leak)")
+	}
+	if spy.exp.Sub(before) < time.Hour {
+		t.Errorf("token lifetime too short for a long-running invocation: only %v from mint", spy.exp.Sub(before))
 	}
 }
 

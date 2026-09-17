@@ -34,8 +34,9 @@ const defaultOutputLimit int64 = 1 << 20 // 1 MiB
 // exit and the adapter draining it.
 const defaultTokenGrace = 30 * time.Second
 
-// defaultMintTimeout is the token lifetime used when ctx carries no deadline.
-const defaultMintTimeout = 5 * time.Minute
+// defaultMintTimeout: token lifetime with no ctx deadline. Drain releases the entry
+// regardless, so this only avoids mid-task 401s from the prior, arbitrary 5min ceiling.
+const defaultMintTimeout = 24 * time.Hour
 
 // Drainer is satisfied by a live MCP invocation handle: after the subprocess exits,
 // Drain releases the invocation and returns any action intents the MCP server's sink
@@ -89,6 +90,7 @@ type Options struct {
 	PolicyActionKinds []string
 	// ContextBudget is returned by Capabilities().ContextBudget.
 	ContextBudget int
+	TokenLifetime time.Duration // overrides defaultMintTimeout when non-zero (test-only knob)
 }
 
 // Adapter implements port.Provider by running an ephemeral claude CLI process per task.
@@ -104,6 +106,7 @@ type Adapter struct {
 	agentName         string
 	policyActionKinds []string
 	contextBudget     int
+	tokenLifetime     time.Duration
 }
 
 // New returns an Adapter that invokes claudeBin as the claude CLI.
@@ -116,6 +119,10 @@ func New(claudeBin string, opts Options, model string, systemPromptPath string) 
 	if limit <= 0 {
 		limit = defaultOutputLimit
 	}
+	lifetime := opts.TokenLifetime
+	if lifetime <= 0 {
+		lifetime = defaultMintTimeout
+	}
 	return &Adapter{
 		claudeBin:         claudeBin,
 		limit:             limit,
@@ -127,6 +134,7 @@ func New(claudeBin string, opts Options, model string, systemPromptPath string) 
 		agentName:         opts.AgentName,
 		policyActionKinds: opts.PolicyActionKinds,
 		contextBudget:     opts.ContextBudget,
+		tokenLifetime:     lifetime,
 	}
 }
 
@@ -161,10 +169,11 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 	if a.mcpRegistry != nil {
 		deadline, ok := ctx.Deadline()
 		if !ok {
-			deadline = time.Now().Add(defaultMintTimeout)
+			deadline = time.Now().Add(a.tokenLifetime)
 		}
 		token, h := a.mcpRegistry.Mint(a.tenant, a.agentName, taskID, deadline.Add(defaultTokenGrace))
 		handle = h
+		defer h.Drain() // release on every return path; idempotent
 
 		path, err := writeEphemeralMCPConfig(a.mcpServerAddr, token)
 		if err != nil {
