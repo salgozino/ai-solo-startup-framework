@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -109,6 +110,75 @@ func TestServer_ToolDescription_DiscloseContract(t *testing.T) {
 	}
 	if !strings.Contains(desc, "does not") {
 		t.Errorf("tool description missing 'does not': %q", result.Tools[0].Description)
+	}
+}
+
+// TestServer_ToolInputSchema_DeclaresRequiredBody: RED — the advertised tool contract must
+// name the "body" argument, because core/supervisor's extractBody reads only Payload["body"].
+// An unconstrained object schema lets an agent send {"message": ...}, which yields an empty
+// body and a Telegram "message text is empty" rejection after human approval.
+func TestServer_ToolInputSchema_DeclaresRequiredBody(t *testing.T) {
+	reg := transportmcp.NewRegistry()
+	policies := map[string]config.Policy{"telegram_send": {}}
+	srv := transportmcp.New("acme", policies, reg)
+	addr := startServer(t, srv)
+
+	token, _ := reg.Mint("acme", "worker", "t1", time.Now().Add(time.Hour))
+	session := connectMCPClient(t, addr, token)
+
+	result, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	if len(result.Tools) == 0 {
+		t.Fatal("no tools returned")
+	}
+
+	schema := decodeInputSchema(t, result.Tools[0].InputSchema)
+
+	if schema.Type != "object" {
+		t.Errorf("input schema type: expected %q, got %q", "object", schema.Type)
+	}
+
+	body, ok := schema.Properties["body"]
+	if !ok {
+		t.Fatalf("input schema declares no %q property; properties: %v", "body", schema.Properties)
+	}
+	if body.Type != "string" {
+		t.Errorf("body property type: expected %q, got %q", "string", body.Type)
+	}
+	if body.Description == "" {
+		t.Error("body property has no description; the agent is not told what to put in it")
+	}
+
+	if !slices.Contains(schema.Required, "body") {
+		t.Errorf("input schema does not mark %q required; required: %v", "body", schema.Required)
+	}
+}
+
+// TestServer_ToolCall_MissingBody_Rejected: RED — the go-sdk validates tools/call arguments
+// against the declared input schema server-side (mcp.applySchema -> jsonschema.Resolved.Validate,
+// see go-sdk@v1.8.0/mcp/server.go:402). A call without "body" must therefore be rejected
+// rather than recording an intent the supervisor would read as an empty body.
+func TestServer_ToolCall_MissingBody_Rejected(t *testing.T) {
+	reg := transportmcp.NewRegistry()
+	policies := map[string]config.Policy{"telegram_send": {}}
+	srv := transportmcp.New("acme", policies, reg)
+	addr := startServer(t, srv)
+
+	token, handle := reg.Mint("acme", "worker", "t1", time.Now().Add(time.Hour))
+	session := connectMCPClient(t, addr, token)
+
+	result, err := session.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "telegram_send",
+		Arguments: map[string]any{"message": "hi"},
+	})
+	if err == nil && (result == nil || !result.IsError) {
+		t.Error("CallTool without \"body\": expected rejection (error or isError=true)")
+	}
+
+	if intents := handle.Drain(); len(intents) != 0 {
+		t.Errorf("Drain: expected 0 intents for a rejected call, got %d", len(intents))
 	}
 }
 
@@ -284,6 +354,35 @@ func TestServer_BindFailure_ReturnsError(t *testing.T) {
 	if err := srv.Start(occupiedAddr); err == nil {
 		t.Error("Start on occupied port: expected error, got nil")
 	}
+}
+
+// toolInputSchema is the subset of a JSON Schema object the tool contract tests assert on.
+// Client-side, Tool.InputSchema holds the default JSON marshaling of the server's schema,
+// so it is re-decoded through JSON rather than type-asserted.
+type toolInputSchema struct {
+	Type       string `json:"type"`
+	Required   []string
+	Properties map[string]struct {
+		Type        string `json:"type"`
+		Description string `json:"description"`
+	}
+}
+
+// decodeInputSchema re-decodes a tool's advertised input schema into toolInputSchema.
+func decodeInputSchema(t *testing.T, raw any) toolInputSchema {
+	t.Helper()
+	if raw == nil {
+		t.Fatal("tool has no InputSchema")
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("marshal InputSchema: %v", err)
+	}
+	var s toolInputSchema
+	if err := json.Unmarshal(b, &s); err != nil {
+		t.Fatalf("unmarshal InputSchema %s: %v", b, err)
+	}
+	return s
 }
 
 // extractStructuredContent parses StructuredContent from a CallToolResult.

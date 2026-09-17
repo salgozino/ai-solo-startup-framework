@@ -8,19 +8,54 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/salgozino/ai-solo-startup-framework/config"
 	"github.com/salgozino/ai-solo-startup-framework/core/port"
 )
 
+// bodyArg is the single argument key every action tool accepts. It is not cosmetic:
+// core/supervisor's extractBody reads only ActionIntent.Payload["body"], so an intent
+// recorded under any other key reaches the gateway with empty text.
+const bodyArg = "body"
+
 // buildToolDescription returns the spec-mandated disclosure text for a tool of the given kind.
 // Design Decision C: description must state it records intent and does not execute.
+// It also names the body argument, so the contract is legible to the model in prose as
+// well as in the input schema.
 func buildToolDescription(kind string) string {
 	return fmt.Sprintf(
-		"Calling this tool records an intent for %s for later policy classification and does not execute the action. Call once; the outcome is unavailable this turn.",
-		kind,
+		"Calling this tool records an intent for %s for later policy classification and does not execute the action. "+
+			"Pass the full message text to be delivered in the required %q argument; it is used verbatim if the intent is approved. "+
+			"Call once; the outcome is unavailable this turn.",
+		kind, bodyArg,
 	)
+}
+
+// buildInputSchema returns the input schema advertised for an action tool.
+//
+// Without an explicit schema, gomcp.AddTool infers one from the In type parameter
+// (map[string]any), producing an unconstrained object with no properties and no required
+// keys — which never tells the agent which argument key to use. The schema is built fresh
+// per tool so no two registered tools share a *jsonschema.Schema pointer.
+//
+// Additional properties are deliberately left permitted: the handler records the whole
+// argument map into ActionIntent.Payload, and only "body" is load-bearing downstream.
+func buildInputSchema(kind string) *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type: "object",
+		Properties: map[string]*jsonschema.Schema{
+			bodyArg: {
+				Type: "string",
+				Description: fmt.Sprintf(
+					"The message text to be delivered by %s if the intent is approved. Sent verbatim; must not be empty.",
+					kind,
+				),
+			},
+		},
+		Required: []string{bodyArg},
+	}
 }
 
 // dedupeKey builds a deterministic key from token + kind + a sorted-key JSON encoding of payload.
@@ -84,6 +119,7 @@ func registerTools(srv *gomcp.Server, tenant string, policies map[string]config.
 			&gomcp.Tool{
 				Name:        kind,
 				Description: buildToolDescription(kind),
+				InputSchema: buildInputSchema(kind),
 			},
 			func(ctx context.Context, req *gomcp.CallToolRequest, args map[string]any) (*gomcp.CallToolResult, any, error) {
 				if req.Extra == nil || req.Extra.TokenInfo == nil {
