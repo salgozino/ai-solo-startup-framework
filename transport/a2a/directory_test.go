@@ -115,11 +115,73 @@ func TestPeerDirectory_RebindFails(t *testing.T) {
 	}
 }
 
+// TestPeerDirectory_BindUndeclaredRoleFails verifies that binding a role that
+// was never declared at construction fails with an error wrapping
+// ErrUnknownRole and naming that role, and — the part BaseURL alone cannot
+// prove — that the rejected call recorded nothing.
+// Satisfies: peer-directory "Binding an undeclared role returns a named
+// 'unknown role' error" (the Bind-side counterpart of
+// TestPeerDirectory_UnknownRole).
+func TestPeerDirectory_BindUndeclaredRoleFails(t *testing.T) {
+	dir, err := NewPeerDirectory([]string{"ceo", "engineer"})
+	if err != nil {
+		t.Fatalf("NewPeerDirectory: %v", err)
+	}
+
+	const attemptedURL = "http://127.0.0.1:60001"
+	err = dir.Bind("designer", attemptedURL)
+	if err == nil {
+		t.Fatal("expected an error binding an undeclared role, got nil")
+	}
+	if !errors.Is(err, ErrUnknownRole) {
+		t.Errorf("expected ErrUnknownRole, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "designer") {
+		t.Errorf("expected the error to name the role %q, got %q", "designer", err.Error())
+	}
+
+	// The rejected role must stay unresolvable, and must never surface the URL
+	// the caller attempted to publish.
+	got, lookupErr := dir.BaseURL("designer")
+	if lookupErr == nil {
+		t.Fatalf("expected BaseURL(%q) to keep failing after a rejected Bind, got %q", "designer", got)
+	}
+	if !errors.Is(lookupErr, ErrUnknownRole) {
+		t.Errorf("expected BaseURL to keep returning ErrUnknownRole, got %v", lookupErr)
+	}
+	if got != "" {
+		t.Errorf("BaseURL(%q) = %q after a rejected Bind, want %q", "designer", got, "")
+	}
+
+	// BaseURL short-circuits on the declared set, so it returns ErrUnknownRole
+	// whether the rejected Bind wrote to the bound map or not. Inspect the map
+	// directly (this test lives in package a2a) to prove the failure path
+	// recorded nothing at all, as its contract documents.
+	dir.mu.RLock()
+	recorded, wasRecorded := dir.bound["designer"]
+	boundCount := len(dir.bound)
+	dir.mu.RUnlock()
+	if wasRecorded {
+		t.Errorf("rejected Bind recorded %q = %q, want no entry", "designer", recorded)
+	}
+	if boundCount != 0 {
+		t.Errorf("expected no role bound after a rejected Bind, got %d bound role(s)", boundCount)
+	}
+}
+
 // TestPeerDirectory_ConcurrentBindAndBaseURL runs Bind and BaseURL from
 // parallel goroutines to prove the directory's sync.RWMutex actually guards
 // concurrent access (design D7: "Task goroutines call BaseURL (read lock)
-// while the materializeAgents loop still calls Bind (write lock)"). Only
-// meaningful under `go test -race`.
+// while the materializeAgents loop still calls Bind (write lock)").
+//
+// `-race` only reports data races, so the invariants are asserted explicitly
+// and the test stays meaningful without it: every Bind must succeed, every
+// concurrent read must return either ErrPeerNotRegistered with an empty URL
+// (its own Bind has not landed yet — the only legitimate interleaving) or
+// exactly the URL that role was bound with, and once every goroutine has
+// finished, every declared role must resolve to its own URL. Results are
+// collected per role and asserted after wg.Wait, because t.Fatalf is illegal
+// from a non-test goroutine.
 func TestPeerDirectory_ConcurrentBindAndBaseURL(t *testing.T) {
 	roles := []string{"ceo", "engineer", "designer", "qa"}
 	dir, err := NewPeerDirectory(roles)
@@ -127,17 +189,69 @@ func TestPeerDirectory_ConcurrentBindAndBaseURL(t *testing.T) {
 		t.Fatalf("NewPeerDirectory: %v", err)
 	}
 
+	want := make(map[string]string, len(roles))
+	for i, role := range roles {
+		want[role] = fmt.Sprintf("http://127.0.0.1:%d", 10000+i)
+	}
+
+	type readResult struct {
+		url string
+		err error
+	}
+	// Each goroutine owns exactly one slot, so the slices need no extra
+	// synchronisation of their own — wg.Wait happens-before every read below.
+	bindErrs := make([]error, len(roles))
+	reads := make([]readResult, len(roles))
+
 	var wg sync.WaitGroup
 	for i, role := range roles {
 		wg.Add(2)
-		go func(role, url string) {
+		go func(i int, role string) {
 			defer wg.Done()
-			_ = dir.Bind(role, url)
-		}(role, fmt.Sprintf("http://127.0.0.1:%d", 10000+i))
-		go func(role string) {
+			bindErrs[i] = dir.Bind(role, want[role])
+		}(i, role)
+		go func(i int, role string) {
 			defer wg.Done()
-			_, _ = dir.BaseURL(role)
-		}(role)
+			url, err := dir.BaseURL(role)
+			reads[i] = readResult{url: url, err: err}
+		}(i, role)
 	}
 	wg.Wait()
+
+	for i, role := range roles {
+		if bindErrs[i] != nil {
+			t.Errorf("Bind(%q, %q) = %v, want nil", role, want[role], bindErrs[i])
+		}
+	}
+
+	for i, role := range roles {
+		got := reads[i]
+		switch {
+		case got.err == nil:
+			// A successful concurrent read must carry the exact bound URL,
+			// never a silently empty one.
+			if got.url != want[role] {
+				t.Errorf("concurrent BaseURL(%q) = %q with nil error, want %q", role, got.url, want[role])
+			}
+		case errors.Is(got.err, ErrPeerNotRegistered):
+			if got.url != "" {
+				t.Errorf("concurrent BaseURL(%q) returned URL %q alongside ErrPeerNotRegistered, want %q", role, got.url, "")
+			}
+		default:
+			t.Errorf("concurrent BaseURL(%q) = (%q, %v), want either the bound URL or ErrPeerNotRegistered", role, got.url, got.err)
+		}
+	}
+
+	// Write-once/lookup invariant: after every Bind has returned, no write was
+	// dropped, overwritten, or crossed with another role's URL.
+	for _, role := range roles {
+		got, err := dir.BaseURL(role)
+		if err != nil {
+			t.Errorf("BaseURL(%q) after wg.Wait: %v, want the bound URL", role, err)
+			continue
+		}
+		if got != want[role] {
+			t.Errorf("BaseURL(%q) after wg.Wait = %q, want %q", role, got, want[role])
+		}
+	}
 }
