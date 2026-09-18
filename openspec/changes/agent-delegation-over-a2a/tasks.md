@@ -162,17 +162,17 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
       `core/supervisor/integration_test.go:88-92` that incorrectly claims the client cannot attach
       a Bearer header — delete or correct it in this commit, since `TestClient_BearerPresentAndAccepted`
       now proves it wrong.
-- [ ] 4.6 RED: Add `TestClient_PeerTaskStateReportsCurrentStatus` and
+- [x] 4.6 RED: Add `TestClient_PeerTaskStateReportsCurrentStatus` and
       `TestClient_PeerTaskStateReportsTerminalOutput` to `client_test.go`, covering
       `PeerTaskState`'s independent read path (used both to await a parked peer and, in the
       deferred follow-up, to re-establish a wait after restart — this change only needs the
       read itself). Confirm they fail.
-- [ ] 4.7 GREEN: Implement `Client.PeerTaskState` in `client.go` using `a2aclient.GetTask` against
+- [x] 4.7 GREEN: Implement `Client.PeerTaskState` in `client.go` using `a2aclient.GetTask` against
       the resolved peer, reading `task.Status.Message` for output (this depends on Phase 5's
       output-on-the-wire change being present in the peer's supervisor for the terminal-output
       case — order Phase 5 before merging this task if testing against a peer running the new
       supervisor code; the client itself has no dependency on Phase 5's edit).
-- [ ] 4.8 Run `go test ./transport/a2a/... -race` (full package, integration tests included) and
+- [x] 4.8 Run `go test ./transport/a2a/... -race` (full package, integration tests included) and
       `go build ./...`.
 
 ## Phase 5: The Peer's Output Must Be Put on the Wire (PR 5)

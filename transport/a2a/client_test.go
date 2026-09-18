@@ -306,3 +306,78 @@ func TestClient_DeadlineReturnsDistinguishableTimeout(t *testing.T) {
 		t.Errorf("expected errors.Is(err, context.DeadlineExceeded), got %v", err)
 	}
 }
+
+// TestClient_PeerTaskStateReportsCurrentStatus verifies PeerTaskState reads
+// back a parked (non-terminal) peer task's current state and ID — the read
+// path a future watcher (deferred to agent-delegation-chained-approval) will
+// poll repeatedly.
+func TestClient_PeerTaskStateReportsCurrentStatus(t *testing.T) {
+	prov := &fake.Provider{ReturnRunResult: port.ProviderResult{
+		ActionIntents: []port.ActionIntent{{Kind: "telegram_send"}},
+	}}
+	policyCfg := map[string]config.Policy{
+		"telegram_send": {Risk: "risky", AllowedRoles: []string{"engineer"}},
+	}
+	_, dir := newTestPeer(t, "engineer", "acme", prov, policyCfg)
+
+	c := NewClient(dir, "acme", clientTestToken, nil)
+
+	delegated, err := c.Delegate(context.Background(), "engineer", "escalate please")
+	if err != nil {
+		t.Fatalf("Delegate: %v", err)
+	}
+	if delegated.State != string(sdka2a.TaskStateInputRequired) {
+		t.Fatalf("Delegate State = %q, want %q (peer should have escalated, not completed)", delegated.State, sdka2a.TaskStateInputRequired)
+	}
+	if delegated.PeerTaskID == "" {
+		t.Fatal("expected a non-empty PeerTaskID for the parked peer task")
+	}
+
+	got, err := c.PeerTaskState(context.Background(), "engineer", delegated.PeerTaskID)
+	if err != nil {
+		t.Fatalf("PeerTaskState: %v", err)
+	}
+	if got.State != string(sdka2a.TaskStateInputRequired) {
+		t.Errorf("PeerTaskState State = %q, want %q", got.State, sdka2a.TaskStateInputRequired)
+	}
+	if got.PeerTaskID != delegated.PeerTaskID {
+		t.Errorf("PeerTaskState PeerTaskID = %q, want %q", got.PeerTaskID, delegated.PeerTaskID)
+	}
+}
+
+// TestClient_PeerTaskStateReportsTerminalOutput proves PeerTaskState's
+// independent read path correctly reports a COMPLETED peer task's state and
+// ID.
+//
+// It deliberately does NOT assert Output text as non-empty: the peer's
+// terminal COMPLETED event still carries a nil Status.Message in this slice —
+// design D9 ("the peer's output must be put on the wire") is tasks.md Phase 5
+// of this change and is NOT implemented here. Task 4.7 names this exact
+// dependency. Asserting a fabricated non-empty Output here would misreport
+// what this slice actually proves; the state/ID assertions below are what
+// PeerTaskState's read path can honestly demonstrate right now.
+func TestClient_PeerTaskStateReportsTerminalOutput(t *testing.T) {
+	prov := &fake.Provider{ReturnRunResult: port.ProviderResult{Output: "peer output"}}
+	_, dir := newTestPeer(t, "engineer", "acme", prov, nil)
+
+	c := NewClient(dir, "acme", clientTestToken, nil)
+
+	delegated, err := c.Delegate(context.Background(), "engineer", "do the work")
+	if err != nil {
+		t.Fatalf("Delegate: %v", err)
+	}
+	if delegated.State != string(sdka2a.TaskStateCompleted) {
+		t.Fatalf("Delegate State = %q, want %q", delegated.State, sdka2a.TaskStateCompleted)
+	}
+
+	got, err := c.PeerTaskState(context.Background(), "engineer", delegated.PeerTaskID)
+	if err != nil {
+		t.Fatalf("PeerTaskState: %v", err)
+	}
+	if got.State != string(sdka2a.TaskStateCompleted) {
+		t.Errorf("PeerTaskState State = %q, want %q", got.State, sdka2a.TaskStateCompleted)
+	}
+	if got.PeerTaskID != delegated.PeerTaskID {
+		t.Errorf("PeerTaskState PeerTaskID = %q, want %q", got.PeerTaskID, delegated.PeerTaskID)
+	}
+}

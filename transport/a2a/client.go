@@ -43,6 +43,8 @@ type Client struct {
 	httpClient *http.Client
 }
 
+var _ port.Delegator = (*Client)(nil)
+
 // NewClient constructs a Client that delegates to peers registered in dir, on
 // behalf of tenant, authenticating every outbound call with the shared
 // authToken. httpClient may be nil to use the a2a-go package defaults.
@@ -63,8 +65,8 @@ func NewClient(dir *PeerDirectory, tenant, authToken string, httpClient *http.Cl
 // credentials store.
 //
 // The returned client's calls MUST be made against a context carrying
-// a2aclient.AttachSessionID(ctx, clientSessionID) — see Delegate. Omitting
-// that attaches NO Authorization header at all
+// a2aclient.AttachSessionID(ctx, clientSessionID) — see Delegate and
+// PeerTaskState. Omitting that attaches NO Authorization header at all
 // (a2aclient.AuthInterceptor.Before returns early with no error), sending the
 // request unauthenticated with no client-side error. This is deliberately
 // exposed as its own method (rather than inlined) so
@@ -115,6 +117,23 @@ func (c *Client) Delegate(ctx context.Context, role, body string) (port.Delegati
 	task, ok := res.(*sdka2a.Task)
 	if !ok {
 		return port.DelegationResult{}, fmt.Errorf("transport/a2a: client: delegate to role %q: peer returned %T, want *a2a.Task", role, res)
+	}
+
+	return resultFromTask(task), nil
+}
+
+// PeerTaskState implements port.Delegator.
+func (c *Client) PeerTaskState(ctx context.Context, role, peerTaskID string) (port.DelegationResult, error) {
+	peer, err := c.resolvePeer(ctx, role)
+	if err != nil {
+		return port.DelegationResult{}, err
+	}
+
+	ctx = a2aclient.AttachSessionID(ctx, clientSessionID)
+
+	task, err := peer.GetTask(ctx, &sdka2a.GetTaskRequest{Tenant: c.tenant, ID: sdka2a.TaskID(peerTaskID)})
+	if err != nil {
+		return port.DelegationResult{}, fmt.Errorf("transport/a2a: client: peer task state for role %q task %q: %w", role, peerTaskID, err)
 	}
 
 	return resultFromTask(task), nil
