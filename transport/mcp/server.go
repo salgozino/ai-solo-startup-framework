@@ -2,9 +2,12 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
+	"sync/atomic"
 
 	mcpauth "github.com/modelcontextprotocol/go-sdk/auth"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -23,16 +26,29 @@ type Server struct {
 	listener net.Listener
 	registry *Registry
 	tenant   string
+	serveErr atomic.Value // abnormal Serve death (not http.ErrServerClosed); see Err
 }
 
 // New creates an MCP Server configured for tenant, registering one tool per policy key.
 // The registry is used to resolve bearer tokens and store per-invocation intents.
+// Optional Options tune construction; see WithLogger.
 // Call Start to bind and begin serving.
-func New(tenant string, policies map[string]config.Policy, registry *Registry) *Server {
+func New(tenant string, policies map[string]config.Policy, registry *Registry, opts ...Option) *Server {
+	cfg := defaultOptions()
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	mcpSrv := gomcp.NewServer(
 		&gomcp.Implementation{Name: "ai-solo-startup-framework", Version: "1.0"},
 		nil,
 	)
+
+	// Log every incoming MCP method. Registered as receiving middleware so it observes
+	// tools/call results *including* go-sdk input-schema rejections, which are produced
+	// inside the method handler this wraps — the only way to tell "the model never called
+	// the tool" apart from "the model called it with the wrong arguments".
+	mcpSrv.AddReceivingMiddleware(requestLoggingMiddleware(cfg.logger, tenant))
 
 	registerTools(mcpSrv, tenant, policies, registry)
 
@@ -70,8 +86,22 @@ func (s *Server) Start(addr string) error {
 	}
 	s.listener = ln
 	go func() {
-		_ = s.httpSrv.Serve(ln)
+		if serveErr := s.httpSrv.Serve(ln); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			s.serveErr.Store(serveErr)
+			// Immediate operator-visible signal at the point of death. Err() (below)
+			// additionally lets production callers (see cmd/company/wire.go's
+			// MCPHealthCheck wiring) detect and act on this per task, not just in logs.
+			log.Printf("mcp: server for tenant %q died abnormally: %v", s.tenant, serveErr)
+		}
 	}()
+	return nil
+}
+
+// Err reports the Serve goroutine's abnormal-death error, or nil if healthy/stopped normally.
+func (s *Server) Err() error {
+	if v := s.serveErr.Load(); v != nil {
+		return v.(error)
+	}
 	return nil
 }
 

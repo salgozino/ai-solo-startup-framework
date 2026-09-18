@@ -23,8 +23,48 @@ import (
 	"github.com/salgozino/ai-solo-startup-framework/core/supervisor"
 	"github.com/salgozino/ai-solo-startup-framework/gateways/telegram"
 	transa2a "github.com/salgozino/ai-solo-startup-framework/transport/a2a"
+	transmcp "github.com/salgozino/ai-solo-startup-framework/transport/mcp"
 	"github.com/salgozino/ai-solo-startup-framework/ui"
 )
+
+// claudeRegistryMinter adapts *transmcp.Registry to claudecode.TokenMinter.
+// It exists in this package (not transport/mcp) because Go requires a method's
+// declared return type to be IDENTICAL to the interface's declared return type
+// for interface satisfaction — there is no covariant return typing.
+// *transmcp.Registry.Mint returns (string, *transmcp.Handle), which does not
+// literally match claudecode.TokenMinter.Mint's declared (string, claudecode.Drainer)
+// signature even though *transmcp.Handle structurally satisfies claudecode.Drainer.
+// This wrapper's Mint method spells the exact return type the interface requires.
+// See claudecode.TokenMinter's doc comment for the full rationale.
+type claudeRegistryMinter struct {
+	reg *transmcp.Registry
+}
+
+func (m *claudeRegistryMinter) Mint(tenant, agent, taskID string, exp time.Time) (string, claudecode.Drainer) {
+	return m.reg.Mint(tenant, agent, taskID, exp)
+}
+
+// opencodeRegistryMinter is claudeRegistryMinter's counterpart for opencode.TokenMinter.
+// opencode.Drainer is a distinct type from claudecode.Drainer (each adapter package
+// defines its own copy to stay decoupled from both transport/mcp and each other), so a
+// separate wrapper type is required even though the underlying registry is the same.
+type opencodeRegistryMinter struct {
+	reg *transmcp.Registry
+}
+
+func (m *opencodeRegistryMinter) Mint(tenant, agent, taskID string, exp time.Time) (string, opencode.Drainer) {
+	return m.reg.Mint(tenant, agent, taskID, exp)
+}
+
+// policyKindKeys returns the sorted-free set of action kinds declared in policies,
+// for Options.PolicyActionKinds (order is not significant to Capabilities() callers).
+func policyKindKeys(policies map[string]config.Policy) []string {
+	kinds := make([]string, 0, len(policies))
+	for k := range policies {
+		kinds = append(kinds, k)
+	}
+	return kinds
+}
 
 // modelProber is implemented by adapters that can verify model accessibility
 // at startup. Declared here (consumer-side) per Go's structural typing idiom —
@@ -38,6 +78,10 @@ type agentRuntime struct {
 	sup    *supervisor.Supervisor
 	srv    *transa2a.Server
 	uiAdap *supervisorUIAdapter
+	// mcpSrv is the single long-lived MCP server shared by every agentRuntime in a
+	// materializeAgents call (same *transmcp.Server instance on each entry). Callers
+	// shut it down once (e.g. via runtimes[0].mcpSrv) alongside the A2A servers.
+	mcpSrv *transmcp.Server
 }
 
 // supervisorUIAdapter bridges supervisor.Supervisor to ui.Supervisor.
@@ -145,12 +189,32 @@ type wireOptions struct {
 	// authTokenOverride, when non-empty, bypasses env-var resolution for the A2A
 	// Bearer token. Used in tests to avoid setting environment variables.
 	authTokenOverride string
+	// mcpServer, when non-nil, is used instead of starting a real transmcp.Server.
+	// Used in tests that do not need real MCP wiring (they typically also set
+	// providerOverride, bypassing per-adapter MCP registry injection entirely).
+	mcpServer *transmcp.Server
+}
+
+// mcpServerAddr safely reads srv.Addr(), converting a panic from a never-Start()ed
+// server (nil listener) into a plain error. *transmcp.Server.Addr() dereferences its
+// listener directly, so a test (or future caller) that injects a *transmcp.Server via
+// wireOptions.mcpServer without calling Start() first would otherwise crash
+// materializeAgents. This guard lives here — at the injection site in cmd/company —
+// rather than inside transport/mcp, which is Phase 2 / PR 2 code and must stay
+// untouched on this branch.
+func mcpServerAddr(srv *transmcp.Server) (addr string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("mcp server address unavailable (server was not started): %v", r)
+		}
+	}()
+	return srv.Addr(), nil
 }
 
 // materializeAgents creates and starts one agentRuntime per agent in cfg.
 // The CEO supervisor's runtime is returned first if len(runtimes) > 0.
 // Callers are responsible for shutting down all returned servers on exit.
-func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) ([]*agentRuntime, error) {
+func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []*agentRuntime, err error) {
 	if opts.stderr == nil {
 		opts.stderr = os.Stderr
 	}
@@ -160,19 +224,52 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) ([]*agentRun
 	if opts.gatewayOverride != nil {
 		gw = opts.gatewayOverride
 	} else if tg := cfg.Gateways.Telegram; tg != nil {
-		var err error
 		recipientEnv := tg.RecipientEnv
 		if recipientEnv == "" {
 			recipientEnv = "TELEGRAM_OWNER_ID"
 		}
-		gw, err = telegram.New(tg.TokenEnv, recipientEnv)
-		if err != nil {
-			return nil, fmt.Errorf("wire: telegram gateway: %w", err)
+		var gwErr error
+		gw, gwErr = telegram.New(tg.TokenEnv, recipientEnv)
+		if gwErr != nil {
+			return nil, fmt.Errorf("wire: telegram gateway: %w", gwErr)
 		}
 	}
 
 	// Shared policy engine — one instance per company so tokens are cross-verifiable.
 	policyEngine := policy.NewEngine()
+
+	// Start the single long-lived MCP server before any supervisor is marked ready.
+	// Bind failure aborts materialize immediately — no adapter is invoked
+	// (spec: mcp-tool-server "Server startup failure aborts materialize").
+	ownedMCP := opts.mcpServer == nil
+	mcpSrv := opts.mcpServer
+	if ownedMCP {
+		mcpSrv = transmcp.New(cfg.Tenant, cfg.RiskPolicy, transmcp.NewRegistry())
+		if startErr := mcpSrv.Start("127.0.0.1:0"); startErr != nil {
+			return nil, fmt.Errorf("wire: mcp server: %w", startErr)
+		}
+	}
+
+	// Ensure the MCP server this call started is torn down on every error path out of
+	// this function. A server injected via opts.mcpServer is owned by the caller (tests)
+	// and must never be shut down here (threat: "MCP server leaks on partial materialize
+	// failure" — every return nil, err below this point previously left an owned,
+	// already-bound listener leaked on the unknown-provider, A2A-start-failure, and
+	// probe-failure paths).
+	defer func() {
+		if err != nil && ownedMCP && mcpSrv != nil {
+			_ = mcpSrv.Shutdown(context.Background())
+		}
+	}()
+
+	mcpAddr, addrErr := mcpServerAddr(mcpSrv)
+	if addrErr != nil {
+		return nil, fmt.Errorf("wire: mcp server: %w", addrErr)
+	}
+	if ownedMCP {
+		fmt.Fprintf(opts.stderr, "mcp: server listening on %s\n", mcpAddr)
+	}
+	mcpActionKinds := policyKindKeys(cfg.RiskPolicy)
 
 	// Determine store base directory.
 	storeBase := opts.storeDir
@@ -190,7 +287,7 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) ([]*agentRun
 		return nil, fmt.Errorf("wire: env var %q (auth_token_env) is not set or empty", cfg.AuthTokenEnv)
 	}
 
-	runtimes := make([]*agentRuntime, 0, len(cfg.Agents))
+	runtimes = make([]*agentRuntime, 0, len(cfg.Agents))
 
 	for _, agCfg := range cfg.Agents {
 		addr, err := address.New(agCfg.Name, cfg.Tenant)
@@ -209,9 +306,27 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) ([]*agentRun
 		} else {
 			switch agCfg.Provider {
 			case "claude-code":
-				prov = claudecode.New("claude", claudecode.Options{}, agCfg.Model, agCfg.SystemPrompt)
+				prov = claudecode.New("claude", claudecode.Options{
+					MCPRegistry:       &claudeRegistryMinter{reg: mcpSrv.Registry()},
+					MCPServerAddr:     mcpAddr,
+					Tenant:            cfg.Tenant,
+					AgentName:         agCfg.Name,
+					PolicyActionKinds: mcpActionKinds,
+					// mcpSrv.Err reports the shared MCP server's abnormal-death state (see
+					// transport/mcp/server.go). Without this, a dead MCP server left every
+					// RunTask call reporting a false "success" with empty ActionIntents,
+					// indistinguishable from an agent that simply made no tool calls.
+					MCPHealthCheck: mcpSrv.Err,
+				}, agCfg.Model, agCfg.SystemPrompt)
 			case "opencode":
-				prov = opencode.New("opencode", opencode.Options{}, agCfg.Model, agCfg.Name, agCfg.SystemPrompt)
+				prov = opencode.New("opencode", opencode.Options{
+					MCPRegistry:       &opencodeRegistryMinter{reg: mcpSrv.Registry()},
+					MCPServerAddr:     mcpAddr,
+					Tenant:            cfg.Tenant,
+					AgentName:         agCfg.Name,
+					PolicyActionKinds: mcpActionKinds,
+					MCPHealthCheck:    mcpSrv.Err,
+				}, agCfg.Model, agCfg.Name, agCfg.SystemPrompt)
 			default:
 				return nil, fmt.Errorf("wire: unknown provider %q for agent %q", agCfg.Provider, agCfg.Name)
 			}
@@ -254,6 +369,7 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) ([]*agentRun
 			sup:    sup,
 			srv:    srv,
 			uiAdap: adap,
+			mcpSrv: mcpSrv,
 		})
 
 		fmt.Fprintf(opts.stderr, "wire: agent %q started at %s (role=%s)\n",

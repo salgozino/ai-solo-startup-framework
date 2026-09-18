@@ -11,11 +11,13 @@ package opencode
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/salgozino/ai-solo-startup-framework/core/address"
 	"github.com/salgozino/ai-solo-startup-framework/core/port"
@@ -27,11 +29,81 @@ const TruncationMarker = "[output truncated]"
 // defaultOutputLimit is the maximum bytes read from an opencode process before truncation.
 const defaultOutputLimit int64 = 1 << 20 // 1 MiB
 
-// Options configures the adapter. Zero value is valid (uses defaults).
+// defaultTokenGrace extends the invocation deadline before it is used as the MCP
+// token expiry, so the token remains valid for the brief window between process
+// exit and the adapter draining it.
+const defaultTokenGrace = 30 * time.Second
+
+// defaultMintTimeout: token lifetime with no ctx deadline. Drain releases the entry
+// regardless, so this only avoids mid-task 401s from the prior, arbitrary 5min ceiling.
+const defaultMintTimeout = 24 * time.Hour
+
+// Drainer is satisfied by a live MCP invocation handle: after the subprocess exits,
+// Drain releases the invocation and returns any action intents the MCP server's sink
+// recorded for it. Idempotent — a second Drain call returns nil without panicking.
+//
+// Deliberately identical in shape to (but a distinct type from) claudecode.Drainer:
+// each adapter package defines its own copy to stay decoupled from transport/mcp and
+// from each other. See claudecode.TokenMinter's doc comment for why these interfaces
+// are exported rather than unexported.
+type Drainer interface {
+	Drain() []port.ActionIntent
+	// Contacted reports whether the agent CLI ever reached the MCP server with this
+	// invocation's bearer token. An empty sink alone cannot distinguish "the agent chose
+	// not to call a tool" from "the agent never reached the MCP server at all".
+	Contacted() bool
+}
+
+// TokenMinter mints a per-invocation MCP bearer token bound to {tenant, agent, taskID}.
+type TokenMinter interface {
+	Mint(tenant, agent, taskID string, exp time.Time) (string, Drainer)
+}
+
+// opencodeMCPConfig is the MCP config JSON placed in OPENCODE_CONFIG_CONTENT, shaped to
+// match opencode's own config schema (https://opencode.ai/config.json), NOT the Claude
+// Desktop / claudecode adapter's "mcpServers" shape. The two are genuinely different
+// schemas — see buildMCPConfigJSON's doc comment for why — so this type is deliberately
+// not shared with claudecode.mcpConfigFile even though the two once looked identical.
+type opencodeMCPConfig struct {
+	MCP map[string]opencodeMCPServerEntry `json:"mcp"`
+}
+
+// opencodeMCPServerEntry mirrors opencode's $defs.McpRemoteConfig entry shape.
+type opencodeMCPServerEntry struct {
+	Type    string            `json:"type"`
+	URL     string            `json:"url"`
+	Enabled bool              `json:"enabled"`
+	Headers map[string]string `json:"headers"`
+}
+
+// Options configures the adapter. Zero value is valid (uses defaults, no MCP wiring).
 type Options struct {
 	// OutputLimit caps the number of bytes read from the child process stdout.
 	// When zero, defaultOutputLimit is used.
 	OutputLimit int64
+	// MCPRegistry mints per-invocation MCP bearer tokens. Nil disables MCP wiring
+	// entirely: OPENCODE_CONFIG_CONTENT is never set, and ActionIntents is always empty.
+	MCPRegistry TokenMinter
+	// MCPServerAddr is the loopback address of the running MCP server (e.g. "127.0.0.1:54321").
+	// Required when MCPRegistry is non-nil.
+	MCPServerAddr string
+	// Tenant is passed to MCPRegistry.Mint and must match the MCP server's configured tenant.
+	Tenant string
+	// AgentName identifies this adapter's agent to MCPRegistry.Mint. When empty, falls back
+	// to the agentName constructor parameter (which also drives --agent).
+	AgentName string
+	// PolicyActionKinds is returned by Capabilities().ActionKinds.
+	PolicyActionKinds []string
+	// ContextBudget is returned by Capabilities().ContextBudget.
+	ContextBudget int
+	TokenLifetime time.Duration // overrides defaultMintTimeout when non-zero (test-only knob)
+	// MCPHealthCheck reports the MCP server's health when non-nil (production: the running
+	// transport/mcp Server's Err() method value). RunTask consults it before spawning the
+	// subprocess whenever MCPRegistry is configured: a non-nil result aborts the invocation
+	// with an explicit error instead of running an agent whose tool calls could never
+	// reach a live server, which would otherwise return a false "success" with empty
+	// ActionIntents indistinguishable from "the agent made no tool calls".
+	MCPHealthCheck func() error
 }
 
 // Adapter implements port.Provider by running an ephemeral opencode CLI process per task.
@@ -42,6 +114,14 @@ type Adapter struct {
 	model               string
 	agentName           string
 	systemPromptContent string // file content read once at New(); empty → no prepend
+	mcpRegistry         TokenMinter
+	mcpServerAddr       string
+	tenant              string
+	mcpAgentName        string
+	policyActionKinds   []string
+	contextBudget       int
+	tokenLifetime       time.Duration
+	mcpHealthCheck      func() error
 }
 
 // New returns an Adapter that invokes opencodeBin as the opencode CLI.
@@ -67,12 +147,28 @@ func New(opencodeBin string, opts Options, model string, agentName string, syste
 			fmt.Fprintf(os.Stderr, "warn: system_prompt file validated at config load but unreadable at adapter construction: %v; agent will start without system prompt\n", err)
 		}
 	}
+	mcpAgentName := opts.AgentName
+	if mcpAgentName == "" {
+		mcpAgentName = agentName
+	}
+	lifetime := opts.TokenLifetime
+	if lifetime <= 0 {
+		lifetime = defaultMintTimeout
+	}
 	return &Adapter{
 		opencodeBin:         opencodeBin,
 		limit:               limit,
 		model:               model,
 		agentName:           agentName,
 		systemPromptContent: content,
+		mcpRegistry:         opts.MCPRegistry,
+		mcpServerAddr:       opts.MCPServerAddr,
+		tenant:              opts.Tenant,
+		mcpAgentName:        mcpAgentName,
+		policyActionKinds:   opts.PolicyActionKinds,
+		contextBudget:       opts.ContextBudget,
+		tokenLifetime:       lifetime,
+		mcpHealthCheck:      opts.MCPHealthCheck,
 	}
 }
 
@@ -80,8 +176,14 @@ func New(opencodeBin string, opts Options, model string, agentName string, syste
 // It spawns a fresh opencode process with "run" (non-interactive mode), passes input as
 // a positional argv argument, reads stdout up to the size cap, and returns a parsed
 // ProviderResult. Non-zero exit → error. ctx deadline kills the child.
-func (a *Adapter) RunTask(ctx context.Context, _ string, input string) (port.ProviderResult, error) {
-	// Build argv: opencode run --pure [--model <model>] [--agent <agentName>] <effective-input>
+//
+// When mcpRegistry is configured, RunTask mints a per-invocation MCP bearer token and
+// sets OPENCODE_CONFIG_CONTENT on the subprocess env only (never os.Setenv, never a
+// persisted file), then drains the token's recorded ActionIntents after the subprocess
+// exits. The bearer token is delivered only inside that env var's JSON, never on argv.
+func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (port.ProviderResult, error) {
+	// Build argv: opencode run --pure [--model <model>] [--agent <agentName>] [--format json]
+	//   <effective-input>
 	// argv-as-slice: input is passed as a literal argument, never interpolated into a shell string.
 	// This is the primary guard against argument injection.
 	// --pure is always included unconditionally for agent isolation.
@@ -93,6 +195,38 @@ func (a *Adapter) RunTask(ctx context.Context, _ string, input string) (port.Pro
 	if a.agentName != "" {
 		args = append(args, "--agent", a.agentName)
 	}
+	// --format json is always requested: opencode's NDJSON stream is parsed solely to
+	// extract text (never any tool_use-shaped event — the spec forbids that; see
+	// spec: "ActionIntents Are Collected From the Sink, Never From Stream Parsing").
+	args = append(args, "--format", "json")
+
+	var handle Drainer
+	var mcpEnv string
+	if a.mcpRegistry != nil {
+		// Consult the MCP server's health before ever spawning the subprocess. Checking
+		// after the fact (post-Drain) would still return a nil error with empty
+		// ActionIntents whenever the agent's own turn happened not to call a tool —
+		// exactly the false "success" this check exists to eliminate.
+		if a.mcpHealthCheck != nil {
+			if healthErr := a.mcpHealthCheck(); healthErr != nil {
+				return port.ProviderResult{}, fmt.Errorf("opencode: mcp server unavailable, refusing to run task without a working MCP endpoint: %w", healthErr)
+			}
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			deadline = time.Now().Add(a.tokenLifetime)
+		}
+		token, h := a.mcpRegistry.Mint(a.tenant, a.mcpAgentName, taskID, deadline.Add(defaultTokenGrace))
+		handle = h
+		defer h.Drain() // release on every return path; idempotent
+
+		cfgJSON, err := buildMCPConfigJSON(a.mcpServerAddr, token)
+		if err != nil {
+			return port.ProviderResult{}, fmt.Errorf("opencode: mcp config: %w", err)
+		}
+		mcpEnv = string(cfgJSON)
+	}
+
 	effectiveInput := input
 	if a.systemPromptContent != "" {
 		effectiveInput = "[SYSTEM]\n" + a.systemPromptContent + "\n\n" + input
@@ -100,6 +234,11 @@ func (a *Adapter) RunTask(ctx context.Context, _ string, input string) (port.Pro
 	args = append(args, effectiveInput)
 
 	cmd := exec.CommandContext(ctx, a.opencodeBin, args...) //nolint:gosec // argv slice, no shell
+	if mcpEnv != "" {
+		// Subprocess-scoped only — never os.Setenv, never touches persisted config
+		// (design Threat matrix: "OPENCODE_CONFIG_CONTENT scoped to that process env").
+		cmd.Env = append(os.Environ(), "OPENCODE_CONFIG_CONTENT="+mcpEnv)
+	}
 
 	// Capture stderr independently of StdoutPipe. cmd.Stderr and StdoutPipe are
 	// orthogonal: setting Stderr does not interfere with the LimitReader drain pattern.
@@ -119,6 +258,9 @@ func (a *Adapter) RunTask(ctx context.Context, _ string, input string) (port.Pro
 
 	// Read up to limit bytes via io.LimitReader. After limit bytes, switch to
 	// draining via io.Discard so the child can write without blocking on a full pipe.
+	// This reads until EOF (process exit) — never waits on any dedicated terminal
+	// event line inside the stream (spec: "OpenCode adapter terminates its reader on
+	// process exit, not a sentinel event").
 	lr := io.LimitReader(stdout, a.limit)
 	var buf bytes.Buffer
 	n, readErr := io.Copy(&buf, lr)
@@ -142,8 +284,44 @@ func (a *Adapter) RunTask(ctx context.Context, _ string, input string) (port.Pro
 		return port.ProviderResult{}, fmt.Errorf("opencode: read output: %w", readErr)
 	}
 
-	output := parseOutput(buf.Bytes(), n, a.limit)
-	return port.ProviderResult{Output: output}, nil
+	var output string
+	if n >= a.limit {
+		// Output was capped mid-stream — the raw bytes may not be valid NDJSON.
+		// Fall back to the legacy raw-truncation behaviour rather than failing to parse.
+		output = parseOutput(buf.Bytes(), n, a.limit)
+	} else {
+		text, recognised := parseStreamText(buf.Bytes())
+		output = text
+		if !recognised {
+			// The output was not an opencode event stream at all; fall back to the raw
+			// trimmed text rather than losing it. This is gated on `recognised`, not on
+			// an empty extraction: a well-formed stream that yields no text (only
+			// lifecycle or error events) must stay empty here, because dumping the raw
+			// NDJSON envelope into Output hands the caller machine noise instead of the
+			// agent's answer.
+			if raw := strings.TrimRight(buf.String(), "\n"); raw != "" {
+				output = raw
+			}
+		}
+	}
+
+	result := port.ProviderResult{Output: output}
+	if handle != nil {
+		// Sink is authoritative: ActionIntents come only from the MCP server's sink,
+		// never from parsing the stream above.
+		result.ActionIntents = handle.Drain()
+
+		// An empty sink is ambiguous on its own. MCPHealthCheck above only catches a
+		// server that died; a server that is alive but was never reached (config shape
+		// ignored by the CLI, handshake failure, bearer rejected, subprocess killed
+		// before the call) leaves no signal there. The registry does know whether the
+		// minted token was ever presented, so consult it rather than reporting a
+		// success that is byte-identical to "the agent made no tool calls".
+		if len(result.ActionIntents) == 0 && !handle.Contacted() {
+			return port.ProviderResult{}, fmt.Errorf("opencode: mcp endpoint %s was never contacted by the CLI for task %q; refusing to report success for an invocation whose tool calls could not have been recorded", a.mcpServerAddr, taskID)
+		}
+	}
+	return result, nil
 }
 
 // parseOutput converts raw bytes to a string, prepending TruncationMarker when the
@@ -156,11 +334,168 @@ func parseOutput(raw []byte, n, limit int64) string {
 	return text
 }
 
-// NOTE: ProbeModel is intentionally NOT implemented for the opencode adapter.
-// Unlike Claude CLI, opencode's "run" command does not distinguish between
-// an invalid model and a missing prompt — both produce the same generic error.
-// Until opencode exposes a model-validation path, this adapter does not satisfy
-// the modelProber interface, and materializeAgents skips the probe for it.
+// streamEvent is the opencode --format json NDJSON event envelope. Every event on the
+// stream — step_start, text, step_finish, error — shares this same top-level shape, and
+// the assistant's text lives at part.text. Verified against opencode 1.18.31, where the
+// complete top-level field set of every emitted event is exactly
+// ['part','sessionID','timestamp','type']: there is NO top-level "text" field anywhere.
+//
+// Only text content is ever extracted (spec: "ActionIntents Are Collected From the Sink,
+// Never From Stream Parsing"), so no tool_use-shaped field is modelled here on purpose.
+// The "error" event's payload is likewise not modelled — non-zero exit codes are the
+// adapter's failure signal, and an error event must never be concatenated into Output.
+type streamEvent struct {
+	Type string      `json:"type"`
+	Part *streamPart `json:"part,omitempty"`
+}
+
+// streamPart is the nested per-event payload. Only the fields this adapter reads are
+// declared; every other key on the real part object is deliberately ignored.
+type streamPart struct {
+	Text string `json:"text,omitempty"`
+}
+
+// parseStreamText extracts and concatenates, in stream order, the text of every "text"
+// event in an NDJSON stream. Lines that fail to parse are skipped rather than aborting the
+// whole result — a single malformed line should not erase everything else the CLI produced.
+//
+// The second return value reports whether at least one line was recognised as an opencode
+// event envelope. It distinguishes the two cases the caller must treat differently:
+//
+//	recognised == true  → this really is an opencode NDJSON stream. The extracted text is
+//	                      authoritative even when empty (e.g. a stream carrying only
+//	                      lifecycle or error events), so the caller must NOT fall back to
+//	                      dumping the raw bytes.
+//	recognised == false → the output was never an event stream at all; the caller's
+//	                      raw-text fallback is the only way to avoid losing it.
+//
+// Without that distinction an empty extraction is ambiguous, and the caller silently
+// returns the entire raw NDJSON dump as the agent's answer.
+func parseStreamText(raw []byte) (string, bool) {
+	var sb strings.Builder
+	recognised := false
+	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var ev streamEvent
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			continue
+		}
+		// A bare JSON value with no "type" is not an opencode event; do not let it
+		// vouch for the whole stream being well-formed.
+		if ev.Type == "" {
+			continue
+		}
+		recognised = true
+		if ev.Type == "text" && ev.Part != nil {
+			sb.WriteString(ev.Part.Text)
+		}
+	}
+	return sb.String(), recognised
+}
+
+// buildMCPConfigJSON marshals the MCP server descriptor placed in OPENCODE_CONFIG_CONTENT,
+// in the shape opencode's own config schema (https://opencode.ai/config.json) requires:
+//
+//	{"mcp": {"framework": {"type": "remote", "url": "http://<addr>", "enabled": true,
+//	  "headers": {"Authorization": "Bearer <token>"}}}}
+//
+// This is deliberately NOT the Claude-shaped {"mcpServers": {...}} envelope the claudecode
+// adapter writes for --mcp-config: opencode's root Config type declares
+// "additionalProperties": false, so an unrecognized top-level key such as "mcpServers"
+// invalidates the whole config rather than being ignored — the server is then silently
+// never registered, and every RunTask call whose subprocess tries to reach it fails via the
+// never-contacted guard below. The correct top-level key is "mcp", entries are
+// McpRemoteConfig (type must be the literal "remote", not "http"), and "enabled" is
+// required for opencode to actually load the entry.
+func buildMCPConfigJSON(addr, token string) ([]byte, error) {
+	cfg := opencodeMCPConfig{
+		MCP: map[string]opencodeMCPServerEntry{
+			"framework": {
+				Type:    "remote",
+				URL:     "http://" + addr,
+				Enabled: true,
+				Headers: map[string]string{
+					"Authorization": "Bearer " + token,
+				},
+			},
+		},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("marshal: %w", err)
+	}
+	return data, nil
+}
+
+// requiredCLIFormatFloor documents the opencode CLI version verified locally to accept
+// "--format json" (see AGENTS.md "Provider CLI compatibility"). No upstream changelog
+// confirms the exact minimum version, so this is a soft floor for operator diagnostics,
+// not an enforced version check.
+const requiredCLIFormatFloor = "opencode 1.18.31 (locally verified; no upstream floor confirmation — see AGENTS.md)"
+
+// ProbeModel verifies that the configured opencode binary accepts "--format json", the
+// NDJSON output mode RunTask unconditionally requests on every invocation. Unlike
+// claudecode's ProbeModel, this does not validate model names: opencode's CLI does not
+// distinguish an invalid model from a missing prompt (both produce the same generic
+// error), so model validation is not attempted here.
+//
+// Without this check, installing (or downgrading to) an opencode build that rejects
+// --format json makes RunTask fail for every single task at runtime — a total, silent
+// outage of every opencode-backed agent that only surfaces after an unrelated environment
+// change. ProbeModel turns that into one loud startup failure naming the flag and the
+// verified version floor instead. It satisfies the unexported modelProber interface
+// declared in cmd/company/wire.go (see adapters/claudecode/adapter.go's ProbeModel for the
+// sibling implementation, which probes model validity instead of flag support).
+//
+// The probe passes an empty prompt, mirroring claudecode's technique, so the CLI is
+// expected to exit non-zero either way (missing-prompt validation, or flag rejection) —
+// no real task or model invocation happens. Only a non-zero exit specifically
+// attributable to --format is treated as a probe failure.
+func (a *Adapter) ProbeModel(ctx context.Context) error {
+	args := []string{"run", "--pure", "--format", "json", ""}
+	cmd := exec.CommandContext(ctx, a.opencodeBin, args...) //nolint:gosec // argv slice, no shell
+
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+	cmd.Stdout = io.Discard
+
+	_ = cmd.Run() // always exits non-zero with empty prompt (or the CLI rejects --format)
+
+	if ctx.Err() != nil {
+		return fmt.Errorf("opencode: probe deadline exceeded: %w", ctx.Err())
+	}
+
+	stderr := stderrBuf.String()
+	if isFormatFlagRejection(stderr) {
+		return fmt.Errorf("opencode: CLI at %q does not accept --format json, which every RunTask invocation requires; verified floor: %s\nstderr: %s", a.opencodeBin, requiredCLIFormatFloor, stderr)
+	}
+	// Any other non-zero exit (e.g. the CLI's ordinary missing-prompt validation) means
+	// the flag itself was accepted; unrelated CLI/model problems will still surface on
+	// real invocations, and rejecting startup here would be a false positive.
+	return nil
+}
+
+// isFormatFlagRejection reports whether stderr text indicates the CLI's argument parser
+// rejected --format specifically, rather than failing for an unrelated reason (missing
+// prompt, auth, model errors, etc.). The exact wording is CLI/version-specific and
+// unconfirmed upstream (see AGENTS.md); this matches common flag-rejection phrasings from
+// Go/Cobra-style CLIs and is deliberately conservative — a pattern miss surfaces as no
+// probe error rather than a false failure that would block startup on an unrelated problem.
+func isFormatFlagRejection(stderr string) bool {
+	lower := strings.ToLower(stderr)
+	if !strings.Contains(lower, "--format") {
+		return false
+	}
+	for _, marker := range []string{"unknown flag", "unrecognized flag", "unknown option", "invalid flag", "no such flag", "not a valid flag"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
 
 // ---- port.Provider stub methods (A2A network client side) -------------------
 // The A2A client methods are implemented by transport/a2a, not by this adapter.
@@ -169,10 +504,11 @@ func parseOutput(raw []byte, n, limit int64) string {
 
 var errNotImplemented = fmt.Errorf("opencode: A2A client methods are provided by transport/a2a, not this adapter")
 
-// Capabilities returns a zero ProviderCapabilities for Phase 1.
-// A real implementation that derives ActionKinds from the risk policy and
-// returns the configured ContextBudget is deferred to Phase 3.
-func (a *Adapter) Capabilities() port.ProviderCapabilities { return port.ProviderCapabilities{} }
+// Capabilities returns the ContextBudget and ActionKinds configured via Options
+// at construction time (see New).
+func (a *Adapter) Capabilities() port.ProviderCapabilities {
+	return port.ProviderCapabilities{ContextBudget: a.contextBudget, ActionKinds: a.policyActionKinds}
+}
 
 func (a *Adapter) Complete(_ string, _ port.TaskResult) error { return errNotImplemented }
 func (a *Adapter) CompleteError(_ string, _ error) error      { return errNotImplemented }

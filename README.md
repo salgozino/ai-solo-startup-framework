@@ -70,10 +70,17 @@ All agents run in **isolated mode** by default, independent of the user's local 
 
 | Provider | Isolation flags |
 |----------|----------------|
-| Claude Code | `--safe-mode --no-session-persistence` — always applied |
+| Claude Code | `--no-session-persistence --setting-sources "" --disable-slash-commands` — always applied |
 | OpenCode | `--pure` — always applied |
 
 These flags are unconditional — there is no opt-out. Isolation is a security baseline, not a feature.
+
+`--safe-mode` is deliberately not used for Claude Code: it disables MCP servers along with
+everything else, which would make the framework's own MCP wiring permanently unreachable. The
+flags above are the closest substitute that keeps MCP working, but they do not fully replicate
+`--safe-mode`'s isolation — CLAUDE.md auto-discovery, plugins, custom commands/agents, and output
+styles/workflows/themes/keybindings still load normally, because no flag in the installed CLI
+disables them while leaving MCP reachable. See `AGENTS.md` for the full rationale.
 
 #### System prompts and the `agents/` folder
 
@@ -196,7 +203,7 @@ company.yaml
 ## Key Concepts
 
 - **Company as code**: Your company is a YAML file, reviewable in a PR, version-controlled
-- **Agent isolation**: Agents always run with isolation flags (`--safe-mode` / `--pure`), independent of local config
+- **Agent isolation**: Agents always run with isolation flags (`--no-session-persistence --setting-sources "" --disable-slash-commands` for Claude Code, `--pure` for OpenCode), independent of local config — see [Agent isolation](#agent-isolation) for the accepted tradeoff
 - **System prompts**: Per-agent persona files enforce declared roles; loaded once at startup
 - **Risk policy**: Actions are classified as `safe`, `risky`, or `hard-deny` based on role
 - **Human-in-the-loop**: Risky actions escalate to the monitoring UI for approval

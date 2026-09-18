@@ -18,11 +18,62 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/salgozino/ai-solo-startup-framework/adapters/claudecode"
+	"github.com/salgozino/ai-solo-startup-framework/config"
+	transportmcp "github.com/salgozino/ai-solo-startup-framework/transport/mcp"
 )
+
+// registryMinter adapts *transportmcp.Registry to claudecode.TokenMinter.
+// It exists in the test package (not production code) because Go requires a
+// method's declared return type to be IDENTICAL to the interface's declared
+// return type for interface satisfaction (no covariant return types):
+// *transportmcp.Registry.Mint returns (string, *transportmcp.Handle), which
+// does not literally match claudecode.TokenMinter.Mint's declared
+// (string, claudecode.Drainer) signature even though *transportmcp.Handle
+// structurally satisfies claudecode.Drainer. This wrapper's Mint method
+// spells the exact return type so it satisfies the interface.
+type registryMinter struct {
+	reg *transportmcp.Registry
+}
+
+func (m *registryMinter) Mint(tenant, agent, taskID string, exp time.Time) (string, claudecode.Drainer) {
+	return m.reg.Mint(tenant, agent, taskID, exp)
+}
+
+// spyMinter wraps registryMinter and records every minted token so tests can
+// assert the token never leaks into subprocess argv.
+type spyMinter struct {
+	reg    *transportmcp.Registry
+	mu     sync.Mutex
+	tokens []string
+	exp    time.Time
+}
+
+func (m *spyMinter) Mint(tenant, agent, taskID string, exp time.Time) (string, claudecode.Drainer) {
+	token, handle := m.reg.Mint(tenant, agent, taskID, exp)
+	m.mu.Lock()
+	m.tokens = append(m.tokens, token)
+	m.exp = exp
+	m.mu.Unlock()
+	return token, handle
+}
+
+// startTestMCPServer starts an in-process MCP server with a single
+// "telegram_send" tool for tenant "acme" and registers cleanup.
+func startTestMCPServer(t *testing.T) (*transportmcp.Server, *transportmcp.Registry) {
+	t.Helper()
+	registry := transportmcp.NewRegistry()
+	srv := transportmcp.New("acme", map[string]config.Policy{"telegram_send": {}}, registry)
+	if err := srv.Start("127.0.0.1:0"); err != nil {
+		t.Fatalf("start mcp server: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	return srv, registry
+}
 
 // helperBinary builds the fakeclaude binary once per test run and returns its path.
 // The binary is placed in t.TempDir() so it is cleaned up automatically.
@@ -63,8 +114,8 @@ func TestArgvSlice_ShellMetacharactersAreLiteral(t *testing.T) {
 		t.Fatalf("RunTask with metachar input: unexpected error: %v", err)
 	}
 	// With argv-as-slice: fakeclaude echoes the full string as one token, no newline inside.
-	// The output has a "safe:1|" prefix (isolation flag is always present) then the literal input.
-	expected := "safe:1|" + maliciousInput
+	// The output has an "iso:1|" prefix (isolation flags are always present) then the literal input.
+	expected := "iso:1|" + maliciousInput
 	if result.Output != expected {
 		t.Errorf("expected literal output %q, got %q", expected, result.Output)
 	}
@@ -122,21 +173,25 @@ func TestNonZeroExit_MapsToError(t *testing.T) {
 	}
 }
 
-// TestSafeModeFlag_AlwaysPresent verifies that --safe-mode is unconditionally included
-// in the claude invocation regardless of other settings (spec: Unconditional Isolation).
-func TestSafeModeFlag_AlwaysPresent(t *testing.T) {
+// TestIsolationFlags_AlwaysPresent verifies that the --safe-mode substitute flags
+// (--setting-sources "" and --disable-slash-commands) are unconditionally included in the
+// claude invocation regardless of other settings (spec: Unconditional Isolation) — this
+// adapter no longer passes --safe-mode itself; see TestClaudeAdapter_MCPFlags_
+// NeverCombinedWithDisablingFlag below for the JD-2 regression guard on that removal.
+func TestIsolationFlags_AlwaysPresent(t *testing.T) {
 	bin := helperBinary(t)
-	// No system prompt, no model — safe-mode must still be set.
+	// No system prompt, no model — isolation flags must still be set.
 	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "", "")
 
 	ctx := context.Background()
-	result, err := adapter.RunTask(ctx, "task-safe", "hello")
+	result, err := adapter.RunTask(ctx, "task-iso", "hello")
 	if err != nil {
 		t.Fatalf("RunTask: unexpected error: %v", err)
 	}
-	// fakeclaude prepends "safe:1|" when --safe-mode is passed.
-	if !strings.HasPrefix(result.Output, "safe:1|") {
-		t.Errorf("expected output to start with \"safe:1|\", got %q", result.Output)
+	// fakeclaude prepends "iso:1|" when both --setting-sources and --disable-slash-commands
+	// are passed.
+	if !strings.HasPrefix(result.Output, "iso:1|") {
+		t.Errorf("expected output to start with \"iso:1|\", got %q", result.Output)
 	}
 }
 
@@ -185,8 +240,8 @@ func TestModelFlag_PassedToCLI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTask with model: unexpected error: %v", err)
 	}
-	// fakeclaude prepends "safe:1|" (always, --safe-mode) then "model:<model>|" when --model is passed.
-	expected := "safe:1|model:anthropic/claude-sonnet-4-20250514|hello"
+	// fakeclaude prepends "iso:1|" (always) then "model:<model>|" when --model is passed.
+	expected := "iso:1|model:anthropic/claude-sonnet-4-20250514|hello"
 	if result.Output != expected {
 		t.Errorf("expected output %q, got %q", expected, result.Output)
 	}
@@ -245,9 +300,9 @@ func TestNoModelFlag_OmitsFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTask without model: unexpected error: %v", err)
 	}
-	// Without model, fakeclaude echoes input with only the safe-mode prefix.
-	if result.Output != "safe:1|hello" {
-		t.Errorf("expected output %q, got %q", "safe:1|hello", result.Output)
+	// Without model, fakeclaude echoes input with only the isolation-flags prefix.
+	if result.Output != "iso:1|hello" {
+		t.Errorf("expected output %q, got %q", "iso:1|hello", result.Output)
 	}
 }
 
@@ -302,5 +357,498 @@ func TestProbeModel_Deadline(t *testing.T) {
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("expected errors.Is(err, context.DeadlineExceeded); got: %v", err)
+	}
+}
+
+// ---- Phase 3: MCP tool use and action intent emission (spec: provider-action-intent-emission) ----
+
+// TestClaudeAdapter_MCPToolCall_PopulatesActionIntents proves the real adapter path is wired:
+// a fake claude binary performs an actual MCP tools/call over HTTP against a running server,
+// and RunTask returns the intent recorded by the server's sink — not a hand-constructed fixture.
+func TestClaudeAdapter_MCPToolCall_PopulatesActionIntents(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	adapter := claudecode.New(bin, claudecode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "")
+
+	t.Setenv("FAKECLAUDE_CALL_MCP", "1")
+
+	result, err := adapter.RunTask(context.Background(), "task-mcp", "hello")
+	if err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if len(result.ActionIntents) != 1 {
+		t.Fatalf("expected 1 action intent, got %d: %+v", len(result.ActionIntents), result.ActionIntents)
+	}
+	if result.ActionIntents[0].Kind != "telegram_send" {
+		t.Errorf("expected Kind=telegram_send, got %q", result.ActionIntents[0].Kind)
+	}
+}
+
+// TestClaudeAdapter_NoToolCall_EmptyIntents verifies that a completed invocation which
+// reached the MCP endpoint and simply called no tool yields empty ActionIntents and a nil
+// error (not an erroneous result). This is the regression guard for the never-contacted
+// check below: that check must only fire when the endpoint was never reached, never on
+// this healthy outcome.
+func TestClaudeAdapter_NoToolCall_EmptyIntents(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	// The CLI completes the MCP handshake but calls no tool.
+	t.Setenv("FAKECLAUDE_CONNECT_MCP_ONLY", "1")
+
+	adapter := claudecode.New(bin, claudecode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "")
+
+	result, err := adapter.RunTask(context.Background(), "task-no-mcp", "hello")
+	if err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if len(result.ActionIntents) != 0 {
+		t.Errorf("expected empty ActionIntents, got %+v", result.ActionIntents)
+	}
+}
+
+// TestClaudeAdapter_NeverContactedMCP_FailsLoudInsteadOfSilentSuccess is RED for the
+// finding that a CLI which never reaches the MCP endpoint at all produces a result
+// byte-identical to the healthy "the agent chose not to call a tool" case: Output set,
+// nil error, empty ActionIntents.
+//
+// MCPHealthCheck cannot catch this: the server here is alive and healthy, it was simply
+// never contacted (config shape ignored by the CLI, handshake failure, bearer rejected,
+// subprocess killed before the call). The registry already knows the minted token was
+// never presented, so the adapter must consult it rather than reporting success for an
+// invocation whose tool calls could not have been recorded.
+func TestClaudeAdapter_NeverContactedMCP_FailsLoudInsteadOfSilentSuccess(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	adapter := claudecode.New(bin, claudecode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "")
+
+	// Neither FAKECLAUDE_CALL_MCP nor FAKECLAUDE_CONNECT_MCP_ONLY is set: the subprocess
+	// exits successfully without ever touching the MCP endpoint.
+	_, err := adapter.RunTask(context.Background(), "task-never-contacted", "hello")
+	if err == nil {
+		t.Fatal("expected RunTask to fail loudly when the CLI never contacted the MCP endpoint, got nil error (silent false success)")
+	}
+	if !strings.Contains(err.Error(), srv.Addr()) {
+		t.Errorf("expected the error to name the MCP server address %q so an operator can act, got: %v", srv.Addr(), err)
+	}
+	if !strings.Contains(err.Error(), "task-never-contacted") {
+		t.Errorf("expected the error to name the task ID so an operator can act, got: %v", err)
+	}
+}
+
+// TestClaudeAdapter_TokenAbsentFromArgv verifies threat-matrix case "Subprocess argv":
+// the bearer token is delivered in an HTTP header (via the ephemeral MCP config file),
+// never as a literal subprocess argv element.
+func TestClaudeAdapter_TokenAbsentFromArgv(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+	spy := &spyMinter{reg: registry}
+
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	t.Setenv("FAKECLAUDE_DUMP_ARGV", "1")
+	t.Setenv("FAKECLAUDE_ARGV_FILE", argvFile)
+	// Model a CLI that actually reaches the MCP endpoint, so this test stays focused on
+	// argv contents rather than tripping the never-contacted check.
+	t.Setenv("FAKECLAUDE_CONNECT_MCP_ONLY", "1")
+
+	adapter := claudecode.New(bin, claudecode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   spy,
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "")
+
+	if _, err := adapter.RunTask(context.Background(), "task-argv-check", "hello"); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	if len(spy.tokens) != 1 {
+		t.Fatalf("expected exactly 1 minted token, got %d", len(spy.tokens))
+	}
+	token := spy.tokens[0]
+
+	raw, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv dump: %v", err)
+	}
+	if strings.Contains(string(raw), token) {
+		t.Errorf("bearer token leaked into subprocess argv: dump=%q", string(raw))
+	}
+
+	// Positive assertion (spec: "Claude adapter configures MCP ephemerally"): the adapter
+	// must actually pass --mcp-config and --strict-mcp-config when MCP is wired. Without
+	// this, a regression that silently dropped --strict-mcp-config (weakening the CLI to
+	// also read the user's real, persisted MCP config) would go undetected by this test.
+	if !strings.Contains(string(raw), "--mcp-config") {
+		t.Errorf("expected argv to contain --mcp-config; dump=%q", string(raw))
+	}
+	if !strings.Contains(string(raw), "--strict-mcp-config") {
+		t.Errorf("expected argv to contain --strict-mcp-config; dump=%q", string(raw))
+	}
+}
+
+// TestClaudeAdapter_NoJsonSchema_InArgv verifies spec "Claude adapter does not request
+// --json-schema": that flag ends the turn and cannot carry free-form Output alongside intents.
+func TestClaudeAdapter_NoJsonSchema_InArgv(t *testing.T) {
+	bin := helperBinary(t)
+
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	t.Setenv("FAKECLAUDE_DUMP_ARGV", "1")
+	t.Setenv("FAKECLAUDE_ARGV_FILE", argvFile)
+
+	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "", "")
+
+	if _, err := adapter.RunTask(context.Background(), "task-no-schema", "hello"); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	raw, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv dump: %v", err)
+	}
+	if strings.Contains(string(raw), "--json-schema") {
+		t.Errorf("argv must never contain --json-schema: %q", string(raw))
+	}
+}
+
+// TestClaudeAdapter_MintThenFail_ReleasesEntryAndLifetime: RED for (B) registry leak and (E) ceiling.
+func TestClaudeAdapter_MintThenFail_ReleasesEntryAndLifetime(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+	spy := &spyMinter{reg: registry}
+	adapter := claudecode.New(bin, claudecode.Options{
+		OutputLimit: 1 << 20, MCPRegistry: spy, MCPServerAddr: srv.Addr(), Tenant: "acme", AgentName: "ceo",
+	}, "", "")
+
+	before := time.Now()
+	if _, err := adapter.RunTask(context.Background(), "task-mint-fail", "fail"); err == nil {
+		t.Fatal("expected error for non-zero exit")
+	}
+	if len(spy.tokens) != 1 {
+		t.Fatalf("expected exactly 1 minted token, got %d", len(spy.tokens))
+	}
+	if _, err := registry.Resolve(spy.tokens[0], "acme"); err == nil {
+		t.Error("expected registry entry released after a failed RunTask, but Resolve still succeeded (leak)")
+	}
+	if spy.exp.Sub(before) < time.Hour {
+		t.Errorf("token lifetime too short for a long-running invocation: only %v from mint", spy.exp.Sub(before))
+	}
+}
+
+// TestClaudeAdapter_EphemeralConfig_TempFileRemoved verifies spec "Claude adapter configures
+// MCP ephemerally": the temp MCP config file is removed after the subprocess exits.
+func TestClaudeAdapter_EphemeralConfig_TempFileRemoved(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	dumpFile := filepath.Join(t.TempDir(), "mcp-config-path.txt")
+	t.Setenv("FAKECLAUDE_DUMP_MCP_CONFIG_PATH", dumpFile)
+	// Model a CLI that actually reaches the MCP endpoint, so this test stays focused on
+	// temp-file cleanup rather than tripping the never-contacted check.
+	t.Setenv("FAKECLAUDE_CONNECT_MCP_ONLY", "1")
+
+	adapter := claudecode.New(bin, claudecode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "")
+
+	if _, err := adapter.RunTask(context.Background(), "task-ephemeral", "hello"); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	raw, err := os.ReadFile(dumpFile)
+	if err != nil {
+		t.Fatalf("read mcp config path dump: %v", err)
+	}
+	cfgPath := strings.TrimSpace(string(raw))
+	if cfgPath == "" {
+		t.Fatal("fakeclaude did not report the MCP config path it saw")
+	}
+	if _, statErr := os.Stat(cfgPath); !os.IsNotExist(statErr) {
+		t.Errorf("expected ephemeral MCP config temp file to be removed after RunTask, stat err=%v", statErr)
+	}
+}
+
+// TestClaudeAdapter_DeadMCPServer_FailsLoudInsteadOfSilentSuccess is RED for the finding
+// that a dead MCP server produced a silent false success: with no health check, RunTask
+// would spawn the subprocess, find no tool calls were made (because the server that would
+// have served them is dead), and return a nil error with empty ActionIntents — identical
+// to the ordinary "the agent chose not to call a tool" outcome. An operator has no way to
+// tell those two situations apart.
+//
+// The health check is a plain func() error (in production, wire.go passes the real
+// transport/mcp Server.Err() method value — see transport/mcp/server_internal_test.go's
+// TestServer_AbnormalDeath_IsObservable for proof that Err() itself reports the death). This
+// test only needs to prove the adapter *consults and obeys* whatever MCPHealthCheck reports:
+// a dead server must surface as an explicit RunTask error, and — because the check runs
+// before the subprocess starts — the subprocess must never even be invoked (asserted via the
+// FAKECLAUDE_DUMP_ARGV hook: no dump file means fakeclaude never ran).
+func TestClaudeAdapter_DeadMCPServer_FailsLoudInsteadOfSilentSuccess(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	t.Setenv("FAKECLAUDE_DUMP_ARGV", "1")
+	t.Setenv("FAKECLAUDE_ARGV_FILE", argvFile)
+
+	simulatedDeath := errors.New("simulated mcp server death")
+	adapter := claudecode.New(bin, claudecode.Options{
+		OutputLimit:    1 << 20,
+		MCPRegistry:    &registryMinter{reg: registry},
+		MCPServerAddr:  srv.Addr(),
+		Tenant:         "acme",
+		AgentName:      "ceo",
+		MCPHealthCheck: func() error { return simulatedDeath },
+	}, "", "")
+
+	_, err := adapter.RunTask(context.Background(), "task-dead-mcp", "hello")
+	if err == nil {
+		t.Fatal("expected RunTask to fail loudly when the MCP server is dead, got nil error (silent false success)")
+	}
+	if !errors.Is(err, simulatedDeath) {
+		t.Errorf("expected RunTask error to wrap the health check error, got: %v", err)
+	}
+
+	if _, statErr := os.Stat(argvFile); !os.IsNotExist(statErr) {
+		t.Errorf("expected the claude subprocess to never be invoked when the MCP server is dead, but argv dump exists (stat err=%v)", statErr)
+	}
+}
+
+// containsArg reports whether want appears as an exact element of argv.
+func containsArg(argv []string, want string) bool {
+	return indexOfArg(argv, want) >= 0
+}
+
+// indexOfArg returns the index of the first argv element equal to want, or -1.
+func indexOfArg(argv []string, want string) int {
+	for i, a := range argv {
+		if a == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// dumpArgvForRun runs one task against the fakeclaude double with argv dumping enabled and
+// returns the exact argv the subprocess received (element 0 is the binary path). When opts
+// wires MCP, the double is told to complete the MCP handshake so the run stays focused on
+// argv content instead of tripping the never-contacted guard.
+func dumpArgvForRun(t *testing.T, opts claudecode.Options, taskID, prompt string) []string {
+	t.Helper()
+	bin := helperBinary(t)
+
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	t.Setenv("FAKECLAUDE_DUMP_ARGV", "1")
+	t.Setenv("FAKECLAUDE_ARGV_FILE", argvFile)
+	if opts.MCPRegistry != nil {
+		t.Setenv("FAKECLAUDE_CONNECT_MCP_ONLY", "1")
+	}
+
+	adapter := claudecode.New(bin, opts, "", "")
+	if _, err := adapter.RunTask(context.Background(), taskID, prompt); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	raw, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv dump: %v", err)
+	}
+	return strings.Split(string(raw), "\n")
+}
+
+// mcpWiredOptions returns Options wiring a live test MCP server with the given policy
+// action kinds.
+func mcpWiredOptions(t *testing.T, actionKinds ...string) claudecode.Options {
+	t.Helper()
+	srv, registry := startTestMCPServer(t)
+	return claudecode.Options{
+		OutputLimit:       1 << 20,
+		MCPRegistry:       &registryMinter{reg: registry},
+		MCPServerAddr:     srv.Addr(),
+		Tenant:            "acme",
+		AgentName:         "ceo",
+		PolicyActionKinds: actionKinds,
+	}
+}
+
+// TestClaudeAdapter_AllowedTools_GrantsFrameworkMCPTools is the RED test for the finding
+// that the claude CLI denies MCP tool calls CLIENT-SIDE unless they are explicitly allowed,
+// so the call never reaches the MCP server at all. Reproduced against the installed CLI
+// (2.1.268) with exactly this adapter's flag set: without an allowlist the tool call comes
+// back as "Claude requested permissions to use mcp__framework__echo, but you haven't granted
+// it yet", while the agent's own text still claims the action was performed. With
+// "--allowedTools mcp__framework__echo" the same call succeeds.
+//
+// The tool name the CLI expects is "mcp__<serverKey>__<toolName>", where serverKey is the
+// key under "mcpServers" in the ephemeral --mcp-config file. The literal "framework" is
+// asserted here on purpose: it is the wire contract with the CLI, so this test must fail if
+// the adapter's server key is renamed on only one side.
+//
+// Built-in tools (Bash and friends) are NOT affected — they already run without a grant —
+// so this allowlist stays least-privilege: exactly the framework's own action tools.
+func TestClaudeAdapter_AllowedTools_GrantsFrameworkMCPTools(t *testing.T) {
+	argv := dumpArgvForRun(t, mcpWiredOptions(t, "telegram_send"), "task-allowed-tools", "hello")
+
+	idx := indexOfArg(argv, "--allowedTools")
+	if idx < 0 {
+		t.Fatalf("expected --allowedTools in argv when MCP is wired with policy action kinds; without it the CLI denies every MCP tool call client-side; argv=%v", argv)
+	}
+	if idx+1 >= len(argv) {
+		t.Fatalf("--allowedTools is the last argv element, so it grants nothing; argv=%v", argv)
+	}
+	if got, want := argv[idx+1], "mcp__framework__telegram_send"; got != want {
+		t.Errorf("expected the element after --allowedTools to be %q, got %q; argv=%v", want, got, argv)
+	}
+}
+
+// TestClaudeAdapter_AllowedTools_GrantsEveryPolicyActionKind verifies every declared policy
+// action kind is granted, not just the first one. A partial allowlist would deny the
+// remaining tools client-side with no server-side trace.
+func TestClaudeAdapter_AllowedTools_GrantsEveryPolicyActionKind(t *testing.T) {
+	argv := dumpArgvForRun(t, mcpWiredOptions(t, "telegram_send", "github_pr_open"), "task-allowed-tools-multi", "hello")
+
+	for _, want := range []string{"mcp__framework__telegram_send", "mcp__framework__github_pr_open"} {
+		if !containsArg(argv, want) {
+			t.Errorf("expected %q in argv so the CLI grants that MCP tool; argv=%v", want, argv)
+		}
+	}
+}
+
+// TestClaudeAdapter_AllowedTools_NeverSwallowsThePrompt is the regression guard for the
+// placement hazard: --allowedTools is VARIADIC on the real CLI (verified: it accepts
+// multiple space-separated values), so if it were appended last the trailing positional
+// prompt would be parsed as one more allowed tool name and the agent would receive no task
+// at all. The guard is structural rather than index-based so it survives any future flag
+// being added before or after the allowlist: whatever follows the last allowlist entry must
+// be another flag, and the prompt must still be the final argv element.
+func TestClaudeAdapter_AllowedTools_NeverSwallowsThePrompt(t *testing.T) {
+	const prompt = "hello"
+	argv := dumpArgvForRun(t, mcpWiredOptions(t, "telegram_send", "github_pr_open"), "task-allowed-tools-placement", prompt)
+
+	idx := indexOfArg(argv, "--allowedTools")
+	if idx < 0 {
+		t.Fatalf("expected --allowedTools in argv; argv=%v", argv)
+	}
+
+	// Walk past every variadic value the CLI would absorb into the allowlist.
+	end := idx + 1
+	for end < len(argv) && !strings.HasPrefix(argv[end], "--") {
+		end++
+	}
+	if end >= len(argv) {
+		t.Fatalf("the --allowedTools variadic list runs to the end of argv, so the CLI would absorb the positional prompt as an allowed tool name; argv=%v", argv)
+	}
+	if end == idx+1 {
+		t.Errorf("--allowedTools is immediately followed by another flag (%q), so no tool is granted; argv=%v", argv[end], argv)
+	}
+	if got := argv[len(argv)-1]; got != prompt {
+		t.Errorf("expected the last argv element to still be the prompt %q, got %q; argv=%v", prompt, got, argv)
+	}
+}
+
+// TestClaudeAdapter_AllowedTools_AbsentWithoutMCP verifies the allowlist is emitted only
+// when MCP is actually wired. Without an MCP server there is no framework tool to grant,
+// and a stray --allowedTools would silently restrict the CLI's built-in tools (the CLI
+// treats the flag as the complete allow list), breaking every non-MCP invocation.
+func TestClaudeAdapter_AllowedTools_AbsentWithoutMCP(t *testing.T) {
+	argv := dumpArgvForRun(t, claudecode.Options{
+		OutputLimit:       1 << 20,
+		PolicyActionKinds: []string{"telegram_send"},
+	}, "task-no-mcp", "hello")
+
+	if containsArg(argv, "--allowedTools") {
+		t.Errorf("expected no --allowedTools in argv when MCP is not wired; argv=%v", argv)
+	}
+}
+
+// TestClaudeAdapter_MCPFlags_NeverCombinedWithDisablingFlag is the falsifiable JD-2
+// regression test for the finding that --safe-mode disables MCP servers on the real CLI
+// (per `claude --help`, verified against the installed 2.1.268 binary: --safe-mode disables
+// "CLAUDE.md, skills, plugins, hooks, MCP servers, custom commands and agents, output
+// styles, workflows, custom themes, keybindings" as one bundle), so combining it with
+// --mcp-config/--strict-mcp-config made the MCP endpoint permanently unreachable and every
+// MCP-wired RunTask call fail via the never-contacted guard.
+//
+// It reads the real subprocess argv (FAKECLAUDE_DUMP_ARGV), independent of fakeclaude's own
+// flag-handling logic, and asserts directly against argv content — not against fakeclaude's
+// self-reported behavior — so it stays falsifiable against a regression that reintroduces
+// --safe-mode (or swaps in an equally MCP-disabling flag such as --bare) alongside the MCP
+// flags. It also asserts the isolation substitute (--setting-sources ""/
+// --disable-slash-commands) is present, since dropping --safe-mode entirely without any
+// replacement would be a silent, undocumented isolation regression.
+func TestClaudeAdapter_MCPFlags_NeverCombinedWithDisablingFlag(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	t.Setenv("FAKECLAUDE_DUMP_ARGV", "1")
+	t.Setenv("FAKECLAUDE_ARGV_FILE", argvFile)
+	// Model a CLI that actually reaches the MCP endpoint, so this test stays focused on
+	// argv contents rather than tripping the never-contacted check.
+	t.Setenv("FAKECLAUDE_CONNECT_MCP_ONLY", "1")
+
+	adapter := claudecode.New(bin, claudecode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "")
+
+	if _, err := adapter.RunTask(context.Background(), "task-mcp-flags", "hello"); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	raw, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv dump: %v", err)
+	}
+	argv := strings.Split(string(raw), "\n")
+
+	if !containsArg(argv, "--mcp-config") || !containsArg(argv, "--strict-mcp-config") {
+		t.Fatalf("expected --mcp-config and --strict-mcp-config in argv when MCP is wired; argv=%v", argv)
+	}
+
+	for _, disabling := range []string{"--safe-mode", "--bare"} {
+		if containsArg(argv, disabling) {
+			t.Errorf("argv combines MCP flags (--mcp-config/--strict-mcp-config) with %q, which disables MCP servers on the real CLI — MCP would never be reachable; argv=%v", disabling, argv)
+		}
+	}
+
+	if !containsArg(argv, "--disable-slash-commands") {
+		t.Errorf("expected --disable-slash-commands (isolation substitute for --safe-mode) in argv; argv=%v", argv)
+	}
+	foundEmptySettingSources := false
+	for i, a := range argv {
+		if a == "--setting-sources" && i+1 < len(argv) && argv[i+1] == "" {
+			foundEmptySettingSources = true
+		}
+	}
+	if !foundEmptySettingSources {
+		t.Errorf("expected --setting-sources \"\" (isolation substitute for --safe-mode) in argv; argv=%v", argv)
 	}
 }

@@ -97,5 +97,9 @@ func runMaterialize(yamlPath string) error {
 	for _, rt := range runtimes {
 		_ = rt.srv.Shutdown(ctx)
 	}
+	// All runtimes share the same MCP server instance; shut it down once.
+	if runtimes[0].mcpSrv != nil {
+		_ = runtimes[0].mcpSrv.Shutdown(ctx)
+	}
 	return nil
 }

@@ -366,7 +366,7 @@ Threat-matrix coverage: Subprocess argv (token absent), Ephemeral config (mtime 
 > **Size note**: Phase 3 is estimated at 560–720 authored lines. `size:exception` expected from
 > maintainer before apply.
 
-- [ ] 3.1 [RED] Write failing MCP-aware tests for claudecode adapter in `adapters/claudecode/adapter_test.go`
+- [x] 3.1 [RED] Write failing MCP-aware tests for claudecode adapter in `adapters/claudecode/adapter_test.go`
 
 Add to `adapters/claudecode/adapter_test.go` (package `claudecode_test`):
 
@@ -386,7 +386,7 @@ registry or server URL.
 
 Command: `go test ./adapters/claudecode/...`
 
-- [ ] 3.2 [RED] Write failing threat-matrix tests for claudecode adapter in `adapters/claudecode/adapter_test.go`
+- [x] 3.2 [RED] Write failing threat-matrix tests for claudecode adapter in `adapters/claudecode/adapter_test.go`
 
 Add:
 
@@ -408,7 +408,7 @@ Expected failure: compile error.
 
 Command: `go test ./adapters/claudecode/...`
 
-- [ ] 3.3 [RED] Write failing MCP-aware tests for opencode adapter in `adapters/opencode/adapter_test.go`
+- [x] 3.3 [RED] Write failing MCP-aware tests for opencode adapter in `adapters/opencode/adapter_test.go`
 
 Add to `adapters/opencode/adapter_test.go` (package `opencode_test`):
 
@@ -431,7 +431,7 @@ Expected failure: compile error.
 
 Command: `go test ./adapters/opencode/...`
 
-- [ ] 3.4 [GREEN] Extend `adapters/claudecode/testdata/fakeclaude/main.go` to call MCP when instructed
+- [x] 3.4 [GREEN] Extend `adapters/claudecode/testdata/fakeclaude/main.go` to call MCP when instructed
 
 Modify `adapters/claudecode/testdata/fakeclaude/main.go`:
 
@@ -446,7 +446,7 @@ Modify `adapters/claudecode/testdata/fakeclaude/main.go`:
 - When env var `FAKECLAUDE_DUMP_ARGV=1` is set: write `os.Args` as newline-separated strings
   to the path given in `FAKECLAUDE_ARGV_FILE` before producing normal output (for token-absent-from-argv test).
 
-- [ ] 3.5 [GREEN] Extend `adapters/opencode/testdata/fakeopencode/main.go` to call MCP when instructed
+- [x] 3.5 [GREEN] Extend `adapters/opencode/testdata/fakeopencode/main.go` to call MCP when instructed
 
 Modify `adapters/opencode/testdata/fakeopencode/main.go`:
 
@@ -459,7 +459,7 @@ Modify `adapters/opencode/testdata/fakeopencode/main.go`:
      text-only extraction by the adapter).
 - When `FAKEOPENCODE_DUMP_ARGV=1`: write argv to `FAKEOPENCODE_ARGV_FILE`.
 
-- [ ] 3.6 [GREEN] Modify `adapters/claudecode/adapter.go` — add MCP mint/drain and ephemeral config
+- [x] 3.6 [GREEN] Modify `adapters/claudecode/adapter.go` — add MCP mint/drain and ephemeral config
 
 Modify `adapters/claudecode/adapter.go`:
 
@@ -501,7 +501,7 @@ Modify `adapters/claudecode/adapter.go`:
 - Replace zero-stub `Capabilities()` with real implementation: return
   `port.ProviderCapabilities{ContextBudget: a.contextBudget, ActionKinds: a.policyActionKinds}`.
 
-- [ ] 3.7 [GREEN] Modify `adapters/opencode/adapter.go` — add MCP mint/drain and ephemeral config
+- [x] 3.7 [GREEN] Modify `adapters/opencode/adapter.go` — add MCP mint/drain and ephemeral config
 
 Modify `adapters/opencode/adapter.go`:
 
@@ -513,6 +513,17 @@ Modify `adapters/opencode/adapter.go`:
      subprocess `Env` as `append(os.Environ(), "OPENCODE_CONFIG_CONTENT="+configJSON)` (subprocess-scoped;
      do NOT call `os.Setenv`) (design: Threat matrix – "`OPENCODE_CONFIG_CONTENT` scoped to
      that process env").
+     JSON format: `{"mcp": {"framework": {"type": "remote", "url": "http://<addr>", "enabled":
+     true, "headers": {"Authorization": "Bearer <token>"}}}}`. This is NOT the `mcpServers`/`"http"`
+     shape shown in step 3.6.2 above — that shape is Claude-specific. OpenCode's own schema
+     (https://opencode.ai/config.json) declares `additionalProperties: false` on the root `Config`
+     type, so an unrecognized top-level key such as `mcpServers` silently invalidates the whole
+     config; the top-level key must be `mcp`, and the entry `type` must be the enum value `"remote"`,
+     never `"http"`. **Correction note**: an earlier draft of this task copied the claude shape
+     verbatim here by mistake, which JD-1 (round 1 judgment-day review) caught as a live defect in
+     `adapters/opencode/adapter.go` before it shipped; this doc entry is corrected to match the
+     shape the code actually emits, so a future implementer reading this task does not reintroduce
+     the same defect.
   3. Add `--format json` to argv for NDJSON output.
   4. Switch output parsing: read NDJSON line-by-line; extract text from relevant event fields;
      stop on EOF or process exit — **not** on any dedicated terminal event line
@@ -520,7 +531,7 @@ Modify `adapters/opencode/adapter.go`:
   5. After `cmd.Wait()`: if `handle != nil`, call `handle.Drain()` → `result.ActionIntents`.
 - Replace zero-stub `Capabilities()` with real implementation.
 
-- [ ] 3.8 [GREEN] Modify `cmd/company/wire.go` — start MCP server before agents
+- [x] 3.8 [GREEN] Modify `cmd/company/wire.go` — start MCP server before agents
 
 Modify `cmd/company/wire.go`:
 
@@ -539,7 +550,7 @@ Modify `cmd/company/wire.go`:
 - The returned `[]*agentRuntime` should include the server reference or the caller receives it
   via a new return value / via `opts.mcpServer` for shutdown.
 
-- [ ] 3.9 [GREEN] Update `cmd/company/main.go` — add MCP server shutdown to lifecycle
+- [x] 3.9 [GREEN] Update `cmd/company/main.go` — add MCP server shutdown to lifecycle
 
 Modify `cmd/company/main.go` in `runMaterialize`:
 
@@ -548,7 +559,7 @@ Modify `cmd/company/main.go` in `runMaterialize`:
 - Add `defer mcpSrv.Shutdown(ctx)` to the shutdown sequence alongside `uiSrv.Shutdown`.
 - The MCP server startup log line: `fmt.Fprintf(opts.stderr, "mcp: server listening on %s\n", srv.Addr())`.
 
-- [ ] 3.10 [VERIFY] Full Slice 3 verification
+- [x] 3.10 [VERIFY] Full Slice 3 verification
 
 Run:
 ```
@@ -565,7 +576,7 @@ build without errors.
 
 ## Phase 4: Cleanup and Documentation
 
-- [ ] 4.1 Document opencode `--format json` version floor
+- [x] 4.1 Document opencode `--format json` version floor
 
 Modify `AGENTS.md` (or a new `docs/adapter-compatibility.md` if preferred) to add:
 
@@ -575,7 +586,7 @@ Modify `AGENTS.md` (or a new `docs/adapter-compatibility.md` if preferred) to ad
 This closes design Open Questions item: "opencode --format json version floor unverified upstream —
 document '1.18.31 verified'".
 
-- [ ] 4.2 Final full regression check
+- [x] 4.2 Final full regression check
 
 Run:
 ```

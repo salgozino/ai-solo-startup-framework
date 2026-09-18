@@ -13,6 +13,8 @@ package opencode_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,7 +24,50 @@ import (
 	"time"
 
 	"github.com/salgozino/ai-solo-startup-framework/adapters/opencode"
+	"github.com/salgozino/ai-solo-startup-framework/config"
+	transportmcp "github.com/salgozino/ai-solo-startup-framework/transport/mcp"
 )
+
+// registryMinter adapts *transportmcp.Registry to opencode.TokenMinter.
+// See adapters/claudecode/adapter_test.go's registryMinter for why this wrapper
+// (with an exported Drainer/TokenMinter pair) is required instead of the
+// unexported interfaces tasks.md originally sketched: Go requires a method's
+// declared return type to be identical to the interface's declared return
+// type, and unexported types cannot be named outside their declaring package.
+type registryMinter struct {
+	reg *transportmcp.Registry
+}
+
+func (m *registryMinter) Mint(tenant, agent, taskID string, exp time.Time) (string, opencode.Drainer) {
+	return m.reg.Mint(tenant, agent, taskID, exp)
+}
+
+// spyMinter records every minted token/expiry for direct assertion.
+type spyMinter struct {
+	reg    *transportmcp.Registry
+	tokens []string
+	exp    time.Time
+}
+
+func (m *spyMinter) Mint(tenant, agent, taskID string, exp time.Time) (string, opencode.Drainer) {
+	token, handle := m.reg.Mint(tenant, agent, taskID, exp)
+	m.tokens = append(m.tokens, token)
+	m.exp = exp
+	return token, handle
+}
+
+// startTestMCPServer starts an in-process MCP server with a single
+// "telegram_send" tool for tenant "acme" and registers cleanup.
+func startTestMCPServer(t *testing.T) (*transportmcp.Server, *transportmcp.Registry) {
+	t.Helper()
+	registry := transportmcp.NewRegistry()
+	srv := transportmcp.New("acme", map[string]config.Policy{"telegram_send": {}}, registry)
+	if err := srv.Start("127.0.0.1:0"); err != nil {
+		t.Fatalf("start mcp server: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	return srv, registry
+}
 
 // helperBinary builds the fakeopencode binary once per test run and returns its path.
 func helperBinary(t *testing.T) string {
@@ -284,7 +329,499 @@ func TestRunTask_EmptyStderrOnFail(t *testing.T) {
 	}
 }
 
-// NOTE: ProbeModel tests removed — opencode CLI does not distinguish invalid
-// model from missing prompt (both produce the same generic error). The opencode
-// adapter intentionally does not implement modelProber; materializeAgents skips
-// the probe for it. See adapters/opencode/adapter.go for details.
+// ---- ProbeModel: --format json capability validation (defect: no startup validation) ----
+//
+// opencode's CLI does not distinguish an invalid model from a missing prompt (both produce
+// the same generic error), so ProbeModel here does not validate model names the way
+// claudecode's does. It instead validates a different, previously unchecked precondition:
+// that this opencode build accepts "--format json", the NDJSON flag RunTask unconditionally
+// passes on every invocation (adapter.go). Without this probe, an opencode build that
+// rejects the flag makes every single RunTask call fail at runtime instead of failing once,
+// loudly, at startup.
+
+// TestProbeModel_FormatFlagAccepted_Succeeds verifies that ProbeModel returns nil when the
+// CLI accepts --format json (the ordinary case).
+func TestProbeModel_FormatFlagAccepted_Succeeds(t *testing.T) {
+	bin := helperBinary(t)
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
+
+	if err := adapter.ProbeModel(context.Background()); err != nil {
+		t.Errorf("expected nil error when --format json is accepted, got: %v", err)
+	}
+}
+
+// TestProbeModel_FormatFlagRejected_FailsLoudNamingFlagAndFloor verifies that ProbeModel
+// turns a CLI's rejection of --format json into a loud, actionable startup error naming
+// the flag — instead of leaving it to surface as an opaque failure on every future RunTask.
+func TestProbeModel_FormatFlagRejected_FailsLoudNamingFlagAndFloor(t *testing.T) {
+	bin := helperBinary(t)
+	t.Setenv("FAKEOPENCODE_REJECT_FORMAT_FLAG", "1")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
+
+	err := adapter.ProbeModel(context.Background())
+	if err == nil {
+		t.Fatal("expected error when the CLI rejects --format json, got nil")
+	}
+	if !strings.Contains(err.Error(), "--format") {
+		t.Errorf("expected error to name the --format flag, got: %v", err)
+	}
+}
+
+// TestProbeModel_DeadlineExceeded verifies that a probe which never returns is bounded by
+// ctx, mirroring claudecode's ProbeModel deadline behavior.
+func TestProbeModel_DeadlineExceeded(t *testing.T) {
+	bin := helperBinary(t)
+	t.Setenv("FAKEOPENCODE_PROBE_HANG", "1")
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	err := adapter.ProbeModel(ctx)
+	if err == nil {
+		t.Fatal("expected error when probe exceeds deadline, got nil")
+	}
+}
+
+// TestProbeModel_OtherFailure_DoesNotBlockStartup verifies that a non-zero exit unrelated
+// to --format (e.g. the CLI's ordinary missing-prompt validation) does not fail the probe —
+// only rejection of the --format flag itself should abort startup.
+func TestProbeModel_OtherFailure_DoesNotBlockStartup(t *testing.T) {
+	bin := helperBinary(t)
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "anthropic/claude-sonnet-4-20250514", "", "")
+
+	if err := adapter.ProbeModel(context.Background()); err != nil {
+		t.Errorf("expected nil error for an unrelated non-zero exit, got: %v", err)
+	}
+}
+
+// ---- Phase 3: MCP tool use and action intent emission (spec: provider-action-intent-emission) ----
+
+// TestOpenCodeAdapter_MCPToolCall_PopulatesActionIntents proves the real adapter path is wired:
+// a fake opencode binary performs an actual MCP tools/call over HTTP against a running server,
+// and RunTask returns the intent recorded by the server's sink — not a hand-constructed fixture.
+func TestOpenCodeAdapter_MCPToolCall_PopulatesActionIntents(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	adapter := opencode.New(bin, opencode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "", "")
+
+	t.Setenv("FAKEOPENCODE_CALL_MCP", "1")
+
+	result, err := adapter.RunTask(context.Background(), "task-mcp", "hello")
+	if err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if len(result.ActionIntents) != 1 {
+		t.Fatalf("expected 1 action intent, got %d: %+v", len(result.ActionIntents), result.ActionIntents)
+	}
+	if result.ActionIntents[0].Kind != "telegram_send" {
+		t.Errorf("expected Kind=telegram_send, got %q", result.ActionIntents[0].Kind)
+	}
+}
+
+// TestOpenCodeAdapter_NoToolCall_EmptyIntents verifies that a completed invocation which
+// reached the MCP endpoint and simply called no tool yields empty ActionIntents and a nil
+// error. This is the regression guard for the never-contacted check below: that check must
+// only fire when the endpoint was never reached, never on this healthy outcome.
+func TestOpenCodeAdapter_NoToolCall_EmptyIntents(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	// The CLI completes the MCP handshake but calls no tool.
+	t.Setenv("FAKEOPENCODE_CONNECT_MCP_ONLY", "1")
+
+	adapter := opencode.New(bin, opencode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "", "")
+
+	result, err := adapter.RunTask(context.Background(), "task-no-mcp", "hello")
+	if err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if len(result.ActionIntents) != 0 {
+		t.Errorf("expected empty ActionIntents, got %+v", result.ActionIntents)
+	}
+}
+
+// TestOpenCodeAdapter_NeverContactedMCP_FailsLoudInsteadOfSilentSuccess is RED for the
+// finding that a CLI which never reaches the MCP endpoint at all produces a result
+// byte-identical to the healthy "the agent chose not to call a tool" case: Output set,
+// nil error, empty ActionIntents.
+//
+// MCPHealthCheck cannot catch this: the server here is alive and healthy, it was simply
+// never contacted (config shape ignored by the CLI, handshake failure, bearer rejected,
+// subprocess killed before the call). The registry already knows the minted token was
+// never presented, so the adapter must consult it rather than reporting success for an
+// invocation whose tool calls could not have been recorded.
+func TestOpenCodeAdapter_NeverContactedMCP_FailsLoudInsteadOfSilentSuccess(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	adapter := opencode.New(bin, opencode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "", "")
+
+	// Neither FAKEOPENCODE_CALL_MCP nor FAKEOPENCODE_CONNECT_MCP_ONLY is set: the
+	// subprocess exits successfully without ever touching the MCP endpoint.
+	_, err := adapter.RunTask(context.Background(), "task-never-contacted", "hello")
+	if err == nil {
+		t.Fatal("expected RunTask to fail loudly when the CLI never contacted the MCP endpoint, got nil error (silent false success)")
+	}
+	if !strings.Contains(err.Error(), srv.Addr()) {
+		t.Errorf("expected the error to name the MCP server address %q so an operator can act, got: %v", srv.Addr(), err)
+	}
+	if !strings.Contains(err.Error(), "task-never-contacted") {
+		t.Errorf("expected the error to name the task ID so an operator can act, got: %v", err)
+	}
+}
+
+// TestOpenCodeAdapter_MintThenFail_ReleasesEntryAndLifetime: RED for (B) registry leak and (E) ceiling.
+func TestOpenCodeAdapter_MintThenFail_ReleasesEntryAndLifetime(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+	spy := &spyMinter{reg: registry}
+	adapter := opencode.New(bin, opencode.Options{
+		OutputLimit: 1 << 20, MCPRegistry: spy, MCPServerAddr: srv.Addr(), Tenant: "acme", AgentName: "ceo",
+	}, "", "", "")
+
+	before := time.Now()
+	if _, err := adapter.RunTask(context.Background(), "task-mint-fail", "fail"); err == nil {
+		t.Fatal("expected error for non-zero exit")
+	}
+	if len(spy.tokens) != 1 {
+		t.Fatalf("expected exactly 1 minted token, got %d", len(spy.tokens))
+	}
+	if _, err := registry.Resolve(spy.tokens[0], "acme"); err == nil {
+		t.Error("expected registry entry released after a failed RunTask, but Resolve still succeeded (leak)")
+	}
+	if spy.exp.Sub(before) < time.Hour {
+		t.Errorf("token lifetime too short for a long-running invocation: only %v from mint", spy.exp.Sub(before))
+	}
+}
+
+// TestOpenCodeAdapter_EphemeralConfig_ScopedToSubprocessEnv verifies spec "OpenCode adapter
+// configures MCP ephemerally" / threat-matrix "OPENCODE_CONFIG_CONTENT scoped to that process
+// env": the adapter must deliver MCP configuration to the subprocess environment only — via
+// cmd.Env, never os.Setenv — so the parent (test) process is never mutated.
+//
+// This replaces an earlier version of this test that wrote a config.json into an
+// unrelated t.TempDir() and asserted its mtime was unchanged; nothing connected that path
+// to the adapter, so the assertion passed identically against a broken adapter that called
+// os.Setenv and rewrote a real persisted config file. The property actually required by the
+// spec/threat-matrix — subprocess-only scoping — is asserted directly here using the
+// FAKEOPENCODE_DUMP_ENV_PATH hook, which reports what OPENCODE_CONFIG_CONTENT value the
+// subprocess itself received.
+func TestOpenCodeAdapter_EphemeralConfig_ScopedToSubprocessEnv(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	if v := os.Getenv("OPENCODE_CONFIG_CONTENT"); v != "" {
+		t.Fatalf("test process already has OPENCODE_CONFIG_CONTENT set (test pollution): %q", v)
+	}
+
+	dumpFile := filepath.Join(t.TempDir(), "env-dump.txt")
+	t.Setenv("FAKEOPENCODE_DUMP_ENV_PATH", dumpFile)
+	// Model a CLI that actually reaches the MCP endpoint, so this test stays focused on
+	// env scoping rather than tripping the never-contacted check.
+	t.Setenv("FAKEOPENCODE_CONNECT_MCP_ONLY", "1")
+
+	adapter := opencode.New(bin, opencode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   &registryMinter{reg: registry},
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "", "")
+
+	if _, err := adapter.RunTask(context.Background(), "task-env-scope", "hello"); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	// Property 1: the subprocess actually received a populated OPENCODE_CONFIG_CONTENT,
+	// keyed "mcp" (opencode's own schema), never "mcpServers" (the Claude-shaped key
+	// this adapter used to emit — see TestOpenCodeMCPConfig_MatchesRealCLISchemaContract
+	// for the full schema assertion).
+	raw, err := os.ReadFile(dumpFile)
+	if err != nil {
+		t.Fatalf("read env dump: %v", err)
+	}
+	if !strings.Contains(string(raw), `"mcp"`) {
+		t.Errorf("subprocess did not receive a populated OPENCODE_CONFIG_CONTENT: dump=%q", string(raw))
+	}
+	if strings.Contains(string(raw), "mcpServers") {
+		t.Errorf("subprocess received the Claude-shaped \"mcpServers\" key; opencode's schema requires top-level \"mcp\" instead: dump=%q", string(raw))
+	}
+
+	// Property 2: the parent (test) process environment was never mutated. This is
+	// precisely what "scoped to that process env" means — cmd.Env only, never os.Setenv.
+	if v := os.Getenv("OPENCODE_CONFIG_CONTENT"); v != "" {
+		t.Errorf("OPENCODE_CONFIG_CONTENT leaked into the parent process env: %q", v)
+	}
+}
+
+// TestOpenCodeAdapter_TerminatesOnEOF_NoHang verifies spec "OpenCode adapter terminates its
+// reader on process exit, not a sentinel event": RunTask must return promptly once the
+// subprocess closes stdout, without waiting on any dedicated terminal event line.
+func TestOpenCodeAdapter_TerminatesOnEOF_NoHang(t *testing.T) {
+	bin := helperBinary(t)
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := adapter.RunTask(context.Background(), "task-eof", "hello")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunTask: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("RunTask did not return within 1 second — reader hung waiting for a sentinel event")
+	}
+}
+
+// TestOpenCodeAdapter_DeadMCPServer_FailsLoudInsteadOfSilentSuccess mirrors
+// claudecode's sibling test: without a health check, a dead MCP server produces a
+// silent false success indistinguishable from "the agent made no tool calls". With
+// MCPHealthCheck wired, RunTask must fail loudly and must never spawn the subprocess.
+func TestOpenCodeAdapter_DeadMCPServer_FailsLoudInsteadOfSilentSuccess(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	t.Setenv("FAKEOPENCODE_DUMP_ARGV", "1")
+	t.Setenv("FAKEOPENCODE_ARGV_FILE", argvFile)
+
+	simulatedDeath := errors.New("simulated mcp server death")
+	adapter := opencode.New(bin, opencode.Options{
+		OutputLimit:    1 << 20,
+		MCPRegistry:    &registryMinter{reg: registry},
+		MCPServerAddr:  srv.Addr(),
+		Tenant:         "acme",
+		AgentName:      "ceo",
+		MCPHealthCheck: func() error { return simulatedDeath },
+	}, "", "", "")
+
+	_, err := adapter.RunTask(context.Background(), "task-dead-mcp", "hello")
+	if err == nil {
+		t.Fatal("expected RunTask to fail loudly when the MCP server is dead, got nil error (silent false success)")
+	}
+	if !errors.Is(err, simulatedDeath) {
+		t.Errorf("expected RunTask error to wrap the health check error, got: %v", err)
+	}
+
+	if _, statErr := os.Stat(argvFile); !os.IsNotExist(statErr) {
+		t.Errorf("expected the opencode subprocess to never be invoked when the MCP server is dead, but argv dump exists (stat err=%v)", statErr)
+	}
+}
+
+// TestOpenCodeMCPConfig_MatchesRealCLISchemaContract is the falsifiable schema contract
+// test for JD-1 (adapter emits a Claude-shaped config that opencode's real CLI rejects).
+//
+// It deliberately does NOT reuse any type from adapters/opencode/adapter.go (that would
+// only prove the adapter agrees with itself, exactly how the original defect stayed green:
+// the old fakeopencode duplicated the adapter's own mcpConfigFile/mcpServerEntry structs,
+// so both sides silently accepted the wrong "mcpServers"/"http" shape together). Instead it
+// decodes the raw OPENCODE_CONFIG_CONTENT JSON into a generic map[string]any and asserts
+// directly against opencode's published config schema (https://opencode.ai/config.json,
+// $defs.Config: additionalProperties:false, $defs.McpRemoteConfig: type must be "remote"):
+//
+//   - top-level "mcp" key is present
+//   - top-level "mcpServers" key is ABSENT (the invalid, Claude-shaped key that made the
+//     whole config fail opencode's additionalProperties:false root schema)
+//   - the "framework" entry's "type" is the literal string "remote" (not "http")
+//   - the "framework" entry's "enabled" is boolean true (opencode silently never loads a
+//     disabled entry, so a regression that emits "enabled": false would otherwise produce
+//     a healthy-looking config that no tool call can ever reach)
+//   - "url" is set and matches the running MCP server's address
+//   - the bearer token appears in "headers" (never on argv, never in a persisted file)
+func TestOpenCodeMCPConfig_MatchesRealCLISchemaContract(t *testing.T) {
+	bin := helperBinary(t)
+	srv, registry := startTestMCPServer(t)
+	spy := &spyMinter{reg: registry}
+
+	dumpFile := filepath.Join(t.TempDir(), "env-dump.txt")
+	t.Setenv("FAKEOPENCODE_DUMP_ENV_PATH", dumpFile)
+	// The fake need not actually reach the server for this test — it only asserts on the
+	// JSON shape the adapter handed the subprocess.
+	t.Setenv("FAKEOPENCODE_CONNECT_MCP_ONLY", "1")
+
+	adapter := opencode.New(bin, opencode.Options{
+		OutputLimit:   1 << 20,
+		MCPRegistry:   spy,
+		MCPServerAddr: srv.Addr(),
+		Tenant:        "acme",
+		AgentName:     "ceo",
+	}, "", "", "")
+
+	if _, err := adapter.RunTask(context.Background(), "task-schema-contract", "hello"); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if len(spy.tokens) != 1 {
+		t.Fatalf("expected exactly 1 minted token, got %d", len(spy.tokens))
+	}
+	token := spy.tokens[0]
+
+	raw, err := os.ReadFile(dumpFile)
+	if err != nil {
+		t.Fatalf("read env dump: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("OPENCODE_CONFIG_CONTENT is not valid JSON: %v; raw=%q", err, string(raw))
+	}
+
+	if _, present := doc["mcpServers"]; present {
+		t.Errorf("config must not contain the Claude-shaped top-level \"mcpServers\" key (invalid under opencode's additionalProperties:false schema): %q", string(raw))
+	}
+
+	mcpRaw, present := doc["mcp"]
+	if !present {
+		t.Fatalf("config must contain the top-level \"mcp\" key required by opencode's schema; raw=%q", string(raw))
+	}
+	mcp, ok := mcpRaw.(map[string]any)
+	if !ok {
+		t.Fatalf("\"mcp\" must be a JSON object, got %T", mcpRaw)
+	}
+
+	entryRaw, present := mcp["framework"]
+	if !present {
+		t.Fatalf("expected an entry named \"framework\" under \"mcp\"; raw=%q", string(raw))
+	}
+	entry, ok := entryRaw.(map[string]any)
+	if !ok {
+		t.Fatalf("\"mcp\".\"framework\" must be a JSON object, got %T", entryRaw)
+	}
+
+	if got, _ := entry["type"].(string); got != "remote" {
+		t.Errorf("expected \"mcp\".\"framework\".\"type\" == \"remote\" (opencode's McpRemoteConfig), got %q", got)
+	}
+	if got, ok := entry["enabled"].(bool); !ok || got != true {
+		t.Errorf("expected \"mcp\".\"framework\".\"enabled\" == boolean true (opencode ignores a disabled entry — it never loads the server), got %v (%T)", entry["enabled"], entry["enabled"])
+	}
+	wantURL := "http://" + srv.Addr()
+	if got, _ := entry["url"].(string); got != wantURL {
+		t.Errorf("expected \"mcp\".\"framework\".\"url\" == %q, got %q", wantURL, got)
+	}
+
+	headersRaw, present := entry["headers"]
+	if !present {
+		t.Fatalf("expected \"mcp\".\"framework\".\"headers\" to carry the bearer token; raw=%q", string(raw))
+	}
+	headers, ok := headersRaw.(map[string]any)
+	if !ok {
+		t.Fatalf("\"headers\" must be a JSON object, got %T", headersRaw)
+	}
+	wantAuth := "Bearer " + token
+	if got, _ := headers["Authorization"].(string); got != wantAuth {
+		t.Errorf("expected bearer token in \"headers\".\"Authorization\", got %q", got)
+	}
+}
+
+// TestRunTask_ExtractsTextFromRealEventEnvelope pins the actual opencode `--format json`
+// contract: text content lives at part.text on events whose top-level type is "text".
+// There is no top-level "text" field on any event (verified against opencode 1.18.31 —
+// the top-level field set is exactly ['part','sessionID','timestamp','type']).
+//
+// Regression guard: a parser that reads a top-level "text" extracts the empty string from
+// every line, which silently drops the adapter into its raw-text fallback and sets
+// ProviderResult.Output to the ENTIRE raw NDJSON dump. That failure mode is invisible to a
+// test asserting only "Output is non-empty", so this test asserts both directions —
+// Output IS the model's text, and Output is NOT the envelope.
+func TestRunTask_ExtractsTextFromRealEventEnvelope(t *testing.T) {
+	bin := helperBinary(t)
+	adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
+
+	result, err := adapter.RunTask(context.Background(), "task-envelope", "Reply with exactly: OK")
+	if err != nil {
+		t.Fatalf("RunTask: unexpected error: %v", err)
+	}
+
+	// fakeopencode always prepends "pure:1|" because --pure is unconditional.
+	const want = "pure:1|Reply with exactly: OK"
+	if result.Output != want {
+		t.Errorf("expected Output to be the model text %q, got %q", want, result.Output)
+	}
+
+	// Explicitly assert Output is not the raw NDJSON dump. Each of these tokens appears
+	// only in the event envelope, never in the model's text, so any of them leaking into
+	// Output means the stream was concatenated verbatim instead of parsed.
+	for _, envelopeOnly := range []string{"sessionID", "step_start", "step_finish", "\"part\"", "timestamp", "messageID"} {
+		if strings.Contains(result.Output, envelopeOnly) {
+			t.Errorf("Output leaked raw NDJSON envelope token %q — the stream was dumped, not parsed: %q", envelopeOnly, result.Output)
+		}
+	}
+
+	// A parsed single-turn stream is one line of text, never the multi-line raw stream.
+	if strings.Contains(result.Output, "\n") {
+		t.Errorf("Output contains a newline — raw multi-line NDJSON leaked into the result: %q", result.Output)
+	}
+}
+
+// TestRunTask_RawTextFallbackBranches pins both sides of the condition that decides
+// whether the raw-text fallback fires. The fallback is gated on "was this an opencode
+// event stream at all", NOT on "did extraction come back empty" — an empty extraction
+// from a well-formed stream is a real answer, and dumping the envelope instead would
+// hand the caller machine noise.
+func TestRunTask_RawTextFallbackBranches(t *testing.T) {
+	bin := helperBinary(t)
+
+	tests := []struct {
+		name   string
+		input  string
+		assert func(t *testing.T, output string)
+	}{
+		{
+			name:  "non-NDJSON stdout is preserved by the fallback",
+			input: "raw-text",
+			assert: func(t *testing.T, output string) {
+				// Not an event stream, so losing this text would be a regression.
+				if !strings.Contains(output, "plain text, not an event stream") {
+					t.Errorf("expected raw stdout to survive via the fallback, got %q", output)
+				}
+			},
+		},
+		{
+			name:  "well-formed stream with no text part yields empty output, not the envelope",
+			input: "error-event",
+			assert: func(t *testing.T, output string) {
+				if output != "" {
+					t.Errorf("expected empty Output for a recognised stream carrying no text part, got %q", output)
+				}
+				// Belt and braces: the error envelope must never be concatenated in.
+				if strings.Contains(output, "ProviderAuthError") || strings.Contains(output, "sessionID") {
+					t.Errorf("error-event envelope leaked into Output: %q", output)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			adapter := opencode.New(bin, opencode.Options{OutputLimit: 1 << 20}, "", "", "")
+			result, err := adapter.RunTask(context.Background(), "task-fallback", tt.input)
+			if err != nil {
+				t.Fatalf("RunTask(%q): unexpected error: %v", tt.input, err)
+			}
+			tt.assert(t, result.Output)
+		})
+	}
+}

@@ -26,6 +26,9 @@ type invocation struct {
 	// Protected by mu.
 	mu     sync.Mutex
 	dedupe map[string]string
+	// contacted records whether this invocation's token was ever successfully verified,
+	// i.e. whether the agent CLI actually reached the MCP server with it. Protected by mu.
+	contacted bool
 }
 
 // Handle is the adapter-side handle for a live invocation.
@@ -114,8 +117,28 @@ func (r *Registry) TokenVerifier() auth.TokenVerifier {
 		if time.Now().After(inv.exp) {
 			return nil, fmt.Errorf("%w: expired token", auth.ErrInvalidToken)
 		}
+
+		// This callback runs for every authenticated HTTP request, including the MCP
+		// initialize handshake — so it is the truest available signal that the CLI
+		// actually reached us with the token we minted for it. Adapters read it back
+		// through Handle.Contacted to tell "the agent made no tool calls" apart from
+		// "the agent never reached the MCP server at all".
+		inv.mu.Lock()
+		inv.contacted = true
+		inv.mu.Unlock()
+
 		return &auth.TokenInfo{UserID: token, Expiration: inv.exp}, nil
 	}
+}
+
+// Contacted reports whether this invocation's bearer token was ever successfully
+// verified by the MCP server, i.e. whether the agent CLI actually reached the endpoint.
+// It stays accurate after Drain: the Handle keeps its invocation pointer even though the
+// registry entry is gone.
+func (h *Handle) Contacted() bool {
+	h.inv.mu.Lock()
+	defer h.inv.mu.Unlock()
+	return h.inv.contacted
 }
 
 // Drain removes the invocation entry from the registry and returns the sink contents.
