@@ -22,7 +22,7 @@
 
 Decision needed before apply: No
 Chained PRs recommended: Yes
-Chain strategy: pending
+Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for this session)
 400-line budget risk: High
 
 ### Suggested Work Units
@@ -39,37 +39,37 @@ Chain strategy: pending
 
 ## Phase 1: Narrow `port.Provider` — Delete Dead Delegation Code (PR 1)
 
-- [ ] 1.1 RED: Update `core/port/contract_test.go` — drop the A2A-method assertions and add a
+- [x] 1.1 RED: Update `core/port/contract_test.go` — drop the A2A-method assertions and add a
       reflection-based test (`TestProvider_MethodSet`) asserting `port.Provider`'s method set is
       exactly `Complete, CompleteError, SendTask, RunTask, Capabilities`. Run it first; it MUST
       fail against the current five-method-plus-three interface.
-- [ ] 1.2 GREEN: Edit `core/port/provider.go` — delete `SendMessage`, `SendMessageStream`,
+- [x] 1.2 GREEN: Edit `core/port/provider.go` — delete `SendMessage`, `SendMessageStream`,
       `ResolveAgent` from the `Provider` interface and delete the `StreamEvent` struct; update the
       interface's doc comment to state the narrowed contract (Complete/CompleteError/SendTask/
       RunTask/Capabilities only, no A2A networking).
-- [ ] 1.3 GREEN: Edit `core/port/fake/fake_provider.go` — delete `SendMessage`,
+- [x] 1.3 GREEN: Edit `core/port/fake/fake_provider.go` — delete `SendMessage`,
       `SendMessageStream`, `ResolveAgent`, and the now-unused `SendMessageCall`, `MsgCalls`,
       `ReturnStream`, `ReturnAddress`, `SendMessageCallCount` fields/methods; keep `SendTask`.
       Re-run 1.1's test; it must now pass.
-- [ ] 1.4 GREEN: Edit `adapters/claudecode/adapter.go` — delete the `SendMessage`,
+- [x] 1.4 GREEN: Edit `adapters/claudecode/adapter.go` — delete the `SendMessage`,
       `SendMessageStream`, `ResolveAgent` stub methods and the false
       `errNotImplemented`/"provided by transport/a2a" comment (lines ~517-541); keep the
       `errNotImplemented` variable only if still referenced by `Complete`/`CompleteError` stubs,
       otherwise delete it too.
-- [ ] 1.5 GREEN: Edit `adapters/opencode/adapter.go` — same three-method deletion as 1.4 (lines
+- [x] 1.5 GREEN: Edit `adapters/opencode/adapter.go` — same three-method deletion as 1.4 (lines
       ~513-526).
-- [ ] 1.6 RED: In `transport/a2a/server_test.go`, write a new/retargeted
+- [x] 1.6 RED: In `transport/a2a/server_test.go`, write a new/retargeted
       `TestProviderFailureMarksFailed` that exercises the `RunTask` failure path (the behavior it
       actually proves per the proposal), removing any assertion coupled to the deleted
       `PolicyEngine == nil` branch. Confirm it fails for the right reason before Phase 1's
       supervisor edit (it should currently pass against old code but assert on the wrong branch —
       capture the diff in the commit message).
-- [ ] 1.7 GREEN: Edit `core/supervisor/supervisor.go` — delete `executeDelegation` (lines
+- [x] 1.7 GREEN: Edit `core/supervisor/supervisor.go` — delete `executeDelegation` (lines
       ~413-426 area) and `roleOf` (lines ~578-582), and delete the `PolicyEngine == nil` branch
       that dispatched to `executeDelegation`. `wire.go:351` already always sets `PolicyEngine`, so
       this removes unreachable code only; confirm no remaining caller references either deleted
       function (`go build ./...`).
-- [ ] 1.8 Run `go build ./... && go vet ./...` and the full `core/supervisor`, `core/port`,
+- [x] 1.8 Run `go build ./... && go vet ./...` and the full `core/supervisor`, `core/port`,
       `adapters/claudecode`, `adapters/opencode`, `transport/a2a` package tests. Confirm `go test
       ./... -race` stays green outside the areas intentionally changed in this phase.
 

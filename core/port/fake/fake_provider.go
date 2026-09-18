@@ -20,14 +20,6 @@ type CompletedCall struct {
 	Err error
 }
 
-// SendMessageCall records a single call to SendMessage or SendMessageStream.
-type SendMessageCall struct {
-	Target address.A2AAddress
-	Text   string
-	Wait   bool
-	Stream bool
-}
-
 // SendTaskCall records a single call to SendTask.
 type SendTaskCall struct {
 	Target     address.A2AAddress
@@ -51,9 +43,7 @@ type Provider struct {
 
 	// Configurable returns —— set before calling the fake.
 	ReturnTaskID       string
-	ReturnErr          error // returned by SendMessage, SendTask, ResolveAgent
-	ReturnAddress      address.A2AAddress
-	ReturnStream       []port.StreamEvent        // events emitted by SendMessageStream (Done appended automatically)
+	ReturnErr          error                     // returned by SendTask
 	CompleteErr        error                     // error returned by Complete (not CompleteError)
 	CompleteErrErr     error                     // error returned by CompleteError
 	ReturnRunResult    port.ProviderResult       // returned by RunTask
@@ -62,7 +52,6 @@ type Provider struct {
 
 	// Recorded calls — read after exercising the fake.
 	Calls     []CompletedCall
-	MsgCalls  []SendMessageCall
 	TaskCalls []SendTaskCall
 	RunCalls  []RunTaskCall
 }
@@ -86,49 +75,6 @@ func (f *Provider) CompleteError(taskID string, agentErr error) error {
 	return f.CompleteErrErr
 }
 
-// SendMessage records the call and returns (ReturnTaskID, ReturnErr).
-func (f *Provider) SendMessage(_ context.Context, target address.A2AAddress, text string, wait bool) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.MsgCalls = append(f.MsgCalls, SendMessageCall{Target: target, Text: text, Wait: wait})
-	return f.ReturnTaskID, f.ReturnErr
-}
-
-// SendMessageStream records the call and returns a channel populated with ReturnStream events.
-// A Done sentinel is appended if ReturnStream does not already end with one.
-func (f *Provider) SendMessageStream(_ context.Context, target address.A2AAddress, text string) (<-chan port.StreamEvent, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.ReturnErr != nil {
-		return nil, f.ReturnErr
-	}
-	f.MsgCalls = append(f.MsgCalls, SendMessageCall{Target: target, Text: text, Stream: true})
-
-	events := make([]port.StreamEvent, len(f.ReturnStream))
-	copy(events, f.ReturnStream)
-	// Ensure the stream terminates.
-	if len(events) == 0 || !events[len(events)-1].Done {
-		events = append(events, port.StreamEvent{Done: true})
-	}
-
-	ch := make(chan port.StreamEvent, len(events))
-	for _, e := range events {
-		ch <- e
-	}
-	close(ch)
-	return ch, nil
-}
-
-// ResolveAgent returns (ReturnAddress, ReturnErr).
-func (f *Provider) ResolveAgent(_ context.Context, role string) (address.A2AAddress, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.ReturnErr != nil {
-		return "", f.ReturnErr
-	}
-	return f.ReturnAddress, nil
-}
-
 // SendTask records the call and returns (ReturnTaskID, ReturnErr).
 func (f *Provider) SendTask(_ context.Context, target address.A2AAddress, capability string, input map[string]any, opts *port.TaskOptions) (string, error) {
 	f.mu.Lock()
@@ -142,13 +88,6 @@ func (f *Provider) CompleteCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.Calls)
-}
-
-// SendMessageCallCount returns the number of SendMessage/SendMessageStream calls recorded.
-func (f *Provider) SendMessageCallCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.MsgCalls)
 }
 
 // RunTask records the call and returns (ReturnRunResult, ReturnRunErr).
@@ -179,13 +118,10 @@ func (f *Provider) Reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = nil
-	f.MsgCalls = nil
 	f.TaskCalls = nil
 	f.RunCalls = nil
 	f.ReturnTaskID = ""
 	f.ReturnErr = nil
-	f.ReturnAddress = ""
-	f.ReturnStream = nil
 	f.CompleteErr = nil
 	f.CompleteErrErr = nil
 	f.ReturnRunResult = port.ProviderResult{}

@@ -233,13 +233,7 @@ func (s *Supervisor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContex
 			return
 		}
 
-		// If RunTask is available on the provider, use it for local execution.
-		// Otherwise fall back to the A2A delegation path (ResolveAgent + SendMessage).
-		if s.cfg.PolicyEngine != nil {
-			s.executeWithPolicy(ctx, execCtx, yield, rec)
-		} else {
-			s.executeDelegation(ctx, execCtx, yield, rec)
-		}
+		s.executeWithPolicy(ctx, execCtx, yield, rec)
 	}
 }
 
@@ -408,51 +402,6 @@ func (s *Supervisor) effectiveBudget() int {
 	return s.cfg.Provider.Capabilities().ContextBudget
 }
 
-// executeDelegation is the A2A peer-routing path (used when no PolicyEngine is configured).
-// The supervisor resolves a peer agent and delegates the task via SendMessage.
-func (s *Supervisor) executeDelegation(
-	ctx context.Context,
-	execCtx *a2asrv.ExecutorContext,
-	yield func(a2a.Event, error) bool,
-	rec TaskRecord,
-) {
-	log := s.log(rec.TaskID)
-
-	// Assemble bounded context from prior messages.
-	history := buildHistory(execCtx)
-	bc := assembleBoundedContext(history, s.effectiveBudget())
-
-	// Dispatch to the provider (A2A network client).
-	targetAddr, err := s.cfg.Provider.ResolveAgent(ctx, roleOf(s.cfg.Addr))
-	if err != nil {
-		log.Error("delegation.resolve_agent.failed", "error", err)
-		// Cannot resolve peer — mark task FAILED.
-		s.markFailed(rec)
-		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
-		return
-	}
-
-	log.Info("delegation.resolve_agent.done", "target", string(targetAddr))
-
-	taskText := contextText(bc) + "\n" + rec.Input
-	_, providerErr := s.cfg.Provider.SendMessage(ctx, targetAddr, taskText, true)
-	if providerErr != nil {
-		log.Error("delegation.send_message.failed", "error", providerErr)
-		// Non-zero exit or provider error → FAILED (never silently dropped).
-		s.markFailed(rec)
-		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(providerErr)), nil) //nolint
-		return
-	}
-
-	// Success — mark COMPLETED.
-	log.Info("task.completed", "state", "COMPLETED")
-	rec.State = string(a2a.TaskStateCompleted)
-	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
-	s.notify()
-
-	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil) //nolint
-}
-
 // executeAction calls the gateway with the given approval token for the action kind.
 // body is the message text from the provider's ActionIntent.Payload["body"]; it is
 // passed through to OutboundMessage.Body so the gateway delivers the intended content.
@@ -516,21 +465,6 @@ func messageText(msg *a2a.Message) string {
 	return ""
 }
 
-// buildHistory builds a ContextMessage slice from the stored task's message history.
-func buildHistory(execCtx *a2asrv.ExecutorContext) []port.ContextMessage {
-	if execCtx.StoredTask == nil {
-		return nil
-	}
-	history := make([]port.ContextMessage, 0, len(execCtx.StoredTask.History))
-	for _, m := range execCtx.StoredTask.History {
-		history = append(history, port.ContextMessage{
-			Role:    string(m.Role),
-			Content: messageText(m),
-		})
-	}
-	return history
-}
-
 // extractBody reads the "body" key from intent.Payload as a string.
 // Returns "" if the key is absent, the map is nil, or the value is not a string.
 func extractBody(intent port.ActionIntent) string {
@@ -573,12 +507,6 @@ func filterInputRequiredTasks(records []TaskRecord) []TaskRecord {
 // tenantOf extracts the tenant segment from an A2AAddress ("name/tenant").
 func tenantOf(addr address.A2AAddress) string {
 	return addr.Tenant()
-}
-
-// roleOf extracts the agent-name segment and uses it as the role for ResolveAgent.
-// In v1 the agent name is also the role identifier.
-func roleOf(addr address.A2AAddress) string {
-	return addr.Name()
 }
 
 // errorMessage wraps err into an a2a.Message for inclusion in a status event.
