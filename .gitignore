@@ -2,6 +2,9 @@
 .atl/
 .codegraph/
 
+# Local agent permission overrides — machine-specific, not a team convention
+.opencode/
+
 # Git worktrees
 .worktrees/
 

@@ -176,7 +176,7 @@ Threat-matrix coverage: Network exposure (bind failure), Unbounded sink (cap enf
 > **Size note**: Phase 2 is estimated at 520–650 authored lines. Single cohesive package; cannot
 > split further while keeping tests green. `size:exception` expected from maintainer before apply.
 
-- [ ] 2.1 Add `github.com/modelcontextprotocol/go-sdk v1.8.0` to `go.mod`
+- [x] 2.1 Add `github.com/modelcontextprotocol/go-sdk v1.8.0` to `go.mod`
 
 Modify `go.mod`:
 
@@ -187,7 +187,7 @@ Modify `go.mod`:
 Note: `go.sum` additions are automated checksums, not authored code. They are included in snapshot
 identity but excluded from the authored-lines budget calculation.
 
-- [ ] 2.2 [RED] Write failing unit tests for `Registry` in `transport/mcp/registry_test.go`
+- [x] 2.2 [RED] Write failing unit tests for `Registry` in `transport/mcp/registry_test.go`
 
 Create `transport/mcp/registry_test.go` (package `mcp` or `mcp_test`):
 
@@ -211,7 +211,7 @@ Expected failure: **compile error** — `transport/mcp` package does not exist.
 
 Command: `go test -race ./transport/mcp/...`
 
-- [ ] 2.3 [RED] Write failing unit tests for `Sink` in `transport/mcp/sink_test.go`
+- [x] 2.3 [RED] Write failing unit tests for `Sink` in `transport/mcp/sink_test.go`
 
 Create `transport/mcp/sink_test.go`:
 
@@ -227,7 +227,7 @@ Expected failure: **compile error** — `transport/mcp` package does not exist.
 
 Command: `go test ./transport/mcp/...`
 
-- [ ] 2.4 [RED] Write failing integration tests for `Server` in `transport/mcp/server_test.go`
+- [x] 2.4 [RED] Write failing integration tests for `Server` in `transport/mcp/server_test.go`
 
 Create `transport/mcp/server_test.go`. Tests use `httptest.NewServer` and the go-sdk MCP client.
 A spy `fakeGateway` struct is defined locally to assert zero gateway calls.
@@ -268,7 +268,7 @@ Expected failure: **compile error** — `transport/mcp` package does not exist.
 
 Command: `go test -race ./transport/mcp/...`
 
-- [ ] 2.5 [GREEN] Create `transport/mcp/registry.go`
+- [x] 2.5 [GREEN] Create `transport/mcp/registry.go`
 
 Create `transport/mcp/registry.go` (package `mcp`):
 
@@ -286,7 +286,7 @@ Create `transport/mcp/registry.go` (package `mcp`):
 - `func (h *Handle) Drain() []port.ActionIntent`: Lock registry, delete entry, return sink contents;
   idempotent (second Drain returns empty slice).
 
-- [ ] 2.6 [GREEN] Create `transport/mcp/sink.go`
+- [x] 2.6 [GREEN] Create `transport/mcp/sink.go`
 
 Create `transport/mcp/sink.go` (package `mcp`):
 
@@ -297,7 +297,7 @@ Create `transport/mcp/sink.go` (package `mcp`):
   `len(intents) >= cap`; otherwise appends.
 - `func (s *Sink) Read() []port.ActionIntent` — returns a defensive copy.
 
-- [ ] 2.7 [GREEN] Create `transport/mcp/tools.go`
+- [x] 2.7 [GREEN] Create `transport/mcp/tools.go`
 
 Create `transport/mcp/tools.go` (package `mcp`):
 
@@ -316,7 +316,7 @@ Create `transport/mcp/tools.go` (package `mcp`):
   `req.Extra.TokenInfo`, (2) calls `registry.Resolve(token, claimedTenant)`, (3) checks dedupe,
   (4) records intent in sink, (5) returns `buildAckResult`.
 
-- [ ] 2.8 [GREEN] Create `transport/mcp/server.go`
+- [x] 2.8 [GREEN] Create `transport/mcp/server.go`
 
 Create `transport/mcp/server.go` (package `mcp`) using `github.com/modelcontextprotocol/go-sdk`:
 
@@ -340,7 +340,7 @@ Create `transport/mcp/server.go` (package `mcp`) using `github.com/modelcontextp
   to `registry.Resolve` (design: "mirrors the tenantInterceptor pattern in
   transport/a2a/server.go:44,61").
 
-- [ ] 2.9 [REFACTOR] Verify Phase 2
+- [x] 2.9 [REFACTOR] Verify Phase 2
 
 Run:
 ```
