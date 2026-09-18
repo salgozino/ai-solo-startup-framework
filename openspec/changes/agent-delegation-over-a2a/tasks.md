@@ -95,14 +95,14 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
 
 ## Phase 3: Peer Directory (PR 3)
 
-- [ ] 3.1 RED: Create `transport/a2a/directory_test.go` with table-driven tests:
+- [x] 3.1 RED: Create `transport/a2a/directory_test.go` with table-driven tests:
       `TestPeerDirectory_UnknownRole` (query an undeclared role → `ErrUnknownRole`, error names
       the role, no panic), `TestPeerDirectory_NotYetBound` (query a declared-but-unbound role →
       `ErrPeerNotRegistered`, error names the role, no panic), `TestPeerDirectory_BoundRoleReturnsURL`,
       `TestNewPeerDirectory_DuplicateRoleFails` (constructing with a duplicate role in the input
       list returns an error). Add a concurrency case running `Bind` and `BaseURL` from parallel
       goroutines under `go test -race`. Confirm all fail (package does not exist yet).
-- [ ] 3.2 GREEN: Create `transport/a2a/directory.go` — `PeerDirectory` struct (`declared map`,
+- [x] 3.2 GREEN: Create `transport/a2a/directory.go` — `PeerDirectory` struct (`declared map`,
       `bound map`, `sync.RWMutex`), `ErrUnknownRole`, `ErrPeerNotRegistered`,
       `NewPeerDirectory(roles []string) (*PeerDirectory, error)`,
       `Bind(role, baseURL string) error`, `BaseURL(role string) (string, error)` per design D7.
