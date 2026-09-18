@@ -89,11 +89,14 @@ func TestIntegration_CEODelegatesToWorkerOverRealWire(t *testing.T) {
 	ceoProvider := &fake.Provider{ReturnTaskID: "ceo-task-1"}
 	_, ceoSrv := startSupervisor(t, "ceo", "acme", ceoProvider)
 
-	// Call the worker's handler directly rather than through a2aclient: the
-	// a2aclient does not yet attach a Bearer header to outgoing calls (see
-	// design.md "Migration / Rollout"), so a real HTTP call would be rejected
-	// by authInterceptor. The direct handler call still exercises the full
-	// interceptor chain via the nil-ServiceParams trusted-caller path.
+	// Call the worker's handler directly rather than through transport/a2a.Client:
+	// the client (added in agent-delegation-over-a2a Phase 4) DOES attach a real
+	// Bearer header via a2aclient.AuthInterceptor + AttachSessionID — proven over
+	// a real wire by transport/a2a's TestClient_BearerPresentAndAccepted. This
+	// test predates that client and is retargeted to a real end-to-end delegation
+	// assertion using it in design.md "PR Slicing" #7 (deferred here to keep this
+	// slice pure client plumbing). The direct handler call still exercises the
+	// full interceptor chain via the nil-ServiceParams trusted-caller path.
 	msg := sdka2a.NewMessage(sdka2a.MessageRoleUser, sdka2a.NewTextPart("do the work"))
 	req := &sdka2a.SendMessageRequest{
 		Tenant:  "acme",
