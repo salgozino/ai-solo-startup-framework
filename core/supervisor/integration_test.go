@@ -35,11 +35,15 @@ func startSupervisor(t *testing.T, name, tenant string, prov *fake.Provider) (*s
 		t.Fatalf("NewStore: %v", err)
 	}
 
-	sup := supervisor.New(supervisor.Config{
-		Addr:     addr,
-		Provider: prov,
-		Store:    store,
+	sup, err := supervisor.New(supervisor.Config{
+		Addr:         addr,
+		Provider:     prov,
+		Store:        store,
+		PolicyEngine: policy.NewEngine(),
 	})
+	if err != nil {
+		t.Fatalf("supervisor.New: %v", err)
+	}
 
 	srv, err := transa2a.New(sup, testToken)
 	if err != nil {
@@ -183,7 +187,7 @@ func TestIntegration_InputRequiredRecoveredAndResumed(t *testing.T) {
 
 	// Create supervisor — transa2a.New calls RecoverOpenTasks which invokes registerFn
 	// for the INPUT_REQUIRED task, seeding it into the a2asrv in-memory store.
-	sup := supervisor.New(supervisor.Config{
+	sup, err := supervisor.New(supervisor.Config{
 		Addr:         addr,
 		Provider:     prov,
 		Store:        fileStore,
@@ -192,6 +196,9 @@ func TestIntegration_InputRequiredRecoveredAndResumed(t *testing.T) {
 		Role:         role,
 		PolicyConfig: policyCfg,
 	})
+	if err != nil {
+		t.Fatalf("supervisor.New: %v", err)
+	}
 	srv, err := transa2a.New(sup, testToken)
 	if err != nil {
 		t.Fatalf("transa2a.New: %v", err)
@@ -261,10 +268,14 @@ func TestRecoverOpenTasks_DoubleRecoveryIsIdempotent(t *testing.T) {
 		t.Fatalf("store.Save (seed): %v", err)
 	}
 
-	sup := supervisor.New(supervisor.Config{
-		Addr:  addr,
-		Store: fileStore,
+	sup, err := supervisor.New(supervisor.Config{
+		Addr:         addr,
+		Store:        fileStore,
+		PolicyEngine: policy.NewEngine(),
 	})
+	if err != nil {
+		t.Fatalf("supervisor.New: %v", err)
+	}
 
 	// Build a registerFn backed by a real in-memory task store, mirroring what
 	// transport/a2a.New does: ErrTaskAlreadyExists is suppressed (idempotent).

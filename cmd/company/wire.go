@@ -344,7 +344,7 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 			}
 		}
 
-		sup := supervisor.New(supervisor.Config{
+		sup, err := supervisor.New(supervisor.Config{
 			Addr:         addr,
 			Provider:     prov,
 			Store:        store,
@@ -353,6 +353,9 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 			Role:         agCfg.Role,
 			PolicyConfig: cfg.RiskPolicy,
 		})
+		if err != nil {
+			return nil, fmt.Errorf("wire: supervisor for %q: %w", agCfg.Name, err)
+		}
 
 		srv, err := transa2a.New(sup, authToken)
 		if err != nil {
