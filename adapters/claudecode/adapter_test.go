@@ -640,12 +640,149 @@ func TestClaudeAdapter_DeadMCPServer_FailsLoudInsteadOfSilentSuccess(t *testing.
 
 // containsArg reports whether want appears as an exact element of argv.
 func containsArg(argv []string, want string) bool {
-	for _, a := range argv {
+	return indexOfArg(argv, want) >= 0
+}
+
+// indexOfArg returns the index of the first argv element equal to want, or -1.
+func indexOfArg(argv []string, want string) int {
+	for i, a := range argv {
 		if a == want {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
+}
+
+// dumpArgvForRun runs one task against the fakeclaude double with argv dumping enabled and
+// returns the exact argv the subprocess received (element 0 is the binary path). When opts
+// wires MCP, the double is told to complete the MCP handshake so the run stays focused on
+// argv content instead of tripping the never-contacted guard.
+func dumpArgvForRun(t *testing.T, opts claudecode.Options, taskID, prompt string) []string {
+	t.Helper()
+	bin := helperBinary(t)
+
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	t.Setenv("FAKECLAUDE_DUMP_ARGV", "1")
+	t.Setenv("FAKECLAUDE_ARGV_FILE", argvFile)
+	if opts.MCPRegistry != nil {
+		t.Setenv("FAKECLAUDE_CONNECT_MCP_ONLY", "1")
+	}
+
+	adapter := claudecode.New(bin, opts, "", "")
+	if _, err := adapter.RunTask(context.Background(), taskID, prompt); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	raw, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv dump: %v", err)
+	}
+	return strings.Split(string(raw), "\n")
+}
+
+// mcpWiredOptions returns Options wiring a live test MCP server with the given policy
+// action kinds.
+func mcpWiredOptions(t *testing.T, actionKinds ...string) claudecode.Options {
+	t.Helper()
+	srv, registry := startTestMCPServer(t)
+	return claudecode.Options{
+		OutputLimit:       1 << 20,
+		MCPRegistry:       &registryMinter{reg: registry},
+		MCPServerAddr:     srv.Addr(),
+		Tenant:            "acme",
+		AgentName:         "ceo",
+		PolicyActionKinds: actionKinds,
+	}
+}
+
+// TestClaudeAdapter_AllowedTools_GrantsFrameworkMCPTools is the RED test for the finding
+// that the claude CLI denies MCP tool calls CLIENT-SIDE unless they are explicitly allowed,
+// so the call never reaches the MCP server at all. Reproduced against the installed CLI
+// (2.1.268) with exactly this adapter's flag set: without an allowlist the tool call comes
+// back as "Claude requested permissions to use mcp__framework__echo, but you haven't granted
+// it yet", while the agent's own text still claims the action was performed. With
+// "--allowedTools mcp__framework__echo" the same call succeeds.
+//
+// The tool name the CLI expects is "mcp__<serverKey>__<toolName>", where serverKey is the
+// key under "mcpServers" in the ephemeral --mcp-config file. The literal "framework" is
+// asserted here on purpose: it is the wire contract with the CLI, so this test must fail if
+// the adapter's server key is renamed on only one side.
+//
+// Built-in tools (Bash and friends) are NOT affected — they already run without a grant —
+// so this allowlist stays least-privilege: exactly the framework's own action tools.
+func TestClaudeAdapter_AllowedTools_GrantsFrameworkMCPTools(t *testing.T) {
+	argv := dumpArgvForRun(t, mcpWiredOptions(t, "telegram_send"), "task-allowed-tools", "hello")
+
+	idx := indexOfArg(argv, "--allowedTools")
+	if idx < 0 {
+		t.Fatalf("expected --allowedTools in argv when MCP is wired with policy action kinds; without it the CLI denies every MCP tool call client-side; argv=%v", argv)
+	}
+	if idx+1 >= len(argv) {
+		t.Fatalf("--allowedTools is the last argv element, so it grants nothing; argv=%v", argv)
+	}
+	if got, want := argv[idx+1], "mcp__framework__telegram_send"; got != want {
+		t.Errorf("expected the element after --allowedTools to be %q, got %q; argv=%v", want, got, argv)
+	}
+}
+
+// TestClaudeAdapter_AllowedTools_GrantsEveryPolicyActionKind verifies every declared policy
+// action kind is granted, not just the first one. A partial allowlist would deny the
+// remaining tools client-side with no server-side trace.
+func TestClaudeAdapter_AllowedTools_GrantsEveryPolicyActionKind(t *testing.T) {
+	argv := dumpArgvForRun(t, mcpWiredOptions(t, "telegram_send", "github_pr_open"), "task-allowed-tools-multi", "hello")
+
+	for _, want := range []string{"mcp__framework__telegram_send", "mcp__framework__github_pr_open"} {
+		if !containsArg(argv, want) {
+			t.Errorf("expected %q in argv so the CLI grants that MCP tool; argv=%v", want, argv)
+		}
+	}
+}
+
+// TestClaudeAdapter_AllowedTools_NeverSwallowsThePrompt is the regression guard for the
+// placement hazard: --allowedTools is VARIADIC on the real CLI (verified: it accepts
+// multiple space-separated values), so if it were appended last the trailing positional
+// prompt would be parsed as one more allowed tool name and the agent would receive no task
+// at all. The guard is structural rather than index-based so it survives any future flag
+// being added before or after the allowlist: whatever follows the last allowlist entry must
+// be another flag, and the prompt must still be the final argv element.
+func TestClaudeAdapter_AllowedTools_NeverSwallowsThePrompt(t *testing.T) {
+	const prompt = "hello"
+	argv := dumpArgvForRun(t, mcpWiredOptions(t, "telegram_send", "github_pr_open"), "task-allowed-tools-placement", prompt)
+
+	idx := indexOfArg(argv, "--allowedTools")
+	if idx < 0 {
+		t.Fatalf("expected --allowedTools in argv; argv=%v", argv)
+	}
+
+	// Walk past every variadic value the CLI would absorb into the allowlist.
+	end := idx + 1
+	for end < len(argv) && !strings.HasPrefix(argv[end], "--") {
+		end++
+	}
+	if end >= len(argv) {
+		t.Fatalf("the --allowedTools variadic list runs to the end of argv, so the CLI would absorb the positional prompt as an allowed tool name; argv=%v", argv)
+	}
+	if end == idx+1 {
+		t.Errorf("--allowedTools is immediately followed by another flag (%q), so no tool is granted; argv=%v", argv[end], argv)
+	}
+	if got := argv[len(argv)-1]; got != prompt {
+		t.Errorf("expected the last argv element to still be the prompt %q, got %q; argv=%v", prompt, got, argv)
+	}
+}
+
+// TestClaudeAdapter_AllowedTools_AbsentWithoutMCP verifies the allowlist is emitted only
+// when MCP is actually wired. Without an MCP server there is no framework tool to grant,
+// and a stray --allowedTools would silently restrict the CLI's built-in tools (the CLI
+// treats the flag as the complete allow list), breaking every non-MCP invocation.
+func TestClaudeAdapter_AllowedTools_AbsentWithoutMCP(t *testing.T) {
+	argv := dumpArgvForRun(t, claudecode.Options{
+		OutputLimit:       1 << 20,
+		PolicyActionKinds: []string{"telegram_send"},
+	}, "task-no-mcp", "hello")
+
+	if containsArg(argv, "--allowedTools") {
+		t.Errorf("expected no --allowedTools in argv when MCP is not wired; argv=%v", argv)
+	}
 }
 
 // TestClaudeAdapter_MCPFlags_NeverCombinedWithDisablingFlag is the falsifiable JD-2

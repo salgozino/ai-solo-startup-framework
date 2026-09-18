@@ -64,6 +64,21 @@ type TokenMinter interface {
 	Mint(tenant, agent, taskID string, exp time.Time) (string, Drainer)
 }
 
+// mcpServerKey is the key this adapter registers its MCP server under inside the ephemeral
+// --mcp-config file. It is NOT a free-form label: the claude CLI derives each MCP tool's
+// permission name from it as "mcp__<mcpServerKey>__<toolName>", so the same constant must
+// be used both when writing the config and when building the --allowedTools list. Renaming
+// it in only one of those places would produce an allowlist that grants tools which do not
+// exist, while the tools that do exist stay denied client-side with no server-side trace —
+// exactly the failure this single constant exists to make impossible.
+const mcpServerKey = "framework"
+
+// mcpToolName renders the permission name the claude CLI uses for an MCP tool exposed by
+// this adapter's own server, i.e. "mcp__framework__telegram_send".
+func mcpToolName(kind string) string {
+	return "mcp__" + mcpServerKey + "__" + kind
+}
+
 // mcpConfigFile is the ephemeral MCP config JSON written for --mcp-config.
 type mcpConfigFile struct {
 	MCPServers map[string]mcpServerEntry `json:"mcpServers"`
@@ -231,6 +246,32 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 		defer os.Remove(mcpConfigPath) //nolint:errcheck // best-effort cleanup; temp file, no persisted state
 
 		args = append(args, "--mcp-config", mcpConfigPath, "--strict-mcp-config")
+
+		// The CLI denies MCP tool calls CLIENT-SIDE unless they are explicitly granted:
+		// the call is refused before any request leaves the process, so the MCP server
+		// observes only the handshake and tools/list and never a tools/call, while the
+		// agent's own text still reports the action as done. Verified against the
+		// installed CLI (2.1.268) with exactly this flag set: without an allowlist the
+		// tool result is "Claude requested permissions to use mcp__framework__<tool>, but
+		// you haven't granted it yet"; with --allowedTools naming that tool it succeeds.
+		//
+		// Least privilege on purpose: only this framework's own policy-declared action
+		// tools are granted. --dangerously-skip-permissions and
+		// --permission-mode bypassPermissions would also unblock the call but would grant
+		// far more than the framework needs. Built-in tools (Bash and friends) are
+		// unaffected — they already run without a grant.
+		//
+		// PLACEMENT IS LOAD-BEARING: --allowedTools is variadic, so its value list runs
+		// until the next flag. It is appended here, inside the MCP block and therefore
+		// before the unconditional --output-format append below, so a flag always follows
+		// it. Appended last it would instead absorb the trailing positional prompt as one
+		// more tool name and the agent would receive no task at all.
+		if len(a.policyActionKinds) > 0 {
+			args = append(args, "--allowedTools")
+			for _, kind := range a.policyActionKinds {
+				args = append(args, mcpToolName(kind))
+			}
+		}
 	}
 	// --output-format stream-json --verbose is always requested: claude's structured stream
 	// is parsed solely to extract text (never tool_use events — the spec forbids that; see
@@ -394,7 +435,7 @@ func parseStreamText(raw []byte) string {
 func writeEphemeralMCPConfig(addr, token string) (string, error) {
 	cfg := mcpConfigFile{
 		MCPServers: map[string]mcpServerEntry{
-			"framework": {
+			mcpServerKey: {
 				Type: "http",
 				URL:  "http://" + addr,
 				Headers: map[string]string{
