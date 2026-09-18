@@ -32,11 +32,15 @@ func TestNew_EmptyToken_ReturnsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	sup := supervisor.New(supervisor.Config{
-		Addr:     addr,
-		Provider: &fake.Provider{ReturnTaskID: "task-1"},
-		Store:    store,
+	sup, err := supervisor.New(supervisor.Config{
+		Addr:         addr,
+		Provider:     &fake.Provider{ReturnTaskID: "task-1"},
+		Store:        store,
+		PolicyEngine: policy.NewEngine(),
 	})
+	if err != nil {
+		t.Fatalf("supervisor.New: %v", err)
+	}
 	_, newErr := transa2a.New(sup, "")
 	if newErr == nil {
 		t.Fatal("expected error from New() with empty token, got nil")
@@ -58,11 +62,15 @@ func TestNew_EmptySupervisorTenant_ReturnsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	sup := supervisor.New(supervisor.Config{
-		Addr:     addr,
-		Provider: &fake.Provider{ReturnTaskID: "task-1"},
-		Store:    store,
+	sup, err := supervisor.New(supervisor.Config{
+		Addr:         addr,
+		Provider:     &fake.Provider{ReturnTaskID: "task-1"},
+		Store:        store,
+		PolicyEngine: policy.NewEngine(),
 	})
+	if err != nil {
+		t.Fatalf("supervisor.New: %v", err)
+	}
 	_, newErr := transa2a.New(sup, testToken)
 	if newErr == nil {
 		t.Fatal("expected error from New() with empty supervisor tenant, got nil")
@@ -87,11 +95,15 @@ func newTestSupervisor(t *testing.T, name, tenant string) (*supervisor.Superviso
 	}
 
 	fp := &fake.Provider{ReturnTaskID: "task-1"}
-	sup := supervisor.New(supervisor.Config{
-		Addr:     addr,
-		Provider: fp,
-		Store:    store,
+	sup, err := supervisor.New(supervisor.Config{
+		Addr:         addr,
+		Provider:     fp,
+		Store:        store,
+		PolicyEngine: policy.NewEngine(),
 	})
+	if err != nil {
+		t.Fatalf("supervisor.New: %v", err)
+	}
 
 	srv, err := transa2a.New(sup, testToken)
 	if err != nil {
@@ -523,12 +535,15 @@ func TestProviderFailureMarksFailed(t *testing.T) {
 
 	// Provider whose RunTask returns an error → supervisor marks FAILED.
 	fp := &fake.Provider{ReturnRunErr: fmt.Errorf("provider down")}
-	sup := supervisor.New(supervisor.Config{
+	sup, err := supervisor.New(supervisor.Config{
 		Addr:         addr,
 		Provider:     fp,
 		Store:        store,
 		PolicyEngine: policy.NewEngine(),
 	})
+	if err != nil {
+		t.Fatalf("supervisor.New: %v", err)
+	}
 
 	srv, err := transa2a.New(sup, testToken)
 	if err != nil {
@@ -706,11 +721,15 @@ func TestRecoveredTask_ReachableOverHTTP(t *testing.T) {
 	}
 	newServer := func() *transa2a.Server {
 		t.Helper()
-		sup := supervisor.New(supervisor.Config{
-			Addr:     addr,
-			Provider: &fake.Provider{ReturnTaskID: "task-1"},
-			Store:    store,
+		sup, supErr := supervisor.New(supervisor.Config{
+			Addr:         addr,
+			Provider:     &fake.Provider{ReturnTaskID: "task-1"},
+			Store:        store,
+			PolicyEngine: policy.NewEngine(),
 		})
+		if supErr != nil {
+			t.Fatalf("supervisor.New: %v", supErr)
+		}
 		srv, newErr := transa2a.New(sup, testToken)
 		if newErr != nil {
 			t.Fatalf("transport/a2a.New: %v", newErr)
