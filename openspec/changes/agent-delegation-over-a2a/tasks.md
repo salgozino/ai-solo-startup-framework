@@ -128,16 +128,16 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
 > re-targeting 4b onto 4a's branch per the chosen chain strategy. Do not shrink test coverage or
 > comments to stay under budget — split the work instead.
 
-- [ ] 4.1 Update `go.mod` in this same commit: add `golang.org/x/mod v0.35.0 // indirect` (already
+- [x] 4.1 Update `go.mod` in this same commit: add `golang.org/x/mod v0.35.0 // indirect` (already
       present in `go.sum`; required transitively by `a2aclient/factory.go`). Run `go build ./...`
       to confirm the missing-requirement build failure that appears the moment `a2aclient` is
       imported (see 4.3) is resolved by this line, not masked.
-- [ ] 4.2 Create `core/port/delegator.go` — `KindDelegateTask = "delegate_task"` constant,
+- [x] 4.2 Create `core/port/delegator.go` — `KindDelegateTask = "delegate_task"` constant,
       `TargetArg = "target"` constant, `DelegationResult` struct (`PeerTaskID`, `State`, `Output`),
       `Delegator` interface with `Delegate(ctx, role, body string) (DelegationResult, error)` and
       `PeerTaskState(ctx, role, peerTaskID string) (DelegationResult, error)` per design D6. No
       `TaskResumer` in this file — that type belongs to the deferred follow-up change.
-- [ ] 4.3 RED: Create `transport/a2a/client_test.go` with real-server integration tests (gated on
+- [x] 4.3 RED: Create `transport/a2a/client_test.go` with real-server integration tests (gated on
       `testing.Short()` per repo convention), against a real `transa2a.Server` + `fake.Provider`:
       `TestClient_CardResolvedBeforeSend` (request-recording `http.RoundTripper` proves the
       well-known card was fetched before `/invoke`), `TestClient_BearerPresentAndAccepted`,
@@ -146,7 +146,7 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
       `TestClient_WrongTokenIsRejectedByPeer`, `TestClient_WrongTenantIsRejectedByPeer`,
       `TestClient_BlocksUntilPeerTerminal`, `TestClient_DeadlineReturnsDistinguishableTimeout`.
       Confirm all fail (package `Client` does not exist yet).
-- [ ] 4.4 GREEN: Create `transport/a2a/client.go` — `Client` struct (`dir *PeerDirectory`,
+- [x] 4.4 GREEN: Create `transport/a2a/client.go` — `Client` struct (`dir *PeerDirectory`,
       `tenant string`, `creds *a2aclient.InMemoryCredentialsStore`, `session a2aclient.SessionID`,
       `resolver *agentcard.Resolver`) implementing `port.Delegator.Delegate`: resolve `base` via
       `dir.BaseURL(role)`, resolve the Agent Card via `resolver.Resolve(ctx, base)` BEFORE any send,
@@ -158,7 +158,7 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
       construction with `session → {a2a.SecuritySchemeName("bearer"): AuthCredential(authToken)}`
       — the literal string `"bearer"` must match `buildAgentCard`'s published scheme name
       (`transport/a2a/server.go:222-227`).
-- [ ] 4.5 Run 4.3's `Delegate`-covering tests; confirm they pass. Fix the stale comment at
+- [x] 4.5 Run 4.3's `Delegate`-covering tests; confirm they pass. Fix the stale comment at
       `core/supervisor/integration_test.go:88-92` that incorrectly claims the client cannot attach
       a Bearer header — delete or correct it in this commit, since `TestClient_BearerPresentAndAccepted`
       now proves it wrong.
