@@ -465,21 +465,6 @@ func messageText(msg *a2a.Message) string {
 	return ""
 }
 
-// buildHistory builds a ContextMessage slice from the stored task's message history.
-func buildHistory(execCtx *a2asrv.ExecutorContext) []port.ContextMessage {
-	if execCtx.StoredTask == nil {
-		return nil
-	}
-	history := make([]port.ContextMessage, 0, len(execCtx.StoredTask.History))
-	for _, m := range execCtx.StoredTask.History {
-		history = append(history, port.ContextMessage{
-			Role:    string(m.Role),
-			Content: messageText(m),
-		})
-	}
-	return history
-}
-
 // extractBody reads the "body" key from intent.Payload as a string.
 // Returns "" if the key is absent, the map is nil, or the value is not a string.
 func extractBody(intent port.ActionIntent) string {
