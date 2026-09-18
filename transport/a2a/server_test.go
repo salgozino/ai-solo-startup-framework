@@ -13,6 +13,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
 	"github.com/salgozino/ai-solo-startup-framework/core/address"
+	"github.com/salgozino/ai-solo-startup-framework/core/policy"
 	"github.com/salgozino/ai-solo-startup-framework/core/port/fake"
 	"github.com/salgozino/ai-solo-startup-framework/core/supervisor"
 	transa2a "github.com/salgozino/ai-solo-startup-framework/transport/a2a"
@@ -494,9 +495,16 @@ func TestSupervisorStatusIdle(t *testing.T) {
 	}
 }
 
-// TestProviderFailureMarksFailed sends a message to a supervisor whose provider
-// returns an error, and asserts the returned task is FAILED.
+// TestProviderFailureMarksFailed sends a message to a supervisor whose provider's RunTask
+// fails, and asserts the returned task is FAILED.
 // (satisfies "Provider failure marks task FAILED, not silently dropped")
+//
+// Retargeted (agent-delegation-over-a2a Phase 1): this test previously exercised the
+// PolicyEngine == nil / executeDelegation branch via a provider's ResolveAgent failure.
+// That branch is dead code — wire.go always sets PolicyEngine — and has been deleted along
+// with executeDelegation. The behavior this test actually needs to prove ("a provider failure
+// marks the task FAILED, not silently dropped") is exercised through RunTask instead, which is
+// the only local-execution path port.Provider now offers.
 func TestProviderFailureMarksFailed(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration: skipping in -short mode")
@@ -513,12 +521,13 @@ func TestProviderFailureMarksFailed(t *testing.T) {
 		t.Fatalf("NewStore: %v", err)
 	}
 
-	// Provider whose ResolveAgent returns an error → supervisor marks FAILED.
-	fp := &fake.Provider{ReturnErr: fmt.Errorf("provider down")}
+	// Provider whose RunTask returns an error → supervisor marks FAILED.
+	fp := &fake.Provider{ReturnRunErr: fmt.Errorf("provider down")}
 	sup := supervisor.New(supervisor.Config{
-		Addr:     addr,
-		Provider: fp,
-		Store:    store,
+		Addr:         addr,
+		Provider:     fp,
+		Store:        store,
+		PolicyEngine: policy.NewEngine(),
 	})
 
 	srv, err := transa2a.New(sup, testToken)

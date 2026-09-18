@@ -497,10 +497,11 @@ func isFormatFlagRejection(stderr string) bool {
 	return false
 }
 
-// ---- port.Provider stub methods (A2A network client side) -------------------
-// The A2A client methods are implemented by transport/a2a, not by this adapter.
-// These stubs satisfy the interface so the package compiles and contract tests
-// can exercise RunTask in isolation.
+// ---- port.Provider stub methods (task-completion reporting side) ------------
+// Complete/CompleteError are implemented by transport/a2a, not by this adapter.
+// port.Provider declares no A2A-networking method (SendMessage/SendMessageStream/
+// ResolveAgent were removed — see agent-delegation capability, core/port.Delegator,
+// and transport/a2a for outbound A2A).
 
 var errNotImplemented = fmt.Errorf("opencode: A2A client methods are provided by transport/a2a, not this adapter")
 
@@ -512,15 +513,6 @@ func (a *Adapter) Capabilities() port.ProviderCapabilities {
 
 func (a *Adapter) Complete(_ string, _ port.TaskResult) error { return errNotImplemented }
 func (a *Adapter) CompleteError(_ string, _ error) error      { return errNotImplemented }
-func (a *Adapter) SendMessage(_ context.Context, _ address.A2AAddress, _ string, _ bool) (string, error) {
-	return "", errNotImplemented
-}
-func (a *Adapter) SendMessageStream(_ context.Context, _ address.A2AAddress, _ string) (<-chan port.StreamEvent, error) {
-	return nil, errNotImplemented
-}
-func (a *Adapter) ResolveAgent(_ context.Context, _ string) (address.A2AAddress, error) {
-	return "", errNotImplemented
-}
 func (a *Adapter) SendTask(_ context.Context, _ address.A2AAddress, _ string, _ map[string]any, _ *port.TaskOptions) (string, error) {
 	return "", errNotImplemented
 }
