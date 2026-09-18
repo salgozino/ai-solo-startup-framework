@@ -31,12 +31,24 @@ type Server struct {
 
 // New creates an MCP Server configured for tenant, registering one tool per policy key.
 // The registry is used to resolve bearer tokens and store per-invocation intents.
+// Optional Options tune construction; see WithLogger.
 // Call Start to bind and begin serving.
-func New(tenant string, policies map[string]config.Policy, registry *Registry) *Server {
+func New(tenant string, policies map[string]config.Policy, registry *Registry, opts ...Option) *Server {
+	cfg := defaultOptions()
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	mcpSrv := gomcp.NewServer(
 		&gomcp.Implementation{Name: "ai-solo-startup-framework", Version: "1.0"},
 		nil,
 	)
+
+	// Log every incoming MCP method. Registered as receiving middleware so it observes
+	// tools/call results *including* go-sdk input-schema rejections, which are produced
+	// inside the method handler this wraps — the only way to tell "the model never called
+	// the tool" apart from "the model called it with the wrong arguments".
+	mcpSrv.AddReceivingMiddleware(requestLoggingMiddleware(cfg.logger, tenant))
 
 	registerTools(mcpSrv, tenant, policies, registry)
 
