@@ -2,6 +2,7 @@ package a2a
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -26,6 +27,12 @@ const bearerScheme = sdka2a.SecuritySchemeName("bearer")
 // a2aclient.AuthInterceptor can look the credential up, not to scope a
 // per-caller identity.
 const clientSessionID = a2aclient.SessionID("delegation-client")
+
+// ErrPeerNonTerminalState reports that a peer answered a Delegate call with a
+// state that is neither terminal nor INPUT_REQUIRED (e.g. SUBMITTED, WORKING)
+// — a protocol violation under port.Delegator. Wrapped with %w so callers
+// discriminate with errors.Is, never by matching message text (issue #78).
+var ErrPeerNonTerminalState = errors.New("peer returned a non-terminal task state")
 
 // Client implements port.Delegator over the real A2A wire: it resolves a
 // peer's Agent Card, authenticates with the shared bearer token, propagates
@@ -119,10 +126,24 @@ func (c *Client) Delegate(ctx context.Context, role, body string) (port.Delegati
 		return port.DelegationResult{}, fmt.Errorf("transport/a2a: client: delegate to role %q: peer returned %T, want *a2a.Task", role, res)
 	}
 
+	// port.Delegator: Delegate blocks until the peer STOPS advancing, so any
+	// state that is neither terminal nor INPUT_REQUIRED means the peer answered
+	// early — a protocol violation, never a result. TaskState.Terminal() is the
+	// SDK's own terminal set (COMPLETED, CANCELED, FAILED, REJECTED; a2a-go
+	// v2.5.0 a2a/core.go); never re-enumerate it here.
+	if state := task.Status.State; !state.Terminal() && state != sdka2a.TaskStateInputRequired {
+		return port.DelegationResult{}, fmt.Errorf("transport/a2a: client: delegate to role %q: %w: %s", role, ErrPeerNonTerminalState, state)
+	}
+
 	return resultFromTask(task), nil
 }
 
 // PeerTaskState implements port.Delegator.
+//
+// It deliberately does NOT apply Delegate's terminality check: this is a
+// polling READ of a task's current state, so SUBMITTED/WORKING is the expected
+// answer here and rejecting it would break the very wait it exists to support.
+// The asymmetry with Delegate is the contract, not an inconsistency to "fix".
 func (c *Client) PeerTaskState(ctx context.Context, role, peerTaskID string) (port.DelegationResult, error) {
 	peer, err := c.resolvePeer(ctx, role)
 	if err != nil {

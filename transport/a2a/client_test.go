@@ -2,8 +2,10 @@ package a2a
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -69,6 +71,85 @@ func newTestPeer(t *testing.T, role, tenant string, prov port.Provider, policyCf
 	}
 
 	return srv, dir
+}
+
+// stubPeerTaskID is the task ID stubPeer reports for every request.
+const stubPeerTaskID = "stub-task-1"
+
+// stubPeer starts an httptest.Server speaking the A2A JSON-RPC wire shape that
+// reports its task as parked in state, and returns a PeerDirectory bound to it.
+// newTestPeer cannot stand in: its real supervisor always drives a task to a
+// terminal or INPUT_REQUIRED state, so only a stub can emit the violation.
+func stubPeer(t *testing.T, role, tenant string, state sdka2a.TaskState) *PeerDirectory {
+	t.Helper()
+
+	addr, err := address.New(role, tenant)
+	if err != nil {
+		t.Fatalf("address.New: %v", err)
+	}
+	task := &sdka2a.Task{ID: stubPeerTaskID, Status: sdka2a.TaskStatus{State: state}}
+
+	var baseURL string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/agent-card.json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(buildAgentCard(addr, baseURL))
+	})
+	mux.HandleFunc("/invoke", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string `json:"method"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("stub peer: decode request: %v", err)
+			return
+		}
+		// SendMessage results are wrapped in the a2a.StreamResponse event
+		// envelope; GetTask results are a bare task.
+		var result any = task
+		if req.Method == "SendMessage" {
+			result = sdka2a.StreamResponse{Event: task}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": "1", "result": result})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	baseURL = srv.URL
+
+	dir, err := NewPeerDirectory([]string{role})
+	if err != nil {
+		t.Fatalf("NewPeerDirectory: %v", err)
+	}
+	if err := dir.Bind(role, srv.URL); err != nil {
+		t.Fatalf("dir.Bind: %v", err)
+	}
+	return dir
+}
+
+// TestClient_NonTerminalPeerStateIsRejected proves Delegate enforces the
+// port.Delegator contract: a peer answering with a state that is neither
+// terminal nor INPUT_REQUIRED is a protocol violation and must surface as an
+// error discriminable with errors.Is, never as a nil-error DelegationResult.
+//
+// The same stub also pins the deliberate asymmetry: PeerTaskState is a polling
+// READ, so that identical non-terminal task is a legitimate answer there.
+func TestClient_NonTerminalPeerStateIsRejected(t *testing.T) {
+	for _, state := range []sdka2a.TaskState{sdka2a.TaskStateSubmitted, sdka2a.TaskStateWorking} {
+		t.Run(string(state), func(t *testing.T) {
+			dir := stubPeer(t, "engineer", "acme", state)
+			c := NewClient(dir, "acme", clientTestToken, nil)
+
+			if _, err := c.Delegate(context.Background(), "engineer", "do the work"); !errors.Is(err, ErrPeerNonTerminalState) {
+				t.Errorf("Delegate error = %v, want errors.Is(err, ErrPeerNonTerminalState)", err)
+			}
+
+			got, err := c.PeerTaskState(context.Background(), "engineer", stubPeerTaskID)
+			if err != nil {
+				t.Fatalf("PeerTaskState must accept a non-terminal state, got error: %v", err)
+			}
+			if got.State != string(state) {
+				t.Errorf("PeerTaskState State = %q, want %q", got.State, state)
+			}
+		})
+	}
 }
 
 // recordingTransport wraps an http.RoundTripper and records every request's
