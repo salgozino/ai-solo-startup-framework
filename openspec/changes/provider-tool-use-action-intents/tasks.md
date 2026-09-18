@@ -51,7 +51,7 @@ three implementers simultaneously; all four Go source files **must land in the s
 Spec coverage: `provider-adapter` delta spec — all four scenarios (supervisor reads capabilities,
 operator override, provider default, fake.Provider conforms).
 
-### 1.1 [RED] Write failing capability contract tests in `core/port/contract_test.go`
+- [x] 1.1 [RED] Write failing capability contract tests in `core/port/contract_test.go`
 
 Add to `core/port/contract_test.go` (package `port_test`):
 
@@ -67,7 +67,7 @@ Expected failure: **compile error** — `port.ProviderCapabilities` undefined;
 
 Command: `go test ./core/port/...`
 
-### 1.2 [RED] Write failing supervisor budget-override tests in `core/supervisor/supervisor_test.go`
+- [x] 1.2 [RED] Write failing supervisor budget-override tests in `core/supervisor/supervisor_test.go`
 
 Add to `core/supervisor/supervisor_test.go` (package `supervisor` — internal, can call unexported helpers):
 
@@ -84,7 +84,7 @@ Expected failure: **compile error** — `port.ProviderCapabilities` undefined; `
 
 Command: `go test ./core/supervisor/...`
 
-### 1.3 [GREEN] Add `ProviderCapabilities` and `Capabilities()` to `core/port/provider.go`
+- [x] 1.3 [GREEN] Add `ProviderCapabilities` and `Capabilities()` to `core/port/provider.go`
 
 Modify `core/port/provider.go`:
 
@@ -103,7 +103,7 @@ Modify `core/port/provider.go`:
 After this change `go test ./core/port/...` fails: `fake.Provider` is missing `Capabilities()`
 (caught by `var _ port.Provider = (*Provider)(nil)` at line 69 of `fake_provider.go`).
 
-### 1.4 [GREEN] Implement `Capabilities()` on `fake.Provider` in `core/port/fake/fake_provider.go`
+- [x] 1.4 [GREEN] Implement `Capabilities()` on `fake.Provider` in `core/port/fake/fake_provider.go`
 
 Modify `core/port/fake/fake_provider.go`:
 
@@ -116,7 +116,7 @@ The `var _ port.Provider = (*Provider)(nil)` check at line 69 must remain unchan
 
 Command: `go test ./core/port/...` — capability tests now green.
 
-### 1.5 [GREEN] Add `Capabilities()` stub to `adapters/claudecode/adapter.go`
+- [x] 1.5 [GREEN] Add `Capabilities()` stub to `adapters/claudecode/adapter.go`
 
 Modify `adapters/claudecode/adapter.go`:
 
@@ -126,7 +126,7 @@ Modify `adapters/claudecode/adapter.go`:
 
 Command: `go test ./adapters/claudecode/...`
 
-### 1.6 [GREEN] Add `Capabilities()` stub to `adapters/opencode/adapter.go`
+- [x] 1.6 [GREEN] Add `Capabilities()` stub to `adapters/opencode/adapter.go`
 
 Modify `adapters/opencode/adapter.go`:
 
@@ -136,7 +136,7 @@ Modify `adapters/opencode/adapter.go`:
 
 Command: `go test ./adapters/opencode/...`
 
-### 1.7 [GREEN] Add `effectiveBudget()` to `core/supervisor/supervisor.go` and wire into context assembly
+- [x] 1.7 [GREEN] Add `effectiveBudget()` to `core/supervisor/supervisor.go` and wire into context assembly
 
 Modify `core/supervisor/supervisor.go`:
 
@@ -150,7 +150,7 @@ After this change, `TestEffectiveBudget_*` tests must be green.
 
 Command: `go test ./core/supervisor/...`
 
-### 1.8 [VERIFY] Full Slice 1 green check
+- [x] 1.8 [VERIFY] Full Slice 1 green check
 
 Run:
 ```
@@ -176,7 +176,7 @@ Threat-matrix coverage: Network exposure (bind failure), Unbounded sink (cap enf
 > **Size note**: Phase 2 is estimated at 520–650 authored lines. Single cohesive package; cannot
 > split further while keeping tests green. `size:exception` expected from maintainer before apply.
 
-### 2.1 Add `github.com/modelcontextprotocol/go-sdk v1.8.0` to `go.mod`
+- [ ] 2.1 Add `github.com/modelcontextprotocol/go-sdk v1.8.0` to `go.mod`
 
 Modify `go.mod`:
 
@@ -187,7 +187,7 @@ Modify `go.mod`:
 Note: `go.sum` additions are automated checksums, not authored code. They are included in snapshot
 identity but excluded from the authored-lines budget calculation.
 
-### 2.2 [RED] Write failing unit tests for `Registry` in `transport/mcp/registry_test.go`
+- [ ] 2.2 [RED] Write failing unit tests for `Registry` in `transport/mcp/registry_test.go`
 
 Create `transport/mcp/registry_test.go` (package `mcp` or `mcp_test`):
 
@@ -211,7 +211,7 @@ Expected failure: **compile error** — `transport/mcp` package does not exist.
 
 Command: `go test -race ./transport/mcp/...`
 
-### 2.3 [RED] Write failing unit tests for `Sink` in `transport/mcp/sink_test.go`
+- [ ] 2.3 [RED] Write failing unit tests for `Sink` in `transport/mcp/sink_test.go`
 
 Create `transport/mcp/sink_test.go`:
 
@@ -227,7 +227,7 @@ Expected failure: **compile error** — `transport/mcp` package does not exist.
 
 Command: `go test ./transport/mcp/...`
 
-### 2.4 [RED] Write failing integration tests for `Server` in `transport/mcp/server_test.go`
+- [ ] 2.4 [RED] Write failing integration tests for `Server` in `transport/mcp/server_test.go`
 
 Create `transport/mcp/server_test.go`. Tests use `httptest.NewServer` and the go-sdk MCP client.
 A spy `fakeGateway` struct is defined locally to assert zero gateway calls.
@@ -268,7 +268,7 @@ Expected failure: **compile error** — `transport/mcp` package does not exist.
 
 Command: `go test -race ./transport/mcp/...`
 
-### 2.5 [GREEN] Create `transport/mcp/registry.go`
+- [ ] 2.5 [GREEN] Create `transport/mcp/registry.go`
 
 Create `transport/mcp/registry.go` (package `mcp`):
 
@@ -286,7 +286,7 @@ Create `transport/mcp/registry.go` (package `mcp`):
 - `func (h *Handle) Drain() []port.ActionIntent`: Lock registry, delete entry, return sink contents;
   idempotent (second Drain returns empty slice).
 
-### 2.6 [GREEN] Create `transport/mcp/sink.go`
+- [ ] 2.6 [GREEN] Create `transport/mcp/sink.go`
 
 Create `transport/mcp/sink.go` (package `mcp`):
 
@@ -297,7 +297,7 @@ Create `transport/mcp/sink.go` (package `mcp`):
   `len(intents) >= cap`; otherwise appends.
 - `func (s *Sink) Read() []port.ActionIntent` — returns a defensive copy.
 
-### 2.7 [GREEN] Create `transport/mcp/tools.go`
+- [ ] 2.7 [GREEN] Create `transport/mcp/tools.go`
 
 Create `transport/mcp/tools.go` (package `mcp`):
 
@@ -316,7 +316,7 @@ Create `transport/mcp/tools.go` (package `mcp`):
   `req.Extra.TokenInfo`, (2) calls `registry.Resolve(token, claimedTenant)`, (3) checks dedupe,
   (4) records intent in sink, (5) returns `buildAckResult`.
 
-### 2.8 [GREEN] Create `transport/mcp/server.go`
+- [ ] 2.8 [GREEN] Create `transport/mcp/server.go`
 
 Create `transport/mcp/server.go` (package `mcp`) using `github.com/modelcontextprotocol/go-sdk`:
 
@@ -340,7 +340,7 @@ Create `transport/mcp/server.go` (package `mcp`) using `github.com/modelcontextp
   to `registry.Resolve` (design: "mirrors the tenantInterceptor pattern in
   transport/a2a/server.go:44,61").
 
-### 2.9 [REFACTOR] Verify Phase 2
+- [ ] 2.9 [REFACTOR] Verify Phase 2
 
 Run:
 ```
@@ -366,7 +366,7 @@ Threat-matrix coverage: Subprocess argv (token absent), Ephemeral config (mtime 
 > **Size note**: Phase 3 is estimated at 560–720 authored lines. `size:exception` expected from
 > maintainer before apply.
 
-### 3.1 [RED] Write failing MCP-aware tests for claudecode adapter in `adapters/claudecode/adapter_test.go`
+- [ ] 3.1 [RED] Write failing MCP-aware tests for claudecode adapter in `adapters/claudecode/adapter_test.go`
 
 Add to `adapters/claudecode/adapter_test.go` (package `claudecode_test`):
 
@@ -386,7 +386,7 @@ registry or server URL.
 
 Command: `go test ./adapters/claudecode/...`
 
-### 3.2 [RED] Write failing threat-matrix tests for claudecode adapter in `adapters/claudecode/adapter_test.go`
+- [ ] 3.2 [RED] Write failing threat-matrix tests for claudecode adapter in `adapters/claudecode/adapter_test.go`
 
 Add:
 
@@ -408,7 +408,7 @@ Expected failure: compile error.
 
 Command: `go test ./adapters/claudecode/...`
 
-### 3.3 [RED] Write failing MCP-aware tests for opencode adapter in `adapters/opencode/adapter_test.go`
+- [ ] 3.3 [RED] Write failing MCP-aware tests for opencode adapter in `adapters/opencode/adapter_test.go`
 
 Add to `adapters/opencode/adapter_test.go` (package `opencode_test`):
 
@@ -431,7 +431,7 @@ Expected failure: compile error.
 
 Command: `go test ./adapters/opencode/...`
 
-### 3.4 [GREEN] Extend `adapters/claudecode/testdata/fakeclaude/main.go` to call MCP when instructed
+- [ ] 3.4 [GREEN] Extend `adapters/claudecode/testdata/fakeclaude/main.go` to call MCP when instructed
 
 Modify `adapters/claudecode/testdata/fakeclaude/main.go`:
 
@@ -446,7 +446,7 @@ Modify `adapters/claudecode/testdata/fakeclaude/main.go`:
 - When env var `FAKECLAUDE_DUMP_ARGV=1` is set: write `os.Args` as newline-separated strings
   to the path given in `FAKECLAUDE_ARGV_FILE` before producing normal output (for token-absent-from-argv test).
 
-### 3.5 [GREEN] Extend `adapters/opencode/testdata/fakeopencode/main.go` to call MCP when instructed
+- [ ] 3.5 [GREEN] Extend `adapters/opencode/testdata/fakeopencode/main.go` to call MCP when instructed
 
 Modify `adapters/opencode/testdata/fakeopencode/main.go`:
 
@@ -459,7 +459,7 @@ Modify `adapters/opencode/testdata/fakeopencode/main.go`:
      text-only extraction by the adapter).
 - When `FAKEOPENCODE_DUMP_ARGV=1`: write argv to `FAKEOPENCODE_ARGV_FILE`.
 
-### 3.6 [GREEN] Modify `adapters/claudecode/adapter.go` — add MCP mint/drain and ephemeral config
+- [ ] 3.6 [GREEN] Modify `adapters/claudecode/adapter.go` — add MCP mint/drain and ephemeral config
 
 Modify `adapters/claudecode/adapter.go`:
 
@@ -501,7 +501,7 @@ Modify `adapters/claudecode/adapter.go`:
 - Replace zero-stub `Capabilities()` with real implementation: return
   `port.ProviderCapabilities{ContextBudget: a.contextBudget, ActionKinds: a.policyActionKinds}`.
 
-### 3.7 [GREEN] Modify `adapters/opencode/adapter.go` — add MCP mint/drain and ephemeral config
+- [ ] 3.7 [GREEN] Modify `adapters/opencode/adapter.go` — add MCP mint/drain and ephemeral config
 
 Modify `adapters/opencode/adapter.go`:
 
@@ -520,7 +520,7 @@ Modify `adapters/opencode/adapter.go`:
   5. After `cmd.Wait()`: if `handle != nil`, call `handle.Drain()` → `result.ActionIntents`.
 - Replace zero-stub `Capabilities()` with real implementation.
 
-### 3.8 [GREEN] Modify `cmd/company/wire.go` — start MCP server before agents
+- [ ] 3.8 [GREEN] Modify `cmd/company/wire.go` — start MCP server before agents
 
 Modify `cmd/company/wire.go`:
 
@@ -539,7 +539,7 @@ Modify `cmd/company/wire.go`:
 - The returned `[]*agentRuntime` should include the server reference or the caller receives it
   via a new return value / via `opts.mcpServer` for shutdown.
 
-### 3.9 [GREEN] Update `cmd/company/main.go` — add MCP server shutdown to lifecycle
+- [ ] 3.9 [GREEN] Update `cmd/company/main.go` — add MCP server shutdown to lifecycle
 
 Modify `cmd/company/main.go` in `runMaterialize`:
 
@@ -548,7 +548,7 @@ Modify `cmd/company/main.go` in `runMaterialize`:
 - Add `defer mcpSrv.Shutdown(ctx)` to the shutdown sequence alongside `uiSrv.Shutdown`.
 - The MCP server startup log line: `fmt.Fprintf(opts.stderr, "mcp: server listening on %s\n", srv.Addr())`.
 
-### 3.10 [VERIFY] Full Slice 3 verification
+- [ ] 3.10 [VERIFY] Full Slice 3 verification
 
 Run:
 ```
@@ -565,7 +565,7 @@ build without errors.
 
 ## Phase 4: Cleanup and Documentation
 
-### 4.1 Document opencode `--format json` version floor
+- [ ] 4.1 Document opencode `--format json` version floor
 
 Modify `AGENTS.md` (or a new `docs/adapter-compatibility.md` if preferred) to add:
 
@@ -575,7 +575,7 @@ Modify `AGENTS.md` (or a new `docs/adapter-compatibility.md` if preferred) to ad
 This closes design Open Questions item: "opencode --format json version floor unverified upstream —
 document '1.18.31 verified'".
 
-### 4.2 Final full regression check
+- [ ] 4.2 Final full regression check
 
 Run:
 ```

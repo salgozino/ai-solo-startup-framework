@@ -332,6 +332,41 @@ func TestGateway_Send_DeliveryFailure(t *testing.T) {
 	}
 }
 
+// ---- Provider.Capabilities contract tests ----------------------------------
+
+// TestProvider_Capabilities_ReturnsConfigured verifies that a fake configured with
+// ReturnCapabilities returns the exact value from Capabilities().
+// Spec: provider-adapter – "fake.Provider conforms to the capability contract".
+func TestProvider_Capabilities_ReturnsConfigured(t *testing.T) {
+	p := &fake.Provider{
+		ReturnCapabilities: port.ProviderCapabilities{
+			ContextBudget: 8000,
+			ActionKinds:   []string{"telegram_send"},
+		},
+	}
+	got := p.Capabilities()
+	if got.ContextBudget != 8000 {
+		t.Fatalf("expected ContextBudget=8000, got %d", got.ContextBudget)
+	}
+	if len(got.ActionKinds) != 1 || got.ActionKinds[0] != "telegram_send" {
+		t.Fatalf("expected ActionKinds=[telegram_send], got %v", got.ActionKinds)
+	}
+}
+
+// TestProvider_Capabilities_ZeroByDefault verifies that a fresh fake.Provider returns
+// the zero ProviderCapabilities (zero ContextBudget means no cap, nil ActionKinds).
+// Spec: provider-adapter – "fake.Provider conforms to the capability contract".
+func TestProvider_Capabilities_ZeroByDefault(t *testing.T) {
+	p := &fake.Provider{}
+	got := p.Capabilities()
+	if got.ContextBudget != 0 {
+		t.Fatalf("expected ContextBudget=0, got %d", got.ContextBudget)
+	}
+	if len(got.ActionKinds) != 0 {
+		t.Fatalf("expected empty ActionKinds, got %v", got.ActionKinds)
+	}
+}
+
 // ---- ValidateChannel unit tests -------------------------------------------
 
 func TestValidateChannel(t *testing.T) {

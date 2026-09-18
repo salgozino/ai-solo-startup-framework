@@ -50,14 +50,15 @@ type Provider struct {
 	mu sync.Mutex
 
 	// Configurable returns —— set before calling the fake.
-	ReturnTaskID    string
-	ReturnErr       error // returned by SendMessage, SendTask, ResolveAgent
-	ReturnAddress   address.A2AAddress
-	ReturnStream    []port.StreamEvent  // events emitted by SendMessageStream (Done appended automatically)
-	CompleteErr     error               // error returned by Complete (not CompleteError)
-	CompleteErrErr  error               // error returned by CompleteError
-	ReturnRunResult port.ProviderResult // returned by RunTask
-	ReturnRunErr    error               // error returned by RunTask
+	ReturnTaskID       string
+	ReturnErr          error // returned by SendMessage, SendTask, ResolveAgent
+	ReturnAddress      address.A2AAddress
+	ReturnStream       []port.StreamEvent        // events emitted by SendMessageStream (Done appended automatically)
+	CompleteErr        error                     // error returned by Complete (not CompleteError)
+	CompleteErrErr     error                     // error returned by CompleteError
+	ReturnRunResult    port.ProviderResult       // returned by RunTask
+	ReturnRunErr       error                     // error returned by RunTask
+	ReturnCapabilities port.ProviderCapabilities // returned by Capabilities
 
 	// Recorded calls — read after exercising the fake.
 	Calls     []CompletedCall
@@ -158,6 +159,14 @@ func (f *Provider) RunTask(_ context.Context, taskID string, input string) (port
 	return f.ReturnRunResult, f.ReturnRunErr
 }
 
+// Capabilities returns ReturnCapabilities (thread-safe).
+// Zero value is valid: zero ContextBudget means no cap.
+func (f *Provider) Capabilities() port.ProviderCapabilities {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ReturnCapabilities
+}
+
 // RunTaskCallCount returns the number of RunTask calls recorded.
 func (f *Provider) RunTaskCallCount() int {
 	f.mu.Lock()
@@ -181,4 +190,5 @@ func (f *Provider) Reset() {
 	f.CompleteErrErr = nil
 	f.ReturnRunResult = port.ProviderResult{}
 	f.ReturnRunErr = nil
+	f.ReturnCapabilities = port.ProviderCapabilities{}
 }

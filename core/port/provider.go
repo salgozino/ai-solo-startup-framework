@@ -18,6 +18,17 @@ type ActionIntent struct {
 	Payload map[string]any
 }
 
+// ProviderCapabilities is the set of capabilities a provider declares.
+// The supervisor queries this before or independently of any specific invocation.
+// Zero value is valid: zero ContextBudget means no cap; nil ActionKinds means no tool kinds declared.
+type ProviderCapabilities struct {
+	// ContextBudget is the maximum number of characters for assembled BoundedContext.
+	// Zero means no cap.
+	ContextBudget int
+	// ActionKinds lists the action kinds this provider can emit as MCP tool calls.
+	ActionKinds []string
+}
+
 // ProviderResult is the outcome of a RunTask call.
 // It carries the task output and any action intents the provider wants to perform.
 type ProviderResult struct {
@@ -95,6 +106,11 @@ type Provider interface {
 	// Returns a ProviderResult that may include action intents for policy classification.
 	// The supervisor calls this when it is acting as the executing agent, not as a router.
 	RunTask(ctx context.Context, taskID string, input string) (ProviderResult, error)
+
+	// Capabilities returns the provider's declared capability set.
+	// The supervisor queries this before context assembly to apply the declared ContextBudget
+	// when no operator override is configured. Safe to call from any goroutine.
+	Capabilities() ProviderCapabilities
 }
 
 // BoundedContext carries the assembled context passed into a task invocation.

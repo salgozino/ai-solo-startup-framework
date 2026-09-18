@@ -190,6 +190,11 @@ func (a *Adapter) ProbeModel(ctx context.Context) error {
 
 var errNotImplemented = fmt.Errorf("claudecode: A2A client methods are provided by transport/a2a, not this adapter")
 
+// Capabilities returns a zero ProviderCapabilities for Phase 1.
+// A real implementation that derives ActionKinds from the risk policy and
+// returns the configured ContextBudget is deferred to Phase 3.
+func (a *Adapter) Capabilities() port.ProviderCapabilities { return port.ProviderCapabilities{} }
+
 func (a *Adapter) Complete(_ string, _ port.TaskResult) error { return errNotImplemented }
 func (a *Adapter) CompleteError(_ string, _ error) error      { return errNotImplemented }
 func (a *Adapter) SendMessage(_ context.Context, _ address.A2AAddress, _ string, _ bool) (string, error) {
