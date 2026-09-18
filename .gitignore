@@ -5,6 +5,10 @@
 # Local agent permission overrides — machine-specific, not a team convention
 .opencode/
 
+# Pi agent workspace (gentle-shell migration) — local extension config, stays
+# on the machine and never reaches the remote
+.pi/
+
 # Git worktrees
 .worktrees/
 
