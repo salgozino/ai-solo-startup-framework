@@ -280,6 +280,27 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
       > Follow-up found (pre-existing, out of scope): `Execute`'s panic recovery yields a FAILED
       > event on the wire but does not persist FAILED to the store (the record stays WORKING).
 
+## Phase 6b: Reliability Fixes From Review (PR 6b)
+
+> Review-driven: added after the Phase 6 reliability review returned four non-blocking
+> WARNING findings. Not part of the original plan; no task above is renumbered or altered.
+
+- [x] 6b.1 An unrecognized or empty peer state was reported with the escalation wording
+      (`peer escalated (peer task "" is )`). `executeDelegation` now gives INPUT_REQUIRED its
+      own arm and reports any other non-terminal state as a `port.Delegator` protocol violation.
+- [x] 6b.2 A COMPLETED peer with empty output left the delegating agent's own text standing in
+      as the result. `actionOutcome.Delegated` now gates both copies instead of a non-empty check.
+- [x] 6b.3 `assertFailedNaming` matched needles against the whole log buffer (and one needle
+      hardcoded slog quote escaping). Error text is now asserted on `executeDelegation`'s
+      returned error directly; the helper keeps only the end-to-end guarantees it can observe.
+- [x] 6b.4 The `defaultDelegateTimeout` fallback and the parent-cancellation guard were
+      unproved. `fake.Delegator` now records the ctx deadline it observes, and tests assert both.
+- [x] 6b.5 Swapped an unsynchronized `del.Calls[0]` read for the existing `LastCall()` accessor.
+
+> Still open follow-ups (unchanged by this slice): `Execute`'s panic recovery yields a FAILED
+> event but leaves the persisted record WORKING; the `strings.Contains`-on-`rec.Output`
+> replace-vs-append semantics; the 5-second wall-clock threshold in the non-terminal immediacy test.
+
 ## Phase 7: Turn It On (PR 7)
 
 - [ ] 7.1 Edit `company.yaml` — add `risk_policy.delegate_task: {risk: safe, allowed_roles:
