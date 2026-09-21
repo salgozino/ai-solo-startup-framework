@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -279,6 +280,56 @@ func TestExecuteAction_DelegationNonTerminalPeerFailsWithNotYetWiredError(t *tes
 	}
 	if del.StateCallCount() != 0 {
 		t.Errorf("no PeerTaskState polling in this change; got %d calls", del.StateCallCount())
+	}
+}
+
+// TestExecuteDelegation_UnrecognizedPeerStateIsProtocolViolation — reliability fix.
+// port.Delegator documents that INPUT_REQUIRED is the ONLY legal non-terminal state
+// on a nil-error return: "Any other non-terminal state is a protocol violation and
+// MUST be returned as an error, never as a result". An unrecognized or empty state
+// is therefore a defect in the Delegator implementation, not a peer escalation, and
+// must never be reported with the escalation wording.
+func TestExecuteDelegation_UnrecognizedPeerStateIsProtocolViolation(t *testing.T) {
+	cases := []struct {
+		name  string
+		state string
+	}{
+		{name: "empty state", state: ""},
+		{name: "unrecognized state", state: "TASK_STATE_BOGUS"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			del := &fake.Delegator{Results: map[string]port.DelegationResult{
+				"engineer": {PeerTaskID: "P1", State: tc.state},
+			}}
+			h := newDelegatingSupervisor(t, "ceo", []port.ActionIntent{delegateIntent("engineer", "build X")}, del, 0)
+
+			_, err := h.sup.executeDelegation(context.Background(), "engineer", "build X")
+			if err == nil {
+				t.Fatal("an unrecognized peer state must be an error, not a silent success")
+			}
+			msg := err.Error()
+
+			// The point of this fix: a protocol violation is not an escalation.
+			for _, forbidden := range []string{"escalated", "chained approval"} {
+				if strings.Contains(msg, forbidden) {
+					t.Errorf("protocol violation must not be reported as an escalation; error contains %q: %s", forbidden, msg)
+				}
+			}
+			for _, needle := range []string{"engineer", strconv.Quote(tc.state), "port.Delegator"} {
+				if !strings.Contains(msg, needle) {
+					t.Errorf("protocol-violation error must name %q; got: %s", needle, msg)
+				}
+			}
+
+			last, rec := h.run(t, "task-violation-1")
+			if last.Status.State != sdka2a.TaskStateFailed {
+				t.Fatalf("expected FAILED, got %v", last.Status.State)
+			}
+			if rec.State != string(sdka2a.TaskStateFailed) {
+				t.Errorf("persisted state = %q, want FAILED", rec.State)
+			}
+		})
 	}
 }
 
