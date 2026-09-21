@@ -3,6 +3,7 @@ package fake
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/salgozino/ai-solo-startup-framework/core/port"
 )
@@ -43,6 +44,12 @@ type Delegator struct {
 	Calls []DelegateCall
 	// StateCalls records every PeerTaskState invocation in order.
 	StateCalls []PeerTaskStateCall
+
+	// observedDeadline is the ctx deadline seen by the most recent Delegate call.
+	// Unexported and read through ObservedDeadline so mu guards it like the rest.
+	observedDeadline time.Time
+	// observedHasDeadline reports whether that ctx carried a deadline at all.
+	observedHasDeadline bool
 }
 
 var _ port.Delegator = (*Delegator)(nil)
@@ -51,8 +58,11 @@ var _ port.Delegator = (*Delegator)(nil)
 // BlockUntilCtxDone is set it blocks until ctx is done instead, simulating a
 // hung peer so tests can drive the timeout path.
 func (d *Delegator) Delegate(ctx context.Context, role, body string) (port.DelegationResult, error) {
+	deadline, hasDeadline := ctx.Deadline()
+
 	d.mu.Lock()
 	d.Calls = append(d.Calls, DelegateCall{Role: role, Body: body})
+	d.observedDeadline, d.observedHasDeadline = deadline, hasDeadline
 	block := d.BlockUntilCtxDone
 	d.mu.Unlock()
 
@@ -101,6 +111,15 @@ func (d *Delegator) StateCallCount() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return len(d.StateCalls)
+}
+
+// ObservedDeadline returns the context deadline seen inside the most recent
+// Delegate call and whether that context carried one. It lets a test observe the
+// timeout the caller actually applied, rather than only whether the call returned.
+func (d *Delegator) ObservedDeadline() (time.Time, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.observedDeadline, d.observedHasDeadline
 }
 
 // LastCall returns the most recent Delegate call, or false if Delegate was never called.

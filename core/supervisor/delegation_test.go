@@ -478,6 +478,87 @@ func TestExecuteDelegation_ErrorTextNamesTheFailure(t *testing.T) {
 	}
 }
 
+// TestExecuteDelegation_DefaultTimeoutAppliesWhenUnset — reliability fix.
+// A non-positive Config.DelegateTimeout maps to defaultDelegateTimeout before
+// context.WithTimeout. Nothing observed that: every test passing timeout 0 used a
+// fake that ignores the context on its non-blocking path, so deleting the fallback
+// — leaving context.WithTimeout(ctx, 0), an already-expired deadline — kept them
+// all green. The fallback becomes load-bearing once the real client is wired, so
+// assert the deadline the Delegate call actually receives.
+func TestExecuteDelegation_DefaultTimeoutAppliesWhenUnset(t *testing.T) {
+	del := &fake.Delegator{Results: map[string]port.DelegationResult{
+		"engineer": {PeerTaskID: "P1", State: string(sdka2a.TaskStateCompleted), Output: "ok"},
+	}}
+	h := newDelegatingSupervisor(t, "ceo", nil, del, 0)
+
+	if _, err := h.sup.executeDelegation(context.Background(), "engineer", "build X"); err != nil {
+		t.Fatalf("executeDelegation: unexpected error: %v", err)
+	}
+
+	deadline, ok := del.ObservedDeadline()
+	if !ok {
+		t.Fatal("Delegate must receive a context carrying the delegation deadline")
+	}
+	// A generous window: wide enough not to flake on a slow runner, tight enough
+	// that an already-expired or wildly different deadline fails.
+	if remaining := time.Until(deadline); remaining <= 9*time.Minute || remaining > defaultDelegateTimeout {
+		t.Errorf("remaining time on the default deadline = %s, want (9m, %s]", remaining, defaultDelegateTimeout)
+	}
+}
+
+// TestExecuteDelegation_ConfiguredTimeoutBoundsTheCall — reliability fix.
+// The counterpart to the default: an explicit DelegateTimeout must be the deadline
+// handed to Delegate, not silently replaced by the fallback.
+func TestExecuteDelegation_ConfiguredTimeoutBoundsTheCall(t *testing.T) {
+	const timeout = 2 * time.Second
+	del := &fake.Delegator{Results: map[string]port.DelegationResult{
+		"engineer": {PeerTaskID: "P1", State: string(sdka2a.TaskStateCompleted), Output: "ok"},
+	}}
+	h := newDelegatingSupervisor(t, "ceo", nil, del, timeout)
+
+	if _, err := h.sup.executeDelegation(context.Background(), "engineer", "build X"); err != nil {
+		t.Fatalf("executeDelegation: unexpected error: %v", err)
+	}
+
+	deadline, ok := del.ObservedDeadline()
+	if !ok {
+		t.Fatal("Delegate must receive a context carrying the delegation deadline")
+	}
+	if remaining := time.Until(deadline); remaining <= timeout/2 || remaining > timeout {
+		t.Errorf("remaining time on the configured deadline = %s, want (%s, %s]", remaining, timeout/2, timeout)
+	}
+}
+
+// TestExecuteDelegation_ParentCancellationIsNotReportedAsTimeout — reliability fix.
+// executeDelegation only blames the delegation timeout when the PARENT context is
+// still live (errors.Is(err, DeadlineExceeded) && ctx.Err() == nil). That guard was
+// unexercised. A parent deadline far shorter than DelegateTimeout must not produce
+// "timed out after 1h0m0s", because the delegation timeout was never the cause.
+func TestExecuteDelegation_ParentCancellationIsNotReportedAsTimeout(t *testing.T) {
+	const delegateTimeout = time.Hour
+	del := &fake.Delegator{BlockUntilCtxDone: true}
+	h := newDelegatingSupervisor(t, "ceo", nil, del, delegateTimeout)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	_, err := h.sup.executeDelegation(ctx, "engineer", "build X")
+	if err == nil {
+		t.Fatal("a canceled parent context must fail the delegation")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, delegateTimeout.String()) || strings.Contains(msg, "timed out") {
+		t.Errorf("parent cancellation must not be blamed on the delegation timeout; got: %s", msg)
+	}
+	// The generic failure form instead: role named, underlying cause wrapped.
+	if !strings.Contains(msg, "engineer") || !strings.Contains(msg, "failed") {
+		t.Errorf("error must name the role and report a failure; got: %s", msg)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("the parent's cause must stay wrapped; got: %s", msg)
+	}
+}
+
 // TestExecuteAction_DelegationWithoutDelegatorFailsExplicitly — a supervisor
 // without a configured Delegator must fail a delegate_task explicitly, never
 // nil-pointer-panic.
