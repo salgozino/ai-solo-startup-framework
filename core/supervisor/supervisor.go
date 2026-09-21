@@ -2,10 +2,12 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
 	"os"
+	"time"
 
 	a2a "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -15,6 +17,10 @@ import (
 	"github.com/salgozino/ai-solo-startup-framework/core/policy"
 	"github.com/salgozino/ai-solo-startup-framework/core/port"
 )
+
+// defaultDelegateTimeout bounds a blocking Delegate call when Config.DelegateTimeout
+// is unset (design D10).
+const defaultDelegateTimeout = 10 * time.Minute
 
 // Config holds the parameters needed to construct a Supervisor.
 type Config struct {
@@ -28,11 +34,19 @@ type Config struct {
 	// Zero means no cap.
 	ContextBudget int
 	// PolicyEngine classifies action intents emitted by the provider.
-	// When nil, action intents are not classified (delegation-only mode).
+	// Required; New returns an error when nil.
 	PolicyEngine *policy.Engine
 	// Gateway is the outbound gateway used to execute approved action intents.
 	// Required when PolicyEngine is set and intents may be Permitted.
 	Gateway port.Gateway
+	// Delegator sends delegate_task intents to a role-addressed peer over A2A.
+	// Optional: a supervisor whose role is never granted delegate_task may leave it
+	// nil, in which case a delegate_task intent fails explicitly instead of panicking.
+	Delegator port.Delegator
+	// DelegateTimeout bounds one blocking Delegate call (design D10). Zero means
+	// defaultDelegateTimeout. On expiry the delegating task FAILS naming the peer
+	// role and this duration; the peer's own task is never canceled.
+	DelegateTimeout time.Duration
 	// Role is the agent role declared in company.yaml (e.g. "ceo", "engineer").
 	// Used for policy capability checks.
 	Role string
@@ -297,11 +311,20 @@ func (s *Supervisor) executeResume(
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, nil), nil) //nolint
 
 	token := s.cfg.PolicyEngine.MintApprovalToken()
-	if err := s.executeAction(ctx, rec.PendingIntentKind, rec.PendingIntentBody, token); err != nil {
+
+	// A resumed delegate_task has no persisted target role (TaskRecord carries only
+	// PendingIntentKind/PendingIntentBody), so executeDelegation fails it explicitly;
+	// the shipped policy classifies delegate_task as safe, so this path is unreachable
+	// unless an operator marks it risky.
+	outcome, err := s.executeAction(ctx, rec.PendingIntentKind, rec.PendingIntentBody, "", token)
+	if err != nil {
 		log.Error("resume.action.failed", "intent", rec.PendingIntentKind, "error", err)
 		s.markFailed(rec)
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 		return
+	}
+	if outcome.Output != "" {
+		rec.Output = outcome.Output
 	}
 
 	log.Info("resume.completed", "intent", rec.PendingIntentKind)
@@ -380,11 +403,17 @@ func (s *Supervisor) executeWithPolicy(
 
 		case policy.Permit:
 			log.Info("action.execute", "kind", intent.Kind)
-			if err := s.executeAction(ctx, intent.Kind, extractBody(intent), classResult.ApprovalToken); err != nil {
+			outcome, err := s.executeAction(ctx, intent.Kind, extractBody(intent), extractTarget(intent), classResult.ApprovalToken)
+			if err != nil {
 				log.Error("action.failed", "kind", intent.Kind, "error", err)
 				s.markFailed(rec)
 				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 				return
+			}
+			if outcome.Output != "" {
+				// The peer's terminal output becomes the delegating task's output
+				// (spec: "The Peer's Terminal Result Is Copied Into the Delegating Task's Output").
+				rec.Output = outcome.Output
 			}
 			log.Info("action.done", "kind", intent.Kind)
 		}
@@ -411,21 +440,74 @@ func (s *Supervisor) effectiveBudget() int {
 	return s.cfg.Provider.Capabilities().ContextBudget
 }
 
-// executeAction calls the gateway with the given approval token for the action kind.
-// body is the message text from the provider's ActionIntent.Payload["body"]; it is
-// passed through to OutboundMessage.Body so the gateway delivers the intended content.
-// In v1, the only action kind is "telegram_send" → Gateway.Send.
-func (s *Supervisor) executeAction(ctx context.Context, actionKind, body, token string) error {
-	if s.cfg.Gateway == nil {
-		return fmt.Errorf("supervisor: gateway required for action %q but none configured", actionKind)
-	}
+// actionOutcome reports what executeAction produced beyond succeeding or failing.
+type actionOutcome struct {
+	// Output is the peer's terminal output for a completed delegation; empty for
+	// every other action kind.
+	Output string
+}
+
+// executeAction executes a Permit-classified (or human-approved) action intent.
+// delegate_task routes to the Delegator port (design D6); every other kind
+// routes to the Gateway exactly as before.
+func (s *Supervisor) executeAction(ctx context.Context, actionKind, body, target, token string) (actionOutcome, error) {
 	if err := s.cfg.PolicyEngine.ValidateToken(token); err != nil {
-		return fmt.Errorf("supervisor: invalid approval token for action %q: %w", actionKind, err)
+		return actionOutcome{}, fmt.Errorf("supervisor: invalid approval token for action %q: %w", actionKind, err)
 	}
-	return s.cfg.Gateway.Send(ctx, port.OutboundMessage{
+	if actionKind == port.KindDelegateTask {
+		return s.executeDelegation(ctx, target, body)
+	}
+	if s.cfg.Gateway == nil {
+		return actionOutcome{}, fmt.Errorf("supervisor: gateway required for action %q but none configured", actionKind)
+	}
+	return actionOutcome{}, s.cfg.Gateway.Send(ctx, port.OutboundMessage{
 		Channel: "telegram",
 		Body:    body,
 	})
+}
+
+// executeDelegation runs one blocking delegation to the peer fulfilling role and
+// maps the peer's observed state onto the delegating task's fate:
+//   - COMPLETED → success, peer output returned in the outcome;
+//   - any other terminal state (FAILED, REJECTED, CANCELED) → error naming the role;
+//   - any NON-terminal state (the peer escalated to INPUT_REQUIRED) → immediate error
+//     stating the peer escalated and chained approval is not yet wired (spec
+//     agent-delegation, interim requirement). Chained approval is delivered by the
+//     follow-up change agent-delegation-chained-approval; nothing here polls or parks.
+//
+// The call is bounded by DelegateTimeout; on expiry the error names the role and
+// the configured duration. The peer's task is never canceled (design D10).
+func (s *Supervisor) executeDelegation(ctx context.Context, role, body string) (actionOutcome, error) {
+	if s.cfg.Delegator == nil {
+		return actionOutcome{}, fmt.Errorf("supervisor: delegate_task requires a delegator but none configured")
+	}
+	if role == "" {
+		return actionOutcome{}, fmt.Errorf("supervisor: delegate_task intent has no target role")
+	}
+	timeout := s.cfg.DelegateTimeout
+	if timeout <= 0 {
+		timeout = defaultDelegateTimeout
+	}
+	dctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	res, err := s.cfg.Delegator.Delegate(dctx, role, body)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q timed out after %s; peer task left running", role, timeout)
+		}
+		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q failed: %w", role, err)
+	}
+
+	state := a2a.TaskState(res.State)
+	switch {
+	case state == a2a.TaskStateCompleted:
+		return actionOutcome{Output: res.Output}, nil
+	case state.Terminal():
+		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q failed: peer task %q ended in state %s", role, res.PeerTaskID, res.State)
+	default:
+		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q: peer escalated (peer task %q is %s) and chained approval is not yet wired; the peer task is left running for its own human verdict", role, res.PeerTaskID, res.State)
+	}
 }
 
 // Cancel implements a2asrv.AgentExecutor.Cancel.
@@ -481,6 +563,20 @@ func extractBody(intent port.ActionIntent) string {
 		return ""
 	}
 	v, ok := intent.Payload["body"]
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
+// extractTarget reads the port.TargetArg key from intent.Payload as a string.
+// Returns "" if the key is absent, the map is nil, or the value is not a string.
+func extractTarget(intent port.ActionIntent) string {
+	if intent.Payload == nil {
+		return ""
+	}
+	v, ok := intent.Payload[port.TargetArg]
 	if !ok {
 		return ""
 	}

@@ -193,53 +193,59 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
 
 ## Phase 6: Supervisor Delegation Routing — Synchronous Half (PR 6)
 
-- [ ] 6.1 Create `core/port/fake/fake_delegator.go` — `fake.Delegator` implementing
+- [x] 6.1 Create `core/port/fake/fake_delegator.go` — `fake.Delegator` implementing
       `port.Delegator` with per-role scripted `Delegate` results/errors and a sequenced
       `PeerTaskState` return list, recording every call (`Calls []DelegateCall` or equivalent).
       This is test infrastructure, not itself behavior under test — no RED/GREEN pair required,
       but confirm it compiles and satisfies `port.Delegator` (`var _ port.Delegator =
       (*Delegator)(nil)`).
-- [ ] 6.2 RED: In `core/supervisor/supervisor_test.go`, add
+- [x] 6.2 RED: In `core/supervisor/supervisor_test.go`, add
       `TestExecuteAction_DelegateTaskRoutesToPortNotGateway` — a `Permit`-classified
       `delegate_task` intent must call `fake.Delegator.Delegate` and `fake.Gateway.Send` must have
       zero calls. Add `TestExecuteAction_TelegramSendStillRoutesToGateway` — a `Permit`-classified
       `telegram_send` intent is unaffected, calling `Gateway.Send` exactly as before. Confirm the
       first test fails (no routing exists yet) and the second currently passes (guard against
       regressing it).
-- [ ] 6.3 GREEN: Edit `core/supervisor/supervisor.go` — add `Config.Delegator port.Delegator` and
+- [x] 6.3 GREEN: Edit `core/supervisor/supervisor.go` — add `Config.Delegator port.Delegator` and
       `Config.DelegateTimeout time.Duration` (zero-value defaults to 10 minutes); add the
       `actionOutcome` struct (`Output` field only in this change — no `AwaitingPeerRole` /
       `AwaitingPeerTaskID` fields, since chained approval is deferred); change `executeAction`'s
       signature from `error` to `(actionOutcome, error)`; add the `delegate_task` branch that
       calls `Config.Delegator.Delegate(ctx, role, body)` bounded by `DelegateTimeout`, and an
       `extractTarget` helper reading the intent payload's `target` key. Confirm 6.2 passes.
-- [ ] 6.4 RED: Add `TestExecuteAction_DelegationCompletesWithPeerOutput` — a `fake.Delegator`
+- [x] 6.4 RED: Add `TestExecuteAction_DelegationCompletesWithPeerOutput` — a `fake.Delegator`
       returning a terminal `COMPLETED` `DelegationResult{Output: "Done: X"}` must result in the
       delegating task's own output containing `"Done: X"` and transitioning to `COMPLETED`.
       Confirm it fails.
-- [ ] 6.5 GREEN: Wire the `COMPLETED` case through `executeAction`'s delegation branch — copy
+- [x] 6.5 GREEN: Wire the `COMPLETED` case through `executeAction`'s delegation branch — copy
       `DelegationResult.Output` into the task's output before marking `COMPLETED`. Confirm 6.4
       passes.
-- [ ] 6.6 RED: Add `TestExecuteAction_DelegationFailedPeerFailsDelegatingTask` — a `fake.Delegator`
+- [x] 6.6 RED: Add `TestExecuteAction_DelegationFailedPeerFailsDelegatingTask` — a `fake.Delegator`
       returning a `FAILED`-state `DelegationResult` (or an error) must fail the delegating task
       with an error naming the peer role, fabricating no output. Confirm it fails.
-- [ ] 6.7 GREEN: Wire the `FAILED` case. Confirm 6.6 passes.
-- [ ] 6.8 RED: Add `TestExecuteAction_DelegationTimeoutFailsTaskNamingPeerAndDuration` — inject a
+- [x] 6.7 GREEN: Wire the `FAILED` case. Confirm 6.6 passes.
+- [x] 6.8 RED: Add `TestExecuteAction_DelegationTimeoutFailsTaskNamingPeerAndDuration` — inject a
       controllable `Config.Now` clock (add `Config.Now func() time.Time` if not already present;
       default `time.Now`) so no `time.Sleep` is needed; simulate the `Delegate` call exceeding
       `DelegateTimeout` and assert the delegating task reaches `FAILED` with an error naming the
       role and the configured duration. Confirm it fails.
-- [ ] 6.9 GREEN: Wire timeout handling using `context.WithTimeout(ctx, cfg.DelegateTimeout)`
+- [x] 6.9 GREEN: Wire timeout handling using `context.WithTimeout(ctx, cfg.DelegateTimeout)`
       around the `Delegate` call. Confirm 6.8 passes.
-- [ ] 6.10 RED: Add `TestExecuteAction_DelegationUnknownRoleFailsTaskExplicitly` — a
+
+      > Implementation note (6.8/6.9): no `Config.Now` clock was added. The timeout is
+      > enforced by `context.WithTimeout` around `Delegate`; `fake.Delegator.BlockUntilCtxDone`
+      > honors ctx cancellation, so the test drives the real mechanism with a 20ms
+      > `DelegateTimeout` and no `time.Sleep`. An injected clock only serves the deferred
+      > awaiting-peer watcher (`agent-delegation-chained-approval`) and would be dead code here.
+- [x] 6.10 RED: Add `TestExecuteAction_DelegationUnknownRoleFailsTaskExplicitly` — a
       `fake.Delegator` returning `transport/a2a.ErrUnknownRole` (or an equivalent sentinel wired
       through the fake) must fail the delegating task with an explicit error naming the role,
       never a panic. Confirm it fails.
-- [ ] 6.11 GREEN: Wire the unknown/unregistered-role error path (do not distinguish
+- [x] 6.11 GREEN: Wire the unknown/unregistered-role error path (do not distinguish
       `ErrUnknownRole` from `ErrPeerNotRegistered` beyond surfacing the returned error text — both
       are terminal failures for this synchronous-only change; only the deferred watcher needs to
       treat `ErrPeerNotRegistered` as transient). Confirm 6.10 passes.
-- [ ] 6.12 RED (honest-interim requirement — spec: agent-delegation "A Non-Terminal Peer Result
+- [x] 6.12 RED (honest-interim requirement — spec: agent-delegation "A Non-Terminal Peer Result
       Fails the Delegating Task With an Explicit Not-Yet-Wired Error"): add
       `TestExecuteAction_DelegationNonTerminalPeerFailsWithNotYetWiredError` — a `fake.Delegator`
       returning `DelegationResult{State: "TASK_STATE_INPUT_REQUIRED", PeerTaskID: "P"}` must fail
@@ -247,12 +253,12 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
       states the peer escalated, (b) states that chained approval is not yet wired, and (c) names
       both the peer role and peer task ID `"P"`. Also assert the task never reaches `COMPLETED` and
       no output is fabricated. Confirm it fails.
-- [ ] 6.13 GREEN: In `executeAction`'s delegation branch, use
+- [x] 6.13 GREEN: In `executeAction`'s delegation branch, use
       `a2a.TaskState(res.State).Terminal()` (already available via `core/supervisor`'s existing
       `a2a` import) to distinguish terminal from non-terminal; any non-terminal state — including,
       but not limited to, `INPUT_REQUIRED` — fails the task immediately with the composed
       not-yet-wired error message. Confirm 6.12 passes.
-- [ ] 6.14 RED: Add `TestDelegateTask_FromNonAllowedRoleIsHardDenied` in the policy/classification
+- [x] 6.14 RED: Add `TestDelegateTask_FromNonAllowedRoleIsHardDenied` in the policy/classification
       test path (`core/supervisor/policy_test.go` or `core/policy` tests, matching existing
       HardDeny coverage) — a `delegate_task` intent from a role not in `delegate_task`'s
       `allowed_roles` must be `HardDeny`-classified and drive the task to `REJECTED`, using the
@@ -261,9 +267,18 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
       body}`. Confirm the HardDeny case passes against the unchanged policy engine (no engine
       code change is expected — this test documents that no new guard was added) and the
       payload-shape assertion is meaningful once 6.3's `extractTarget` exists.
-- [ ] 6.15 Run `go test ./core/supervisor/... ./core/policy/... ./core/port/... -race` and `go
+- [x] 6.15 Run `go test ./core/supervisor/... ./core/policy/... ./core/port/... -race` and `go
       build ./...`. Confirm `TestExecuteAction_DelegationCompletesWithPeerOutput` and friends do
       not regress `TestExecuteAction_TelegramSendStillRoutesToGateway`.
+
+      > Known limitation (documented by `TestResume_DelegateTaskWithoutPersistedTargetFailsExplicitly`):
+      > an escalated `delegate_task` cannot be resumed because `TaskRecord` persists only
+      > `PendingIntentKind`/`PendingIntentBody` (task 8.3 forbids new fields). The resume path
+      > fails such a task explicitly instead of delegating to an empty role. Unreachable with the
+      > shipped `risk: safe` policy; a follow-up may persist the pending target.
+      >
+      > Follow-up found (pre-existing, out of scope): `Execute`'s panic recovery yields a FAILED
+      > event on the wire but does not persist FAILED to the store (the record stays WORKING).
 
 ## Phase 7: Turn It On (PR 7)
 
