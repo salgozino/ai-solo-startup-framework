@@ -323,7 +323,9 @@ func (s *Supervisor) executeResume(
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 		return
 	}
-	if outcome.Output != "" {
+	// Gated on Delegated, not on a non-empty Output — see executeWithPolicy's
+	// Permit branch for why an empty peer result must still replace the agent's text.
+	if outcome.Delegated {
 		rec.Output = outcome.Output
 	}
 
@@ -410,9 +412,12 @@ func (s *Supervisor) executeWithPolicy(
 				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 				return
 			}
-			if outcome.Output != "" {
+			if outcome.Delegated {
 				// The peer's terminal output becomes the delegating task's output
 				// (spec: "The Peer's Terminal Result Is Copied Into the Delegating Task's Output").
+				// Gated on Delegated, not on a non-empty Output: a COMPLETED peer that
+				// produced nothing must not leave the agent's own text standing in for
+				// the result. Non-delegation actions return a zero outcome and are skipped.
 				rec.Output = outcome.Output
 			}
 			log.Info("action.done", "kind", intent.Kind)
@@ -445,6 +450,10 @@ type actionOutcome struct {
 	// Output is the peer's terminal output for a completed delegation; empty for
 	// every other action kind.
 	Output string
+	// Delegated reports that this outcome came from a delegation, so an empty
+	// Output is the peer's actual empty result and must replace the agent's own
+	// text rather than leaving it in place.
+	Delegated bool
 }
 
 // executeAction executes a Permit-classified (or human-approved) action intent.
@@ -506,7 +515,7 @@ func (s *Supervisor) executeDelegation(ctx context.Context, role, body string) (
 	state := a2a.TaskState(res.State)
 	switch {
 	case state == a2a.TaskStateCompleted:
-		return actionOutcome{Output: res.Output}, nil
+		return actionOutcome{Output: res.Output, Delegated: true}, nil
 	case state.Terminal():
 		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q failed: peer task %q ended in state %s", role, res.PeerTaskID, res.State)
 	case state == a2a.TaskStateInputRequired:

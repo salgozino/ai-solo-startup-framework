@@ -151,10 +151,15 @@ func TestExecuteAction_TelegramSendStillRoutesToGateway(t *testing.T) {
 	intent := port.ActionIntent{Kind: "telegram_send", Payload: map[string]any{"body": "hi"}}
 	h := newDelegatingSupervisor(t, "ceo", []port.ActionIntent{intent}, del, 0)
 
-	last, _ := h.run(t, "task-tg-1")
+	last, rec := h.run(t, "task-tg-1")
 
 	if last.Status.State != sdka2a.TaskStateCompleted {
 		t.Fatalf("expected COMPLETED, got %v", last.Status.State)
+	}
+	// Regression guard for the empty-delegation-output fix: a non-delegation action
+	// returns a zero actionOutcome, and that must never wipe the agent's own output.
+	if rec.Output != "ceo own text" {
+		t.Errorf("a gateway action must leave the agent's own output intact; got %q", rec.Output)
 	}
 	if h.gw.CallCount() != 1 {
 		t.Errorf("Gateway.Send calls = %d, want 1", h.gw.CallCount())
@@ -186,6 +191,33 @@ func TestExecuteAction_DelegationCompletesWithPeerOutput(t *testing.T) {
 	}
 	if h.prov.RunTaskCallCount() != 1 {
 		t.Errorf("delegating CLI must run exactly once; got %d", h.prov.RunTaskCallCount())
+	}
+}
+
+// TestExecuteAction_CompletedPeerWithEmptyOutputReplacesAgentText — reliability fix.
+// transport/a2a's resultFromTask documents that Output stays empty for a COMPLETED
+// task that produced no output. Gating the copy on a non-empty Output therefore left
+// the delegating agent's OWN provider text in the record, so the task reported
+// COMPLETED while presenting local agent babble as the peer's result — the worst
+// failure mode for a human supervising agents through the monitoring UI.
+func TestExecuteAction_CompletedPeerWithEmptyOutputReplacesAgentText(t *testing.T) {
+	del := &fake.Delegator{Results: map[string]port.DelegationResult{
+		"engineer": {PeerTaskID: "P1", State: string(sdka2a.TaskStateCompleted)},
+	}}
+	h := newDelegatingSupervisor(t, "ceo", []port.ActionIntent{delegateIntent("engineer", "build X")}, del, 0)
+
+	last, rec := h.run(t, "task-empty-output-1")
+
+	if last.Status.State != sdka2a.TaskStateCompleted {
+		t.Fatalf("expected COMPLETED, got %v", last.Status.State)
+	}
+	if rec.Output == "ceo own text" {
+		t.Errorf("the delegating agent's own text must never be presented as the peer's result; got %q", rec.Output)
+	}
+	// Core stores the truth: the peer produced nothing. Rendering an absent result
+	// is a UI concern, so no substitute display text is fabricated here.
+	if rec.Output != "" {
+		t.Errorf("an empty peer result must be stored verbatim, not fabricated; got %q", rec.Output)
 	}
 }
 
