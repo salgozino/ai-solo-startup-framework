@@ -177,19 +177,19 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
 
 ## Phase 5: The Peer's Output Must Be Put on the Wire (PR 5)
 
-- [ ] 5.1 RED: In `core/supervisor/supervisor_test.go` (or a focused new test file), add
+- [x] 5.1 RED: In `core/supervisor/supervisor_test.go` (or a focused new test file), add
       `TestExecuteWithPolicy_TelegramSendCompletionCarriesOutput` (or equivalent covering the
       existing non-delegated `Permit` path) asserting that the terminal `COMPLETED`
       `a2a.StatusUpdateEvent` carries `rec.Output` as a text part in `Status.Message`, not nil.
       Confirm it fails against the current `NewStatusUpdateEvent(execCtx, COMPLETED, nil)` call.
-- [ ] 5.2 GREEN: Edit `core/supervisor/supervisor.go` — change the terminal `COMPLETED` event
+- [x] 5.2 GREEN: Edit `core/supervisor/supervisor.go` — change the terminal `COMPLETED` event
       construction to attach `rec.Output` as a text part on the status message instead of `nil`.
       Confirm 5.1 passes.
-- [ ] 5.3 Add a regression assertion (can be part of 5.1's test or a sibling) confirming this
+- [x] 5.3 Add a regression assertion (can be part of 5.1's test or a sibling) confirming this
       change is additive: an existing non-delegated completed task still transitions correctly and
       no consumer of `Status.Message` on `COMPLETED` regresses (`FAILED` keeps using the existing
       generic `errorMessage(err)` — do not touch that path).
-- [ ] 5.4 Run `go test ./core/supervisor/... ./transport/a2a/... -race` and `go build ./...`.
+- [x] 5.4 Run `go test ./core/supervisor/... ./transport/a2a/... -race` and `go build ./...`.
 
 ## Phase 6: Supervisor Delegation Routing — Synchronous Half (PR 6)
 

@@ -341,11 +341,10 @@ func TestClient_WrongTenantIsRejectedByPeer(t *testing.T) {
 // TestClient_BlocksUntilPeerTerminal verifies Delegate blocks until the peer's
 // task reaches a terminal state and returns that state and the peer's task ID.
 //
-// Output is deliberately NOT asserted here: the terminal COMPLETED event still
-// carries a nil Status.Message in this slice — attaching the peer's output as a
-// text part is design D9 / tasks.md Phase 5 of this change, not implemented
-// here. Asserting a non-empty Output would fake a result this slice cannot yet
-// produce.
+// The peer's output must cross the wire: the supervisor's terminal COMPLETED
+// event carries it as a text part in Status.Message (design D9, Phase 5), and
+// Delegate reads it back into DelegationResult.Output.
+// Satisfies: a2a-client "SendMessage Blocks Until the Peer Task Is Terminal".
 func TestClient_BlocksUntilPeerTerminal(t *testing.T) {
 	prov := &fake.Provider{ReturnRunResult: port.ProviderResult{Output: "peer done"}}
 	_, dir := newTestPeer(t, "engineer", "acme", prov, nil)
@@ -361,6 +360,9 @@ func TestClient_BlocksUntilPeerTerminal(t *testing.T) {
 	}
 	if result.PeerTaskID == "" {
 		t.Error("expected a non-empty PeerTaskID")
+	}
+	if result.Output != "peer done" {
+		t.Errorf("Output = %q, want %q (peer output must cross the wire)", result.Output, "peer done")
 	}
 }
 
@@ -427,16 +429,9 @@ func TestClient_PeerTaskStateReportsCurrentStatus(t *testing.T) {
 }
 
 // TestClient_PeerTaskStateReportsTerminalOutput proves PeerTaskState's
-// independent read path correctly reports a COMPLETED peer task's state and
-// ID.
-//
-// It deliberately does NOT assert Output text as non-empty: the peer's
-// terminal COMPLETED event still carries a nil Status.Message in this slice —
-// design D9 ("the peer's output must be put on the wire") is tasks.md Phase 5
-// of this change and is NOT implemented here. Task 4.7 names this exact
-// dependency. Asserting a fabricated non-empty Output here would misreport
-// what this slice actually proves; the state/ID assertions below are what
-// PeerTaskState's read path can honestly demonstrate right now.
+// independent read path reports a COMPLETED peer task's state, ID, and the
+// output the peer's supervisor attached to its terminal COMPLETED event
+// (design D9, Phase 5) — read via GetTask, with no SendMessage involved.
 func TestClient_PeerTaskStateReportsTerminalOutput(t *testing.T) {
 	prov := &fake.Provider{ReturnRunResult: port.ProviderResult{Output: "peer output"}}
 	_, dir := newTestPeer(t, "engineer", "acme", prov, nil)
@@ -460,5 +455,8 @@ func TestClient_PeerTaskStateReportsTerminalOutput(t *testing.T) {
 	}
 	if got.PeerTaskID != delegated.PeerTaskID {
 		t.Errorf("PeerTaskState PeerTaskID = %q, want %q", got.PeerTaskID, delegated.PeerTaskID)
+	}
+	if got.Output != "peer output" {
+		t.Errorf("PeerTaskState Output = %q, want %q (peer output must cross the wire)", got.Output, "peer output")
 	}
 }
