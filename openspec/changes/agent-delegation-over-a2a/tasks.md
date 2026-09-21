@@ -301,72 +301,109 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
 > event but leaves the persisted record WORKING; the `strings.Contains`-on-`rec.Output`
 > replace-vs-append semantics; the 5-second wall-clock threshold in the non-terminal immediacy test.
 
-## Phase 7: Turn It On (PR 7)
+## Phase 7: Turn It On (PR 7a, 7b, 7c)
 
-- [ ] 7.1 Edit `company.yaml` — add `risk_policy.delegate_task: {risk: safe, allowed_roles:
+> **Delivered as three chained slices, not one PR.** Implemented whole first, then split along
+> commit boundaries with the combined tree byte-identical to the single-PR version:
+>
+> | Slice | Contents | Authored lines |
+> |-------|----------|----------------|
+> | 7a | `agents/ceo.md`, `agents/engineer.md`, this task record | 191 (documentation only) |
+> | 7b | `transport/mcp/tools.go` and its two test files | 113 |
+> | 7c | `cmd/company/wire.go`, `core/supervisor/integration_test.go` | 331 |
+>
+> Two independent reasons forced the split. First, the single slice measured 517 authored lines
+> against the 400-line budget. Second, the four-lens adversarial review of the single slice could
+> not complete: the `review-resilience` host agent was refused twice by the model provider's
+> content filter, so that lineage stopped at `unachievable_lens_slot` with authority never
+> approved. The `review-risk` lens captured successfully from the same input, so the candidate
+> content alone is not the cause. Isolating the agent-persona markdown into a documentation-only
+> slice removes the most plausible (though unproven) trigger from the code slices and brings every
+> slice inside budget, so no `size:exception` is required. Each slice is independently green
+> (`gofmt`, `go vet`, `go build`, `go test ./... -race -count=1`).
+
+- [x] 7.1 Edit `company.yaml` — add `risk_policy.delegate_task: {risk: safe, allowed_roles:
       [ceo]}` (design D13: shipped as `safe` → `Permit`, so internal hand-offs don't require human
       approval by default; anything the peer subsequently does that leaves the company is
       independently classified against the peer's own role).
-- [ ] 7.2 RED: In `transport/mcp/tools_test.go`, add a schema table case:
+- [x] 7.2 RED: In `transport/mcp/tools_internal_test.go`, add a schema table case:
       `delegate_task → Required == [body, target]` and confirm `telegram_send → Required ==
       [body]` still holds. Confirm the `delegate_task` case fails (no branch exists yet).
-- [ ] 7.3 GREEN: Edit `transport/mcp/tools.go` — add `targetSchema()` helper and branch
+- [x] 7.3 GREEN: Edit `transport/mcp/tools.go` — add `targetSchema()` helper and branch
       `buildInputSchema` on `kind == port.KindDelegateTask` to add the `target` argument to both
-      `Properties` and `Required` (design D11 — eight added lines, comparing against the exported
+      `Properties` and `Required` (design D11, comparing against the exported
       `port.KindDelegateTask` constant so a rename is a compile error, not silent drift). Update
-      `buildToolDescription` or a dedicated description branch so the `delegate_task` tool's
-      description mentions the required `target` argument identifies the delegation's target
-      role. Confirm 7.2 passes.
-- [ ] 7.4 RED: Add `TestRegisterTools_DelegateTaskRecordsTargetAndBody` — calling the
+      `buildToolDescription` with a dedicated `delegate_task` branch so the tool's description
+      mentions the required `target` argument identifies the delegation's target role. Confirm 7.2
+      passes.
+- [x] 7.4 RED: Add `TestRegisterTools_DelegateTaskRecordsTargetAndBody` — calling the
       `delegate_task` tool with `{target: "engineer", body: "..."}` records
       `ActionIntent{Kind: "delegate_task", Payload: {target: "engineer", body: "..."}}` in the
       sink and returns success synchronously, with no peer contacted as a direct result of the
-      call. Confirm it fails (schema currently doesn't require `target`, so the fixture call
-      would previously have been accepted without validating the argument's presence/shape).
-- [ ] 7.5 GREEN: Confirm 7.4 passes once 7.3 lands (the handler already records the whole args
-      map — no handler code change expected; this task is verification, not new production code).
-- [ ] 7.6 Create `agents/engineer.md` — a minimal peer persona (design OD4, resolved: ship it).
-      State the engineer role's purpose, that it may receive delegated tasks over A2A, and that
-      its own risky actions (e.g. `telegram_send`) are still classified independently against its
-      own role.
-- [ ] 7.7 Edit `agents/ceo.md` — add delegation instructions: when and how to call the
-      `delegate_task` tool with `target` and `body`, and an explicit statement that the outcome is
+      call.
+- [x] 7.5 GREEN: 7.4 passes with no production-code change (verification, not new behavior),
+      exactly as anticipated. Since supplying `target` was already accepted before 7.3 (the schema
+      leaves `additionalProperties` permitted), no honest RED was obtainable by running the test
+      as written — falsified instead: temporarily deleted `port.TargetArg` from the recorded
+      `args` map inside the tool handler, confirmed only this test failed (`intent
+      Payload["target"] = <nil>, want "engineer"`) while the sibling recording test stayed green,
+      then reverted. Proves the test pins the whole-args-map recording path 7.3's `extractTarget`
+      depends on.
+- [x] 7.6 Create `agents/engineer.md` — a minimal peer persona (design OD4, resolved: ship it).
+      States the engineer role's purpose, that it receives delegated tasks over A2A with no
+      conversational continuation, and that its own risky actions (e.g. `telegram_send`) are still
+      classified independently against its own role.
+- [x] 7.7 Edit `agents/ceo.md` — add a "Delegating work to a peer" section: when and how to call
+      `delegate_task` with `target` and `body`, and an explicit statement that the outcome is
       unavailable this turn (the CEO's own CLI process exits before the peer answers; only the
       task record carries the result).
-- [ ] 7.8 Edit `cmd/company/wire.go` — construct the `transport/a2a.Client` (using the
-      `PeerDirectory` from Phase 3), inject it into each eligible supervisor's `Config.Delegator`
-      and `Config.DelegateTimeout` (default 10 minutes, configurable at the composition root),
-      and handle the `supervisor.New` error return introduced in Phase 2 (propagate out of
-      `materializeAgents`, do not panic).
-- [ ] 7.9 RED: In `core/supervisor/integration_test.go`, delete
-      `TestIntegration_CEODelegatesToWorkerOverRealWire` and its stale comment (the misnamed test
-      that calls the worker handler in-process and tolerates zero calls). Add a real end-to-end
-      replacement — two real servers, both with `fake.Provider`s: the CEO's scripted to emit a
-      `delegate_task` intent with `target: "engineer"`, the engineer's to return output. Assert
-      `engineer.RunTaskCallCount() > 0` and the CEO record's `Output` contains the engineer's
-      text. Confirm this new test fails before 7.8's wiring lands (or, if written after 7.8,
-      confirm it fails on any deliberately-reverted piece of the wiring to prove it exercises the
-      real path — do not skip this falsification step).
-- [ ] 7.10 GREEN: Confirm 7.9's replacement test passes end-to-end through the real wire (real
+- [x] 7.8 Edit `cmd/company/wire.go` — construct one shared `transport/a2a.Client` (using the
+      `PeerDirectory` from Phase 3) and inject it into every supervisor's `Config.Delegator`;
+      add `wireOptions.delegateTimeout` so `Config.DelegateTimeout` is configurable at the
+      composition root (zero still defaults to 10 minutes inside `supervisor.New`, per D10). The
+      `supervisor.New` error-propagation half of this task was already satisfied by Phase 2's
+      `materializeAgents` error handling — no further change needed there.
+- [x] 7.9 In `core/supervisor/integration_test.go`, deleted `TestIntegration_CEODelegatesToWorkerOverRealWire`
+      and its stale comment. Added a real end-to-end replacement,
+      `TestIntegration_CEODelegatesToEngineerOverRealWire`: two real `transa2a.Server` instances,
+      the CEO's `fake.Provider` scripted to emit a `delegate_task` intent targeting `engineer`, the
+      engineer's to return output, wired through a real `transport/a2a.Client` and
+      `PeerDirectory`. Asserts `engineer.RunTaskCallCount() > 0` and the CEO task's output contains
+      the engineer's text. Falsification (no honest RED existed — Phases 4-6 already implement the
+      whole path): temporarily short-circuited `executeAction`'s `delegate_task` branch to
+      unreachable (`&& false`), reran the test, confirmed it failed for the right reason (engineer
+      never ran; CEO task FAILED instead of COMPLETED with empty output), then reverted.
+- [x] 7.10 Confirmed 7.9's replacement test passes end-to-end through the real wire (real
       `transa2a.Server` instances, real `Client`, real `PeerDirectory`, real supervisor routing —
       only the CLI subprocess is faked, per repo convention).
-- [ ] 7.11 Add an integration test proving "the delegating agent's CLI is invoked exactly once for
-      that task" (spec: agent-delegation "The Delegating Agent Process Never Observes the Peer's
-      Result") — assert the CEO's `fake.Provider.RunTaskCallCount() == 1` across the whole
-      delegate-then-complete chain.
-- [ ] 7.12 Add an integration test proving the delegation timeout leaves the peer running: after
-      the CEO task fails on timeout, `GetTask` (via `Client.PeerTaskState` or a direct
-      `a2aclient.GetTask`) on the peer still reports its original non-terminal or in-progress
-      state, never canceled or altered as a side effect.
-- [ ] 7.13 Run the full acceptance path manually or via a scripted harness:
-      `go run ./cmd/company materialize company.yaml` with the shipped `company.yaml`, send a task
-      to the CEO whose agent calls `delegate_task`, and confirm the engineer's supervisor receives
-      the A2A `SendMessage` and the CEO task's output contains the engineer's terminal output —
-      matching the proposal's first Success Criterion.
-- [ ] 7.14 Run `gofmt -l .` (must report nothing), `go build ./cmd/company`, `go vet ./...`, and
-      `go test ./... -race` for the full suite. Confirm every PR slice in this change landed at
-      ≤ 400 authored changed lines or carried an accepted `size:exception` (per the proposal's
-      final Success Criterion).
+- [x] 7.11 Added `TestIntegration_DelegatingCLIInvokedExactlyOnce` proving "the delegating agent's
+      CLI is invoked exactly once for that task" (spec: agent-delegation "The Delegating Agent
+      Process Never Observes the Peer's Result") — asserts the CEO's
+      `fake.Provider.RunTaskCallCount() == 1` across the whole delegate-then-complete chain.
+- [x] 7.12 Added `TestIntegration_DelegationTimeoutLeavesPeerRunning`: a `blockingUntilReleased`
+      provider parks the engineer mid-`RunTask` while the CEO delegates with a 100ms
+      `DelegateTimeout`; after the CEO task FAILS on timeout, `Client.PeerTaskState` against the
+      engineer's real task ID reports it still `WORKING` — never canceled, rejected, or altered as
+      a side effect of the delegator's timeout.
+- [ ] 7.13 **Not run.** `company.yaml` at the repo root is gitignored (`.gitignore` line 27,
+      `company*.yaml`, under "Local configuration") — there is no git-tracked company config in
+      this repository for any manual acceptance run to exercise, and the spec's "shipped
+      company.yaml" scenarios (company-as-code) cannot be satisfied by a git-committed file here;
+      task 7.1's edit was applied to the local, uncommitted `company.yaml` already present on this
+      machine, for exactly this manual-run purpose, but it is not part of this PR's diff. Beyond
+      that: `ACME_AUTH_TOKEN`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_OWNER_ID` are unset in this
+      environment, and no live Anthropic auth session for the `claude` CLI (present at
+      `~/.local/bin/claude`) was available to complete a real two-agent run. A human must: set
+      those three env vars, ensure `claude` is authenticated, run `go run ./cmd/company
+      materialize company.yaml`, send the CEO a task that prompts a `delegate_task` call, and
+      confirm the engineer's supervisor receives the A2A `SendMessage` with the CEO task's output
+      containing the engineer's terminal text.
+- [x] 7.14 Ran `gofmt -l .` (empty), `go build ./cmd/company`, `go vet ./...`, and `go test ./...
+      -race -count=1` — all green, and re-verified independently on each of the three slices 7a,
+      7b and 7c. Budget: the work measured 517 authored changed lines as a single slice, over the
+      400-line budget, so it was split into 7a (191), 7b (113) and 7c (331) as recorded at the top
+      of this phase. Every slice now lands inside the 400-line budget and no `size:exception` is
+      carried. The combined tree of the three slices is byte-identical to the unsplit version.
 
 ## Phase 8: Final Cross-Slice Regression Sweep
 
