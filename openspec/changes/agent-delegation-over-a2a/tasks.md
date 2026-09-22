@@ -95,31 +95,31 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
 
 ## Phase 3: Peer Directory (PR 3)
 
-- [ ] 3.1 RED: Create `transport/a2a/directory_test.go` with table-driven tests:
+- [x] 3.1 RED: Create `transport/a2a/directory_test.go` with table-driven tests:
       `TestPeerDirectory_UnknownRole` (query an undeclared role → `ErrUnknownRole`, error names
       the role, no panic), `TestPeerDirectory_NotYetBound` (query a declared-but-unbound role →
       `ErrPeerNotRegistered`, error names the role, no panic), `TestPeerDirectory_BoundRoleReturnsURL`,
       `TestNewPeerDirectory_DuplicateRoleFails` (constructing with a duplicate role in the input
       list returns an error). Add a concurrency case running `Bind` and `BaseURL` from parallel
       goroutines under `go test -race`. Confirm all fail (package does not exist yet).
-- [ ] 3.2 GREEN: Create `transport/a2a/directory.go` — `PeerDirectory` struct (`declared map`,
+- [x] 3.2 GREEN: Create `transport/a2a/directory.go` — `PeerDirectory` struct (`declared map`,
       `bound map`, `sync.RWMutex`), `ErrUnknownRole`, `ErrPeerNotRegistered`,
       `NewPeerDirectory(roles []string) (*PeerDirectory, error)`,
       `Bind(role, baseURL string) error`, `BaseURL(role string) (string, error)` per design D7.
       Run 3.1's tests; confirm they pass, including under `-race`.
-- [ ] 3.3 RED: In `cmd/company/wire_test.go`, add
+- [x] 3.3 RED: In `cmd/company/wire_test.go`, add
       `TestMaterializeAgents_DuplicateRoleFailsBeforeAnyReady` — two agents sharing a role in the
       test config must fail `materializeAgents` before any supervisor's `MarkReady()` is observed
       (assert via a recorded state-change hook or supervisor status). Confirm it fails against
       current `wire.go` (no directory construction exists).
-- [ ] 3.4 GREEN: Edit `cmd/company/wire.go` — call `NewPeerDirectory` with the full declared role
+- [x] 3.4 GREEN: Edit `cmd/company/wire.go` — call `NewPeerDirectory` with the full declared role
       list at the top of `materializeAgents`, before the per-agent loop (so a duplicate fails
       materialize before any `transa2a.New` runs); call `dir.Bind(role, srv.BaseURL())`
       immediately after each successful `transa2a.New(sup, ...)` in the loop. Confirm 3.3 passes.
-- [ ] 3.5 Also add `TestMaterializeAgents_DistinctRolesBindEachAgent` in `wire_test.go` asserting
+- [x] 3.5 Also add `TestMaterializeAgents_DistinctRolesBindEachAgent` in `wire_test.go` asserting
       every agent's role resolves to its own bound base URL after materialize (spec:
       `company-as-code` — "Distinct roles across agents materialize normally").
-- [ ] 3.6 Run `go test ./transport/a2a/... ./cmd/company/... -race` and `go build ./...`.
+- [x] 3.6 Run `go test ./transport/a2a/... ./cmd/company/... -race` and `go build ./...`.
 
 ## Phase 4: A2A Client (PR 4)
 
