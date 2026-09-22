@@ -3,9 +3,75 @@ package supervisor
 import (
 	"testing"
 
+	"github.com/salgozino/ai-solo-startup-framework/core/address"
+	"github.com/salgozino/ai-solo-startup-framework/core/policy"
 	"github.com/salgozino/ai-solo-startup-framework/core/port"
 	"github.com/salgozino/ai-solo-startup-framework/core/port/fake"
 )
+
+// construction tests
+
+// TestNew_NilPolicyEngineReturnsError verifies that New refuses to construct a
+// Supervisor when Config.PolicyEngine is nil, returning an explicit error and a
+// nil *Supervisor instead of deferring the failure to task-execution time.
+// Spec: agent-supervisor "Constructing a supervisor without a policy engine fails
+// at construction, not at task time".
+func TestNew_NilPolicyEngineReturnsError(t *testing.T) {
+	addr, err := address.New("ceo", "acme")
+	if err != nil {
+		t.Fatalf("address.New: %v", err)
+	}
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	sup, err := New(Config{
+		Addr:         addr,
+		Provider:     &fake.Provider{},
+		Store:        store,
+		PolicyEngine: nil,
+	})
+	if err == nil {
+		t.Fatal("expected error when Config.PolicyEngine is nil, got nil")
+	}
+	if sup != nil {
+		t.Fatalf("expected nil *Supervisor on construction error, got %+v", sup)
+	}
+}
+
+// TestNew_ValidConfigSucceeds verifies that New constructs successfully when
+// Config.PolicyEngine is non-nil, and the resulting supervisor progresses to
+// IDLE via MarkReady().
+// Spec: agent-supervisor "A configured policy engine constructs successfully".
+func TestNew_ValidConfigSucceeds(t *testing.T) {
+	addr, err := address.New("ceo", "acme")
+	if err != nil {
+		t.Fatalf("address.New: %v", err)
+	}
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	sup, err := New(Config{
+		Addr:         addr,
+		Provider:     &fake.Provider{},
+		Store:        store,
+		PolicyEngine: policy.NewEngine(),
+	})
+	if err != nil {
+		t.Fatalf("New with non-nil PolicyEngine: unexpected error: %v", err)
+	}
+	if sup == nil {
+		t.Fatal("expected non-nil *Supervisor on successful construction")
+	}
+
+	sup.MarkReady()
+	if got := sup.Status().State; got != StateIdle {
+		t.Fatalf("expected IDLE after MarkReady(), got %s", got)
+	}
+}
 
 // fsm lifecycle tests
 

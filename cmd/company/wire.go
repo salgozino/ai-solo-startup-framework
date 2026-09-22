@@ -82,6 +82,12 @@ type agentRuntime struct {
 	// materializeAgents call (same *transmcp.Server instance on each entry). Callers
 	// shut it down once (e.g. via runtimes[0].mcpSrv) alongside the A2A servers.
 	mcpSrv *transmcp.Server
+	// dir is the peer directory shared by every agentRuntime in a materializeAgents
+	// call (same *transa2a.PeerDirectory instance on each entry), mapping every
+	// declared role in this company to its live base URL once bound. Nothing
+	// consumes it yet — it is populated here so the delegation client (a later
+	// phase) can address peers by role.
+	dir *transa2a.PeerDirectory
 }
 
 // supervisorUIAdapter bridges supervisor.Supervisor to ui.Supervisor.
@@ -193,6 +199,11 @@ type wireOptions struct {
 	// Used in tests that do not need real MCP wiring (they typically also set
 	// providerOverride, bypassing per-adapter MCP registry injection entirely).
 	mcpServer *transmcp.Server
+	// delegateTimeout overrides supervisor.Config.DelegateTimeout for every
+	// materialized agent's Delegator (design D10). Zero uses the supervisor's own
+	// 10-minute default. Exposed here — the composition root — per task 7.8;
+	// there is no CLI flag or env var for it yet.
+	delegateTimeout time.Duration
 }
 
 // mcpServerAddr safely reads srv.Addr(), converting a panic from a never-Start()ed
@@ -287,6 +298,27 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 		return nil, fmt.Errorf("wire: env var %q (auth_token_env) is not set or empty", cfg.AuthTokenEnv)
 	}
 
+	// Build the peer directory declaring every agent's role up front, before any
+	// supervisor is constructed. A duplicate role fails materialize here — before
+	// transa2a.New (which marks a supervisor ready) runs for any agent in this
+	// company (spec: company-as-code "Two agents declaring the same role fail
+	// materialize with a named error"; design D7).
+	roles := make([]string, len(cfg.Agents))
+	for i, agCfg := range cfg.Agents {
+		roles[i] = agCfg.Role
+	}
+	dir, err := transa2a.NewPeerDirectory(roles)
+	if err != nil {
+		return nil, fmt.Errorf("wire: %w", err)
+	}
+
+	// Construct the delegation client once, shared by every supervisor in this
+	// company. It resolves dir.BaseURL lazily on each Delegate/PeerTaskState
+	// call, so building it before the per-agent loop below finishes binding
+	// every role is safe — no delegation happens until a supervisor actually
+	// receives a Permitted delegate_task intent (task 7.8; design D8).
+	delegator := transa2a.NewClient(dir, cfg.Tenant, authToken, nil)
+
 	runtimes = make([]*agentRuntime, 0, len(cfg.Agents))
 
 	for _, agCfg := range cfg.Agents {
@@ -344,19 +376,35 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 			}
 		}
 
-		sup := supervisor.New(supervisor.Config{
-			Addr:         addr,
-			Provider:     prov,
-			Store:        store,
-			PolicyEngine: policyEngine,
-			Gateway:      gw,
-			Role:         agCfg.Role,
-			PolicyConfig: cfg.RiskPolicy,
+		sup, err := supervisor.New(supervisor.Config{
+			Addr:            addr,
+			Provider:        prov,
+			Store:           store,
+			PolicyEngine:    policyEngine,
+			Gateway:         gw,
+			Delegator:       delegator,
+			DelegateTimeout: opts.delegateTimeout,
+			Role:            agCfg.Role,
+			PolicyConfig:    cfg.RiskPolicy,
 		})
+		if err != nil {
+			return nil, fmt.Errorf("wire: supervisor for %q: %w", agCfg.Name, err)
+		}
 
 		srv, err := transa2a.New(sup, authToken)
 		if err != nil {
 			return nil, fmt.Errorf("wire: transport for %q: %w", agCfg.Name, err)
+		}
+
+		// Publish this agent's live base URL under its role immediately after its
+		// server finishes binding, so the directory never reflects a role for a
+		// server that has not started listening (spec: peer-directory "The Peer
+		// Directory Maps Role to Live Base URL, Populated at Bind Time"). Bind can
+		// only fail here for a role NewPeerDirectory already declared uniquely
+		// above, so this branch guards a programming error rather than expected
+		// runtime behavior.
+		if err := dir.Bind(agCfg.Role, srv.BaseURL()); err != nil {
+			return nil, fmt.Errorf("wire: %w", err)
 		}
 
 		adap := &supervisorUIAdapter{
@@ -370,6 +418,7 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 			srv:    srv,
 			uiAdap: adap,
 			mcpSrv: mcpSrv,
+			dir:    dir,
 		})
 
 		fmt.Fprintf(opts.stderr, "wire: agent %q started at %s (role=%s)\n",

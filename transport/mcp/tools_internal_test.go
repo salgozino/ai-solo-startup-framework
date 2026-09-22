@@ -2,8 +2,11 @@
 package mcp
 
 import (
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/salgozino/ai-solo-startup-framework/core/port"
 )
 
 // TestBuildToolDescription_NamesBodyArgument: RED — the description must name the "body"
@@ -17,5 +20,40 @@ func TestBuildToolDescription_NamesBodyArgument(t *testing.T) {
 		if !strings.Contains(lower, want) {
 			t.Errorf("description missing %q: %q", want, desc)
 		}
+	}
+}
+
+// TestBuildInputSchema_RequiredArgsPerKind — task 7.2/7.3.
+// Design D11: delegate_task is the only action kind whose schema requires a
+// second argument (target, identifying the delegation's target role). Every
+// other kind — including an arbitrary undeclared one — requires only body.
+func TestBuildInputSchema_RequiredArgsPerKind(t *testing.T) {
+	cases := []struct {
+		kind string
+		want []string
+	}{
+		{kind: "telegram_send", want: []string{bodyArg}},
+		{kind: port.KindDelegateTask, want: []string{bodyArg, port.TargetArg}},
+		{kind: "arbitrary_kind", want: []string{bodyArg}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.kind, func(t *testing.T) {
+			schema := buildInputSchema(tc.kind)
+			if !slices.Equal(schema.Required, tc.want) {
+				t.Errorf("buildInputSchema(%q).Required = %v, want %v", tc.kind, schema.Required, tc.want)
+			}
+			if tc.kind == port.KindDelegateTask {
+				target, ok := schema.Properties[port.TargetArg]
+				if !ok {
+					t.Fatalf("buildInputSchema(%q) declares no %q property", tc.kind, port.TargetArg)
+				}
+				if target.Type != "string" {
+					t.Errorf("target property type = %q, want %q", target.Type, "string")
+				}
+				if !strings.Contains(strings.ToLower(target.Description), "identifies the delegation's target role") {
+					t.Errorf("target property description = %q, want it to state it identifies the delegation's target role", target.Description)
+				}
+			}
+		})
 	}
 }

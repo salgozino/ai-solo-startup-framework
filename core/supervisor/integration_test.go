@@ -3,10 +3,11 @@ package supervisor_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	sdka2a "github.com/a2aproject/a2a-go/v2/a2a"
-	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 
 	"github.com/salgozino/ai-solo-startup-framework/config"
@@ -35,11 +36,15 @@ func startSupervisor(t *testing.T, name, tenant string, prov *fake.Provider) (*s
 		t.Fatalf("NewStore: %v", err)
 	}
 
-	sup := supervisor.New(supervisor.Config{
-		Addr:     addr,
-		Provider: prov,
-		Store:    store,
+	sup, err := supervisor.New(supervisor.Config{
+		Addr:         addr,
+		Provider:     prov,
+		Store:        store,
+		PolicyEngine: policy.NewEngine(),
 	})
+	if err != nil {
+		t.Fatalf("supervisor.New: %v", err)
+	}
 
 	srv, err := transa2a.New(sup, testToken)
 	if err != nil {
@@ -50,81 +55,263 @@ func startSupervisor(t *testing.T, name, tenant string, prov *fake.Provider) (*s
 	return sup, srv
 }
 
-// TestIntegration_CEODelegatesToWorkerOverRealWire starts two supervisors on real
-// loopback ports, resolves the worker's Agent Card over real HTTP (proving
-// discoverability and the bearer security scheme), and asserts that the CEO
-// can delegate to the worker via its handler.
-//
-// Satisfies: "CEO delegates to worker over the real wire".
-// This test starts real loopback listeners; skip with -short.
-func TestIntegration_CEODelegatesToWorkerOverRealWire(t *testing.T) {
+// startDelegatingSupervisor starts a supervisor configured for the Phase 7
+// real-wire delegation tests: a Delegator, a DelegateTimeout, and a full
+// PolicyConfig, on top of startSupervisor's plain construction. Cleanup is
+// registered automatically.
+func startDelegatingSupervisor(
+	t *testing.T,
+	role, tenant string,
+	prov port.Provider,
+	delegator port.Delegator,
+	delegateTimeout time.Duration,
+	policyCfg map[string]config.Policy,
+) (*supervisor.Supervisor, *transa2a.Server) {
+	t.Helper()
+
+	addr, err := address.New(role, tenant)
+	if err != nil {
+		t.Fatalf("address.New(%q,%q): %v", role, tenant, err)
+	}
+
+	store, err := supervisor.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	sup, err := supervisor.New(supervisor.Config{
+		Addr:            addr,
+		Provider:        prov,
+		Store:           store,
+		PolicyEngine:    policy.NewEngine(),
+		Gateway:         &fake.Gateway{},
+		Delegator:       delegator,
+		DelegateTimeout: delegateTimeout,
+		Role:            role,
+		PolicyConfig:    policyCfg,
+	})
+	if err != nil {
+		t.Fatalf("supervisor.New: %v", err)
+	}
+
+	srv, err := transa2a.New(sup, testToken)
+	if err != nil {
+		t.Fatalf("transport/a2a.New for %s/%s: %v", role, tenant, err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	return sup, srv
+}
+
+// delegationCompany bundles a real CEO and engineer supervisor pair, both
+// declared in one shared PeerDirectory, with the CEO's Delegator wired to a
+// real transport/a2a.Client addressing the engineer by role. Built for the
+// Phase 7 real-wire delegation tests (tasks 7.9-7.12).
+type delegationCompany struct {
+	delegator   *transa2a.Client
+	ceoSrv      *transa2a.Server
+	engineerSup *supervisor.Supervisor
+}
+
+// startDelegationCompany wires ceoProv and engineerProv into a real CEO/engineer
+// pair over the real A2A wire: real transa2a.Server instances, a real
+// transport/a2a.Client, a real PeerDirectory, and real supervisor routing —
+// only the CLI subprocess is faked, per repo convention. delegateTimeout of 0
+// uses the supervisor's own 10-minute default.
+func startDelegationCompany(t *testing.T, tenant string, ceoProv, engineerProv port.Provider, delegateTimeout time.Duration) *delegationCompany {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("integration: skipping in -short mode")
 	}
 
-	ctx := context.Background()
-
-	// Worker supervisor. Provider succeeds immediately (no error).
-	workerProvider := &fake.Provider{ReturnTaskID: "worker-task-1"}
-	_, workerSrv := startSupervisor(t, "worker", "acme", workerProvider)
-
-	// Resolve the worker's Agent Card over real HTTP — the well-known path is
-	// public (unauthenticated) and must declare the bearer security scheme
-	// (satisfies spec: "Card includes security annotation").
-	workerCard, err := agentcard.DefaultResolver.Resolve(ctx, workerSrv.BaseURL())
+	dir, err := transa2a.NewPeerDirectory([]string{"ceo", "engineer"})
 	if err != nil {
-		t.Fatalf("resolve worker card: %v", err)
-	}
-	if _, ok := workerCard.SecuritySchemes["bearer"]; !ok {
-		t.Error("worker agent card missing \"bearer\" security scheme")
+		t.Fatalf("NewPeerDirectory: %v", err)
 	}
 
-	// CEO provider: wraps the worker client — send a task to the worker.
-	// For the integration test, we use a fake.Provider on the CEO but directly
-	// call the worker via its handler in the assertion step.
-	ceoProvider := &fake.Provider{ReturnTaskID: "ceo-task-1"}
-	_, ceoSrv := startSupervisor(t, "ceo", "acme", ceoProvider)
+	engineerSup, engineerSrv := startDelegatingSupervisor(t, "engineer", tenant, engineerProv, nil, 0, map[string]config.Policy{})
+	if err := dir.Bind("engineer", engineerSrv.BaseURL()); err != nil {
+		t.Fatalf("dir.Bind(engineer): %v", err)
+	}
 
-	// Call the worker's handler directly rather than through a2aclient: the
-	// a2aclient does not yet attach a Bearer header to outgoing calls (see
-	// design.md "Migration / Rollout"), so a real HTTP call would be rejected
-	// by authInterceptor. The direct handler call still exercises the full
-	// interceptor chain via the nil-ServiceParams trusted-caller path.
-	msg := sdka2a.NewMessage(sdka2a.MessageRoleUser, sdka2a.NewTextPart("do the work"))
-	req := &sdka2a.SendMessageRequest{
-		Tenant:  "acme",
+	delegator := transa2a.NewClient(dir, tenant, testToken, nil)
+	policyCfg := map[string]config.Policy{
+		port.KindDelegateTask: {Risk: "safe", AllowedRoles: []string{"ceo"}},
+	}
+	_, ceoSrv := startDelegatingSupervisor(t, "ceo", tenant, ceoProv, delegator, delegateTimeout, policyCfg)
+	if err := dir.Bind("ceo", ceoSrv.BaseURL()); err != nil {
+		t.Fatalf("dir.Bind(ceo): %v", err)
+	}
+
+	return &delegationCompany{delegator: delegator, ceoSrv: ceoSrv, engineerSup: engineerSup}
+}
+
+// delegateTaskIntentTo builds a delegate_task ActionIntent with the {target,
+// body} payload shape, addressed to role.
+func delegateTaskIntentTo(role, body string) port.ActionIntent {
+	return port.ActionIntent{
+		Kind:    port.KindDelegateTask,
+		Payload: map[string]any{port.TargetArg: role, "body": body},
+	}
+}
+
+// sendCEOTask drives one new task through the CEO's real A2A handler — the
+// same entry point a real CLI-backed agent's completed turn would use — and
+// returns the terminal *a2a.Task.
+func sendCEOTask(t *testing.T, ceoSrv *transa2a.Server, tenant, input string) *sdka2a.Task {
+	t.Helper()
+	msg := sdka2a.NewMessage(sdka2a.MessageRoleUser, sdka2a.NewTextPart(input))
+	result, err := ceoSrv.Handler().SendMessage(context.Background(), &sdka2a.SendMessageRequest{
+		Tenant:  tenant,
 		Message: msg,
-	}
-
-	result, err := workerSrv.Handler().SendMessage(ctx, req)
-	if err != nil {
-		t.Fatalf("worker.SendMessage: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected non-nil result from worker")
-	}
-
-	// Now call ListTasks on the CEO supervisor to verify it is also up.
-	listResp, err := ceoSrv.Handler().ListTasks(ctx, &sdka2a.ListTasksRequest{
-		Tenant: "acme",
 	})
 	if err != nil {
-		t.Fatalf("CEO ListTasks: %v", err)
+		t.Fatalf("CEO SendMessage: %v", err)
 	}
-	// CEO has no tasks yet (no message was sent to it), but ListTasks must work.
-	_ = listResp
+	task, ok := result.(*sdka2a.Task)
+	if !ok {
+		t.Fatalf("CEO SendMessage: result type = %T, want *a2a.Task", result)
+	}
+	return task
+}
 
-	// Verify worker provider was called (received the delegated task).
-	if workerProvider.SendMessageCallCount() == 0 {
-		// Worker's supervisor provider received the call from the a2a handler.
-		// The provider call may or may not have happened depending on the provider
-		// injection — for this test the fake provider returns success without actually
-		// calling a peer.
-		t.Log("note: fake provider did not call SendMessage (expected in integration mode)")
+// textOf returns the first text part of msg, or "" if msg is nil or carries none.
+func textOf(msg *sdka2a.Message) string {
+	if msg == nil {
+		return ""
+	}
+	for _, part := range msg.Parts {
+		if text := part.Text(); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+// TestIntegration_CEODelegatesToEngineerOverRealWire replaces the stale
+// TestIntegration_CEODelegatesToWorkerOverRealWire, which called the worker's
+// handler directly and tolerated zero delegation calls. This test drives a
+// real delegate_task intent through the CEO's own A2A handler, over the real
+// wire, to a real engineer supervisor, and asserts the CEO's task carries the
+// engineer's terminal output — the proposal's first Success Criterion.
+//
+// Falsification (task 7.9): this test passes unmodified against the current
+// tree because Phases 4-6 already implement the client, the output-on-the-wire
+// change, and the supervisor's delegation routing. To prove it actually
+// exercises that real path rather than passing vacuously, executeAction's
+// delegate_task branch was temporarily commented out (falling through to the
+// nil-Gateway error path): the test then failed with "CEO task state = FAILED,
+// want COMPLETED" and engineerProv.RunTaskCallCount() == 0, for exactly the
+// reason expected. The branch was restored before this file was committed.
+//
+// Satisfies: agent-delegation "A completed peer delegation completes the
+// delegating task with the peer's output"; tasks 7.9/7.10.
+func TestIntegration_CEODelegatesToEngineerOverRealWire(t *testing.T) {
+	tenant := "acme"
+	engineerProv := &fake.Provider{ReturnRunResult: port.ProviderResult{Output: "Done: implemented X"}}
+	ceoProv := &fake.Provider{ReturnRunResult: port.ProviderResult{
+		ActionIntents: []port.ActionIntent{delegateTaskIntentTo("engineer", "build X")},
+	}}
+	co := startDelegationCompany(t, tenant, ceoProv, engineerProv, 0)
+
+	task := sendCEOTask(t, co.ceoSrv, tenant, "please delegate")
+
+	if task.Status.State != sdka2a.TaskStateCompleted {
+		t.Fatalf("CEO task state = %v, want COMPLETED", task.Status.State)
+	}
+	if engineerProv.RunTaskCallCount() == 0 {
+		t.Error("expected the engineer's provider to run at least once")
+	}
+	if got := textOf(task.Status.Message); !strings.Contains(got, "Done: implemented X") {
+		t.Errorf("CEO task output = %q, want it to contain the engineer's output", got)
+	}
+}
+
+// TestIntegration_DelegatingCLIInvokedExactlyOnce proves the delegating agent's
+// own provider (its CLI subprocess) is invoked exactly once for a delegated
+// task — never a second time to "receive" or "react to" the peer's output, as
+// the delegating agent's own turn already ended before the peer answered.
+// Satisfies: agent-delegation "No second invocation of the delegating agent's
+// CLI occurs"; task 7.11.
+func TestIntegration_DelegatingCLIInvokedExactlyOnce(t *testing.T) {
+	tenant := "acme"
+	engineerProv := &fake.Provider{ReturnRunResult: port.ProviderResult{Output: "Done: implemented X"}}
+	ceoProv := &fake.Provider{ReturnRunResult: port.ProviderResult{
+		ActionIntents: []port.ActionIntent{delegateTaskIntentTo("engineer", "build X")},
+	}}
+	co := startDelegationCompany(t, tenant, ceoProv, engineerProv, 0)
+
+	task := sendCEOTask(t, co.ceoSrv, tenant, "please delegate")
+	if task.Status.State != sdka2a.TaskStateCompleted {
+		t.Fatalf("CEO task state = %v, want COMPLETED", task.Status.State)
 	}
 
-	t.Logf("Worker result type: %T", result)
-	t.Logf("CEO ListTasks: %d tasks", len(listResp.Tasks))
+	if got := ceoProv.RunTaskCallCount(); got != 1 {
+		t.Errorf("CEO provider RunTask call count = %d, want exactly 1", got)
+	}
+}
+
+// blockingUntilReleased is a port.Provider whose RunTask blocks until release
+// is closed, simulating a peer that is still actively working. It ignores ctx
+// entirely: the point of this test double is to prove the delegator's own
+// timeout does NOT propagate into the peer's execution as a side effect —
+// wiring it to ctx.Done() would defeat that proof.
+type blockingUntilReleased struct {
+	*fake.Provider
+	release chan struct{}
+}
+
+func (p *blockingUntilReleased) RunTask(ctx context.Context, taskID, input string) (port.ProviderResult, error) {
+	<-p.release
+	return p.Provider.RunTask(ctx, taskID, input)
+}
+
+var _ port.Provider = (*blockingUntilReleased)(nil)
+
+// TestIntegration_DelegationTimeoutLeavesPeerRunning proves that when the
+// CEO's delegation times out, the engineer's own task is left running under
+// its own supervisor — never canceled, rejected, or altered as a side effect.
+// Satisfies: agent-delegation "The peer's task is not canceled on the
+// delegator's timeout"; task 7.12.
+func TestIntegration_DelegationTimeoutLeavesPeerRunning(t *testing.T) {
+	tenant := "acme"
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	engineerProv := &blockingUntilReleased{
+		Provider: &fake.Provider{ReturnRunResult: port.ProviderResult{Output: "eventually done"}},
+		release:  release,
+	}
+	ceoProv := &fake.Provider{ReturnRunResult: port.ProviderResult{
+		ActionIntents: []port.ActionIntent{delegateTaskIntentTo("engineer", "build X")},
+	}}
+	const delegateTimeout = 100 * time.Millisecond
+	co := startDelegationCompany(t, tenant, ceoProv, engineerProv, delegateTimeout)
+
+	task := sendCEOTask(t, co.ceoSrv, tenant, "please delegate")
+
+	if task.Status.State != sdka2a.TaskStateFailed {
+		t.Fatalf("CEO task state = %v, want FAILED (timeout)", task.Status.State)
+	}
+
+	// The engineer's task is still mid-flight (RunTask is blocked on release).
+	// Find its task ID directly from the engineer's own store — no wire call
+	// needed to discover the ID the framework assigned it.
+	recs, err := co.engineerSup.ListTasks()
+	if err != nil {
+		t.Fatalf("engineer ListTasks: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("expected exactly 1 engineer task record, got %d", len(recs))
+	}
+	peerTaskID := recs[0].TaskID
+
+	res, err := co.delegator.PeerTaskState(context.Background(), "engineer", peerTaskID)
+	if err != nil {
+		t.Fatalf("PeerTaskState: %v", err)
+	}
+	if res.State != string(sdka2a.TaskStateWorking) {
+		t.Errorf("engineer peer task state = %q, want %q (still running, not canceled)", res.State, sdka2a.TaskStateWorking)
+	}
 }
 
 // TestIntegration_InputRequiredRecoveredAndResumed verifies that an INPUT_REQUIRED task
@@ -186,7 +373,7 @@ func TestIntegration_InputRequiredRecoveredAndResumed(t *testing.T) {
 
 	// Create supervisor — transa2a.New calls RecoverOpenTasks which invokes registerFn
 	// for the INPUT_REQUIRED task, seeding it into the a2asrv in-memory store.
-	sup := supervisor.New(supervisor.Config{
+	sup, err := supervisor.New(supervisor.Config{
 		Addr:         addr,
 		Provider:     prov,
 		Store:        fileStore,
@@ -195,6 +382,9 @@ func TestIntegration_InputRequiredRecoveredAndResumed(t *testing.T) {
 		Role:         role,
 		PolicyConfig: policyCfg,
 	})
+	if err != nil {
+		t.Fatalf("supervisor.New: %v", err)
+	}
 	srv, err := transa2a.New(sup, testToken)
 	if err != nil {
 		t.Fatalf("transa2a.New: %v", err)
@@ -264,10 +454,14 @@ func TestRecoverOpenTasks_DoubleRecoveryIsIdempotent(t *testing.T) {
 		t.Fatalf("store.Save (seed): %v", err)
 	}
 
-	sup := supervisor.New(supervisor.Config{
-		Addr:  addr,
-		Store: fileStore,
+	sup, err := supervisor.New(supervisor.Config{
+		Addr:         addr,
+		Store:        fileStore,
+		PolicyEngine: policy.NewEngine(),
 	})
+	if err != nil {
+		t.Fatalf("supervisor.New: %v", err)
+	}
 
 	// Build a registerFn backed by a real in-memory task store, mirroring what
 	// transport/a2a.New does: ErrTaskAlreadyExists is suppressed (idempotent).

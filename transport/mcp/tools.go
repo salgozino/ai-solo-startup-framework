@@ -23,14 +23,32 @@ const bodyArg = "body"
 // buildToolDescription returns the spec-mandated disclosure text for a tool of the given kind.
 // Design Decision C: description must state it records intent and does not execute.
 // It also names the body argument, so the contract is legible to the model in prose as
-// well as in the input schema.
+// well as in the input schema. delegate_task additionally names the required target
+// argument (design D11): the model must know the delegation needs an addressed role, not
+// only a message body.
 func buildToolDescription(kind string) string {
-	return fmt.Sprintf(
+	desc := fmt.Sprintf(
 		"Calling this tool records an intent for %s for later policy classification and does not execute the action. "+
 			"Pass the full message text to be delivered in the required %q argument; it is used verbatim if the intent is approved. "+
 			"Call once; the outcome is unavailable this turn.",
 		kind, bodyArg,
 	)
+	if kind == port.KindDelegateTask {
+		desc += fmt.Sprintf(
+			" The required %q argument identifies the delegation's target role (e.g. \"engineer\"); it must be a role declared in company.yaml, never a specific agent's configured name.",
+			port.TargetArg,
+		)
+	}
+	return desc
+}
+
+// targetSchema returns the input schema for the "target" argument, required only for
+// the delegate_task action kind (design D11).
+func targetSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type:        "string",
+		Description: "Identifies the delegation's target role (e.g. \"engineer\"). Must be a role declared in company.yaml, never a specific agent's configured name.",
+	}
 }
 
 // buildInputSchema returns the input schema advertised for an action tool.
@@ -41,9 +59,14 @@ func buildToolDescription(kind string) string {
 // per tool so no two registered tools share a *jsonschema.Schema pointer.
 //
 // Additional properties are deliberately left permitted: the handler records the whole
-// argument map into ActionIntent.Payload, and only "body" is load-bearing downstream.
+// argument map into ActionIntent.Payload, and only "body" (and, for delegate_task,
+// "target") is load-bearing downstream.
+//
+// delegate_task is the one action kind whose schema requires a second argument (design
+// D11): comparing against the exported port.KindDelegateTask constant, not a naming
+// convention, so a rename of that constant is a compile error here, not silent drift.
 func buildInputSchema(kind string) *jsonschema.Schema {
-	return &jsonschema.Schema{
+	s := &jsonschema.Schema{
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
 			bodyArg: {
@@ -56,6 +79,11 @@ func buildInputSchema(kind string) *jsonschema.Schema {
 		},
 		Required: []string{bodyArg},
 	}
+	if kind == port.KindDelegateTask {
+		s.Properties[port.TargetArg] = targetSchema()
+		s.Required = append(s.Required, port.TargetArg)
+	}
+	return s
 }
 
 // dedupeKey builds a deterministic key from token + kind + a sorted-key JSON encoding of payload.

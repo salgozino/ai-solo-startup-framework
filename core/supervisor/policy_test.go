@@ -60,7 +60,7 @@ func newTestSupervisor(
 		t.Fatalf("NewStore: %v", err)
 	}
 	addr := mustTestAddr(t, role, "acme")
-	return New(Config{
+	sup, err := New(Config{
 		Addr:         addr,
 		Provider:     prov,
 		Store:        store,
@@ -69,6 +69,10 @@ func newTestSupervisor(
 		Role:         role,
 		PolicyConfig: policyCfg,
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return sup
 }
 
 func mustTestAddr(t *testing.T, name, tenant string) address.A2AAddress {
@@ -241,7 +245,7 @@ func TestSupervisor_RestartPreservesInputRequired(t *testing.T) {
 	}
 
 	ceoAddr := mustTestAddr(t, "ceo", "acme")
-	sup := New(Config{
+	sup, err := New(Config{
 		Addr:         ceoAddr,
 		Provider:     prov,
 		Store:        store,
@@ -250,6 +254,9 @@ func TestSupervisor_RestartPreservesInputRequired(t *testing.T) {
 		Role:         "ceo",
 		PolicyConfig: policyCfg,
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	sup.MarkReady()
 
 	ctx := context.Background()
@@ -272,7 +279,7 @@ func TestSupervisor_RestartPreservesInputRequired(t *testing.T) {
 	}
 
 	// Simulate restart: create a new supervisor with the SAME store.
-	sup2 := New(Config{
+	sup2, err := New(Config{
 		Addr:         ceoAddr,
 		Provider:     prov,
 		Store:        store,
@@ -281,6 +288,9 @@ func TestSupervisor_RestartPreservesInputRequired(t *testing.T) {
 		Role:         "ceo",
 		PolicyConfig: policyCfg,
 	})
+	if err != nil {
+		t.Fatalf("New (restart): %v", err)
+	}
 	sup2.MarkReady()
 
 	// Verify store still has the task (not lost on restart).

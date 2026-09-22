@@ -2,10 +2,12 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
 	"os"
+	"time"
 
 	a2a "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -15,6 +17,10 @@ import (
 	"github.com/salgozino/ai-solo-startup-framework/core/policy"
 	"github.com/salgozino/ai-solo-startup-framework/core/port"
 )
+
+// defaultDelegateTimeout bounds a blocking Delegate call when Config.DelegateTimeout
+// is unset (design D10).
+const defaultDelegateTimeout = 10 * time.Minute
 
 // Config holds the parameters needed to construct a Supervisor.
 type Config struct {
@@ -28,11 +34,19 @@ type Config struct {
 	// Zero means no cap.
 	ContextBudget int
 	// PolicyEngine classifies action intents emitted by the provider.
-	// When nil, action intents are not classified (delegation-only mode).
+	// Required; New returns an error when nil.
 	PolicyEngine *policy.Engine
 	// Gateway is the outbound gateway used to execute approved action intents.
 	// Required when PolicyEngine is set and intents may be Permitted.
 	Gateway port.Gateway
+	// Delegator sends delegate_task intents to a role-addressed peer over A2A.
+	// Optional: a supervisor whose role is never granted delegate_task may leave it
+	// nil, in which case a delegate_task intent fails explicitly instead of panicking.
+	Delegator port.Delegator
+	// DelegateTimeout bounds one blocking Delegate call (design D10). Zero means
+	// defaultDelegateTimeout. On expiry the delegating task FAILS naming the peer
+	// role and this duration; the peer's own task is never canceled.
+	DelegateTimeout time.Duration
 	// Role is the agent role declared in company.yaml (e.g. "ceo", "engineer").
 	// Used for policy capability checks.
 	Role string
@@ -66,7 +80,15 @@ type Supervisor struct {
 
 // New creates a Supervisor in STARTING state.
 // Call MarkReady() after the A2A endpoint is registered.
-func New(cfg Config) *Supervisor {
+//
+// Config.PolicyEngine is required: there is no supported delegation-only,
+// no-policy construction mode. A nil PolicyEngine returns an explicit error
+// here, at construction time, rather than nil-pointer-panicking the first
+// time a task is executed.
+func New(cfg Config) (*Supervisor, error) {
+	if cfg.PolicyEngine == nil {
+		return nil, fmt.Errorf("supervisor: New: Config.PolicyEngine must not be nil")
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	}
@@ -74,7 +96,7 @@ func New(cfg Config) *Supervisor {
 		cfg: cfg,
 		fsm: newFSM(),
 	}
-	return s
+	return s, nil
 }
 
 // log returns the supervisor's logger, scoped with the task and agent context.
@@ -233,13 +255,7 @@ func (s *Supervisor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContex
 			return
 		}
 
-		// If RunTask is available on the provider, use it for local execution.
-		// Otherwise fall back to the A2A delegation path (ResolveAgent + SendMessage).
-		if s.cfg.PolicyEngine != nil {
-			s.executeWithPolicy(ctx, execCtx, yield, rec)
-		} else {
-			s.executeDelegation(ctx, execCtx, yield, rec)
-		}
+		s.executeWithPolicy(ctx, execCtx, yield, rec)
 	}
 }
 
@@ -295,18 +311,42 @@ func (s *Supervisor) executeResume(
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, nil), nil) //nolint
 
 	token := s.cfg.PolicyEngine.MintApprovalToken()
-	if err := s.executeAction(ctx, rec.PendingIntentKind, rec.PendingIntentBody, token); err != nil {
+
+	// The target role is persisted alongside the kind and body, so an approved
+	// delegate_task can still reach its peer after the park.
+	outcome, err := s.executeAction(ctx, rec.PendingIntentKind, rec.PendingIntentBody, rec.PendingIntentTarget, token)
+	if err != nil {
 		log.Error("resume.action.failed", "intent", rec.PendingIntentKind, "error", err)
 		s.markFailed(rec)
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 		return
 	}
+	// Gated on Delegated, not on a non-empty Output — see runIntents' Permit
+	// branch for why an empty peer result must still replace the agent's text.
+	if outcome.Delegated {
+		rec.Output = outcome.Output
+	}
+	log.Info("resume.action.done", "intent", rec.PendingIntentKind)
 
-	log.Info("resume.completed", "intent", rec.PendingIntentKind)
+	// The approved intent is spent: clear it before running whatever the same
+	// provider turn emitted after it, so a completion leaves no stale pending
+	// intent behind and a re-park writes a fresh one.
+	remaining := rec.RemainingIntents
+	rec.PendingIntentKind = ""
+	rec.PendingIntentBody = ""
+	rec.PendingIntentTarget = ""
+	rec.RemainingIntents = nil
+
+	rec, halted := s.runIntents(ctx, execCtx, yield, rec, remaining)
+	if halted {
+		return
+	}
+
+	log.Info("resume.completed")
 	rec.State = string(a2a.TaskStateCompleted)
 	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
 	s.notify()
-	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil) //nolint
+	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, outputMessage(rec.Output)), nil) //nolint
 }
 
 // executeWithPolicy runs the provider via RunTask, classifies action intents, and routes
@@ -335,10 +375,45 @@ func (s *Supervisor) executeWithPolicy(
 	)
 	rec.Output = result.Output
 
-	// Classify each action intent.
-	for _, intent := range result.ActionIntents {
-		portIntent := policy.ActionIntent{Kind: intent.Kind}
-		classResult := s.cfg.PolicyEngine.Classify(portIntent, s.cfg.Role, s.cfg.PolicyConfig)
+	rec, halted := s.runIntents(ctx, execCtx, yield, rec, toPendingIntents(result.ActionIntents))
+	if halted {
+		return
+	}
+
+	// All intents handled (or none) → COMPLETED. The terminal event carries the
+	// task output so a delegating peer can read it back via GetTask (design D9).
+	log.Info("task.completed", "state", "COMPLETED")
+	rec.State = string(a2a.TaskStateCompleted)
+	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
+	s.notify()
+	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, outputMessage(rec.Output)), nil) //nolint
+}
+
+// runIntents classifies and executes intents in the order the provider emitted
+// them, routing HardDeny → REJECTED, Escalate → INPUT_REQUIRED, Permit → gateway
+// or delegation port.
+//
+// It returns the updated record and whether the walk halted. A halt means a
+// terminal or parked status event was already yielded and the record already
+// persisted, so the caller must return without completing the task.
+//
+// An escalation persists the intents that follow it on the record rather than
+// dropping them; executeResume feeds that slice back here after the human
+// verdict, which re-parks naturally when it meets another risky intent. This is
+// shared by the first-run and resume paths precisely so both classify intents
+// under the same rules — a resumed intent is not exempt from policy.
+func (s *Supervisor) runIntents(
+	ctx context.Context,
+	execCtx *a2asrv.ExecutorContext,
+	yield func(a2a.Event, error) bool,
+	rec TaskRecord,
+	intents []PendingIntent,
+) (TaskRecord, bool) {
+	log := s.log(rec.TaskID)
+
+	for i, intent := range intents {
+		classResult := s.cfg.PolicyEngine.Classify(
+			policy.ActionIntent{Kind: intent.Kind}, s.cfg.Role, s.cfg.PolicyConfig)
 
 		log.Info("intent.classified",
 			"kind", intent.Kind,
@@ -348,19 +423,25 @@ func (s *Supervisor) executeWithPolicy(
 		switch classResult.Kind { //nolint:exhaustive
 		case policy.HardDeny:
 			// REJECTED — not FAILED. Terminal, no escalation, no send, no token.
-			log.Warn("intent.hard_deny", "kind", intent.Kind)
+			// The intents after a denied one die with it: the turn is over.
+			log.Warn("intent.hard_deny", "kind", intent.Kind, "dropped_intents", len(intents)-i-1)
 			rec.State = string(a2a.TaskStateRejected)
+			rec.RemainingIntents = nil
 			_ = s.cfg.Store.Save(s.cfg.Addr, rec)
 			s.notify()
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateRejected, nil), nil) //nolint
-			return
+			return rec, true
 
 		case policy.Escalate:
-			// Persist as INPUT_REQUIRED with the pending intent kind and body so the resume path knows what to approve.
-			log.Info("intent.escalate", "kind", intent.Kind)
+			// Persist as INPUT_REQUIRED with the pending intent's kind, body and
+			// target so the resume path knows what to approve and can reach the
+			// peer, plus everything still queued behind it.
+			log.Info("intent.escalate", "kind", intent.Kind, "remaining_intents", len(intents)-i-1)
 			rec.State = string(a2a.TaskStateInputRequired)
 			rec.PendingIntentKind = intent.Kind
-			rec.PendingIntentBody = extractBody(intent)
+			rec.PendingIntentBody = intent.Body
+			rec.PendingIntentTarget = intent.Target
+			rec.RemainingIntents = remainingAfter(intents, i)
 
 			payload, _ := policy.MarshalPayload(policy.EscalationPayload{
 				ActionKind: intent.Kind,
@@ -374,26 +455,31 @@ func (s *Supervisor) executeWithPolicy(
 			// register json.RawMessage / jsontext.Value with gob.
 			msg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(string(payload)))
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateInputRequired, msg), nil) //nolint
-			return
+			return rec, true
 
 		case policy.Permit:
 			log.Info("action.execute", "kind", intent.Kind)
-			if err := s.executeAction(ctx, intent.Kind, extractBody(intent), classResult.ApprovalToken); err != nil {
+			outcome, err := s.executeAction(ctx, intent.Kind, intent.Body, intent.Target, classResult.ApprovalToken)
+			if err != nil {
 				log.Error("action.failed", "kind", intent.Kind, "error", err)
+				rec.RemainingIntents = nil
 				s.markFailed(rec)
 				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
-				return
+				return rec, true
+			}
+			if outcome.Delegated {
+				// The peer's terminal output becomes the delegating task's output
+				// (spec: "The Peer's Terminal Result Is Copied Into the Delegating Task's Output").
+				// Gated on Delegated, not on a non-empty Output: a COMPLETED peer that
+				// produced nothing must not leave the agent's own text standing in for
+				// the result. Non-delegation actions return a zero outcome and are skipped.
+				rec.Output = outcome.Output
 			}
 			log.Info("action.done", "kind", intent.Kind)
 		}
 	}
 
-	// All intents handled (or none) → COMPLETED.
-	log.Info("task.completed", "state", "COMPLETED")
-	rec.State = string(a2a.TaskStateCompleted)
-	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
-	s.notify()
-	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil) //nolint
+	return rec, false
 }
 
 // effectiveBudget returns the context budget to use for context assembly.
@@ -408,66 +494,87 @@ func (s *Supervisor) effectiveBudget() int {
 	return s.cfg.Provider.Capabilities().ContextBudget
 }
 
-// executeDelegation is the A2A peer-routing path (used when no PolicyEngine is configured).
-// The supervisor resolves a peer agent and delegates the task via SendMessage.
-func (s *Supervisor) executeDelegation(
-	ctx context.Context,
-	execCtx *a2asrv.ExecutorContext,
-	yield func(a2a.Event, error) bool,
-	rec TaskRecord,
-) {
-	log := s.log(rec.TaskID)
-
-	// Assemble bounded context from prior messages.
-	history := buildHistory(execCtx)
-	bc := assembleBoundedContext(history, s.effectiveBudget())
-
-	// Dispatch to the provider (A2A network client).
-	targetAddr, err := s.cfg.Provider.ResolveAgent(ctx, roleOf(s.cfg.Addr))
-	if err != nil {
-		log.Error("delegation.resolve_agent.failed", "error", err)
-		// Cannot resolve peer — mark task FAILED.
-		s.markFailed(rec)
-		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
-		return
-	}
-
-	log.Info("delegation.resolve_agent.done", "target", string(targetAddr))
-
-	taskText := contextText(bc) + "\n" + rec.Input
-	_, providerErr := s.cfg.Provider.SendMessage(ctx, targetAddr, taskText, true)
-	if providerErr != nil {
-		log.Error("delegation.send_message.failed", "error", providerErr)
-		// Non-zero exit or provider error → FAILED (never silently dropped).
-		s.markFailed(rec)
-		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(providerErr)), nil) //nolint
-		return
-	}
-
-	// Success — mark COMPLETED.
-	log.Info("task.completed", "state", "COMPLETED")
-	rec.State = string(a2a.TaskStateCompleted)
-	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
-	s.notify()
-
-	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil) //nolint
+// actionOutcome reports what executeAction produced beyond succeeding or failing.
+type actionOutcome struct {
+	// Output is the peer's terminal output for a completed delegation; empty for
+	// every other action kind.
+	Output string
+	// Delegated reports that this outcome came from a delegation, so an empty
+	// Output is the peer's actual empty result and must replace the agent's own
+	// text rather than leaving it in place.
+	Delegated bool
 }
 
-// executeAction calls the gateway with the given approval token for the action kind.
-// body is the message text from the provider's ActionIntent.Payload["body"]; it is
-// passed through to OutboundMessage.Body so the gateway delivers the intended content.
-// In v1, the only action kind is "telegram_send" → Gateway.Send.
-func (s *Supervisor) executeAction(ctx context.Context, actionKind, body, token string) error {
-	if s.cfg.Gateway == nil {
-		return fmt.Errorf("supervisor: gateway required for action %q but none configured", actionKind)
-	}
+// executeAction executes a Permit-classified (or human-approved) action intent.
+// delegate_task routes to the Delegator port (design D6); every other kind
+// routes to the Gateway exactly as before.
+func (s *Supervisor) executeAction(ctx context.Context, actionKind, body, target, token string) (actionOutcome, error) {
 	if err := s.cfg.PolicyEngine.ValidateToken(token); err != nil {
-		return fmt.Errorf("supervisor: invalid approval token for action %q: %w", actionKind, err)
+		return actionOutcome{}, fmt.Errorf("supervisor: invalid approval token for action %q: %w", actionKind, err)
 	}
-	return s.cfg.Gateway.Send(ctx, port.OutboundMessage{
+	if actionKind == port.KindDelegateTask {
+		return s.executeDelegation(ctx, target, body)
+	}
+	if s.cfg.Gateway == nil {
+		return actionOutcome{}, fmt.Errorf("supervisor: gateway required for action %q but none configured", actionKind)
+	}
+	return actionOutcome{}, s.cfg.Gateway.Send(ctx, port.OutboundMessage{
 		Channel: "telegram",
 		Body:    body,
 	})
+}
+
+// executeDelegation runs one blocking delegation to the peer fulfilling role and
+// maps the peer's observed state onto the delegating task's fate:
+//   - COMPLETED → success, peer output returned in the outcome;
+//   - any other terminal state (FAILED, REJECTED, CANCELED) → error naming the role;
+//   - INPUT_REQUIRED (the peer escalated) → immediate error stating the peer escalated
+//     and chained approval is not yet wired (spec agent-delegation, interim
+//     requirement). Chained approval is delivered by the follow-up change
+//     agent-delegation-chained-approval; nothing here polls or parks;
+//   - any other non-terminal state → error naming it as a port.Delegator protocol
+//     violation, because that port requires such a state to arrive as an error, never
+//     as a result. It is a bug in the Delegator, not an escalation, and must not be
+//     described as one.
+//
+// The call is bounded by DelegateTimeout; on expiry the error names the role and
+// the configured duration. The peer's task is never canceled (design D10).
+func (s *Supervisor) executeDelegation(ctx context.Context, role, body string) (actionOutcome, error) {
+	if s.cfg.Delegator == nil {
+		return actionOutcome{}, fmt.Errorf("supervisor: delegate_task requires a delegator but none configured")
+	}
+	if role == "" {
+		return actionOutcome{}, fmt.Errorf("supervisor: delegate_task intent has no target role")
+	}
+	timeout := s.cfg.DelegateTimeout
+	if timeout <= 0 {
+		timeout = defaultDelegateTimeout
+	}
+	dctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	res, err := s.cfg.Delegator.Delegate(dctx, role, body)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q timed out after %s; peer task left running", role, timeout)
+		}
+		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q failed: %w", role, err)
+	}
+
+	state := a2a.TaskState(res.State)
+	switch {
+	case state == a2a.TaskStateCompleted:
+		return actionOutcome{Output: res.Output, Delegated: true}, nil
+	case state.Terminal():
+		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q failed: peer task %q ended in state %s", role, res.PeerTaskID, res.State)
+	case state == a2a.TaskStateInputRequired:
+		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q: peer escalated (peer task %q is %s) and chained approval is not yet wired; the peer task is left running for its own human verdict", role, res.PeerTaskID, res.State)
+	default:
+		// Not COMPLETED, not terminal, not the one legal non-terminal state: the
+		// Delegator implementation broke its own contract. Reporting this as an
+		// escalation would invent a human verdict that no peer is waiting for.
+		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q: peer returned unrecognized state %q; port.Delegator requires any non-terminal state other than %s to be returned as an error, never as a result", role, res.State, a2a.TaskStateInputRequired)
+	}
 }
 
 // Cancel implements a2asrv.AgentExecutor.Cancel.
@@ -516,19 +623,36 @@ func messageText(msg *a2a.Message) string {
 	return ""
 }
 
-// buildHistory builds a ContextMessage slice from the stored task's message history.
-func buildHistory(execCtx *a2asrv.ExecutorContext) []port.ContextMessage {
-	if execCtx.StoredTask == nil {
+// toPendingIntents converts a provider turn's intents into the persisted form
+// the supervisor executes and stores. The order the provider chose is preserved:
+// reordering intents to dodge an escalation would silently rewrite what the
+// agent asked for.
+func toPendingIntents(intents []port.ActionIntent) []PendingIntent {
+	if len(intents) == 0 {
 		return nil
 	}
-	history := make([]port.ContextMessage, 0, len(execCtx.StoredTask.History))
-	for _, m := range execCtx.StoredTask.History {
-		history = append(history, port.ContextMessage{
-			Role:    string(m.Role),
-			Content: messageText(m),
+	out := make([]PendingIntent, 0, len(intents))
+	for _, intent := range intents {
+		out = append(out, PendingIntent{
+			Kind:   intent.Kind,
+			Body:   extractBody(intent),
+			Target: extractTarget(intent),
 		})
 	}
-	return history
+	return out
+}
+
+// remainingAfter returns a copy of the intents queued after index i, or nil when
+// none are. The copy matters: the slice is persisted on the record and outlives
+// the loop walking it, so it must not alias the caller's backing array.
+func remainingAfter(intents []PendingIntent, i int) []PendingIntent {
+	rest := intents[i+1:]
+	if len(rest) == 0 {
+		return nil
+	}
+	out := make([]PendingIntent, len(rest))
+	copy(out, rest)
+	return out
 }
 
 // extractBody reads the "body" key from intent.Payload as a string.
@@ -538,6 +662,20 @@ func extractBody(intent port.ActionIntent) string {
 		return ""
 	}
 	v, ok := intent.Payload["body"]
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
+// extractTarget reads the port.TargetArg key from intent.Payload as a string.
+// Returns "" if the key is absent, the map is nil, or the value is not a string.
+func extractTarget(intent port.ActionIntent) string {
+	if intent.Payload == nil {
+		return ""
+	}
+	v, ok := intent.Payload[port.TargetArg]
 	if !ok {
 		return ""
 	}
@@ -575,10 +713,17 @@ func tenantOf(addr address.A2AAddress) string {
 	return addr.Tenant()
 }
 
-// roleOf extracts the agent-name segment and uses it as the role for ResolveAgent.
-// In v1 the agent name is also the role identifier.
-func roleOf(addr address.A2AAddress) string {
-	return addr.Name()
+// outputMessage wraps the task output into an agent-role a2a.Message carried by
+// the terminal COMPLETED status event, so the output crosses the wire and a
+// delegating peer can read it from Task.Status.Message (design D9). Returns nil
+// when there is no output, so an empty text part is never fabricated. A text
+// part is used (not a data part) so the gob-encoded in-memory task store can
+// serialize it without extra type registration.
+func outputMessage(output string) *a2a.Message {
+	if output == "" {
+		return nil
+	}
+	return a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(output))
 }
 
 // errorMessage wraps err into an a2a.Message for inclusion in a status event.

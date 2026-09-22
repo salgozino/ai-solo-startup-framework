@@ -1,6 +1,9 @@
 package supervisor
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/salgozino/ai-solo-startup-framework/core/address"
@@ -146,6 +149,63 @@ func TestStore_Delete(t *testing.T) {
 	_, err = s.Load(addr, "task-del")
 	if err == nil {
 		t.Error("expected ErrTaskNotFound after Delete, got nil")
+	}
+}
+
+// TestStore_LoadsRecordWrittenBeforeRemainingIntents proves that a record file
+// written by a build that predates PendingIntentTarget and RemainingIntents still
+// loads. The bytes below are the exact on-disk shape of the older schema, not a
+// re-marshalled TaskRecord, so the assertion cannot drift with the struct.
+// Satisfies: feature task T3, "records written before this change still load".
+func TestStore_LoadsRecordWrittenBeforeRemainingIntents(t *testing.T) {
+	dir := t.TempDir()
+	addr := mustAddr(t, "ceo", "acme")
+	legacy := `[{"task_id":"task-legacy","state":"TASK_STATE_INPUT_REQUIRED",` +
+		`"input":"send a telegram","owner":"ceo/acme",` +
+		`"pending_intent_kind":"telegram_send","pending_intent_body":"Hello from CEO"}]`
+	if err := os.WriteFile(filepath.Join(dir, filenameFor(addr)), []byte(legacy), 0o600); err != nil {
+		t.Fatalf("seed legacy record: %v", err)
+	}
+
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	got, err := s.Load(addr, "task-legacy")
+	if err != nil {
+		t.Fatalf("Load legacy record: %v", err)
+	}
+
+	if got.State != "TASK_STATE_INPUT_REQUIRED" {
+		t.Errorf("State: got %q, want TASK_STATE_INPUT_REQUIRED", got.State)
+	}
+	if got.PendingIntentKind != "telegram_send" {
+		t.Errorf("PendingIntentKind: got %q, want telegram_send", got.PendingIntentKind)
+	}
+	if got.PendingIntentBody != "Hello from CEO" {
+		t.Errorf("PendingIntentBody: got %q, want %q", got.PendingIntentBody, "Hello from CEO")
+	}
+	// The fields the older writer knew nothing about must read back as zero
+	// values, never as an error and never as garbage.
+	if got.PendingIntentTarget != "" {
+		t.Errorf("PendingIntentTarget: got %q, want empty", got.PendingIntentTarget)
+	}
+	if got.RemainingIntents != nil {
+		t.Errorf("RemainingIntents: got %v, want nil", got.RemainingIntents)
+	}
+
+	// Re-saving must not corrupt the record: the absent fields stay absent.
+	if err := s.Save(addr, got); err != nil {
+		t.Fatalf("Save round trip: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, filenameFor(addr)))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	for _, key := range []string{"pending_intent_target", "remaining_intents"} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("omitempty must keep %q out of a record that has none; got %s", key, data)
+		}
 	}
 }
 
