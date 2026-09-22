@@ -308,7 +308,7 @@ func (s *Supervisor) executeResume(
 	rec.State = string(a2a.TaskStateCompleted)
 	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
 	s.notify()
-	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil) //nolint
+	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, outputMessage(rec.Output)), nil) //nolint
 }
 
 // executeWithPolicy runs the provider via RunTask, classifies action intents, and routes
@@ -390,12 +390,13 @@ func (s *Supervisor) executeWithPolicy(
 		}
 	}
 
-	// All intents handled (or none) → COMPLETED.
+	// All intents handled (or none) → COMPLETED. The terminal event carries the
+	// task output so a delegating peer can read it back via GetTask (design D9).
 	log.Info("task.completed", "state", "COMPLETED")
 	rec.State = string(a2a.TaskStateCompleted)
 	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
 	s.notify()
-	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil) //nolint
+	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, outputMessage(rec.Output)), nil) //nolint
 }
 
 // effectiveBudget returns the context budget to use for context assembly.
@@ -515,6 +516,19 @@ func filterInputRequiredTasks(records []TaskRecord) []TaskRecord {
 // tenantOf extracts the tenant segment from an A2AAddress ("name/tenant").
 func tenantOf(addr address.A2AAddress) string {
 	return addr.Tenant()
+}
+
+// outputMessage wraps the task output into an agent-role a2a.Message carried by
+// the terminal COMPLETED status event, so the output crosses the wire and a
+// delegating peer can read it from Task.Status.Message (design D9). Returns nil
+// when there is no output, so an empty text part is never fabricated. A text
+// part is used (not a data part) so the gob-encoded in-memory task store can
+// serialize it without extra type registration.
+func outputMessage(output string) *a2a.Message {
+	if output == "" {
+		return nil
+	}
+	return a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(output))
 }
 
 // errorMessage wraps err into an a2a.Message for inclusion in a status event.

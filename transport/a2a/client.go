@@ -161,10 +161,10 @@ func (c *Client) PeerTaskState(ctx context.Context, role, peerTaskID string) (po
 }
 
 // resultFromTask converts an a2a.Task into a port.DelegationResult, reading
-// the terminal output text from Status.Message (design D9: the supervisor's
-// terminal COMPLETED event carries the task's output as a text part there —
-// as of this change's Phase 4, that wiring is not yet in place, so Output is
-// empty even for a COMPLETED task; see tasks.md Phase 5).
+// the terminal output text from Status.Message: the supervisor's terminal
+// COMPLETED event carries the task's output there as a text part (design D9).
+// Output stays empty for non-terminal states and for a COMPLETED task that
+// produced no output.
 func resultFromTask(task *sdka2a.Task) port.DelegationResult {
 	result := port.DelegationResult{
 		PeerTaskID: string(task.ID),
