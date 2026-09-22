@@ -301,7 +301,7 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
 > event but leaves the persisted record WORKING; the `strings.Contains`-on-`rec.Output`
 > replace-vs-append semantics; the 5-second wall-clock threshold in the non-terminal immediacy test.
 
-## Phase 7: Turn It On (PR 7a, 7b, 7c)
+## Phase 7: Turn It On (PR 7a, 7b, 7c, and follow-up 7d)
 
 > **Delivered as three chained slices, not one PR.** Implemented whole first, then split along
 > commit boundaries with the combined tree byte-identical to the single-PR version:
@@ -311,6 +311,7 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
 > | 7a | `agents/ceo.md`, `agents/engineer.md`, this task record | 191 (documentation only) |
 > | 7b | `transport/mcp/tools.go` and its two test files | 113 |
 > | 7c | `cmd/company/wire.go`, `core/supervisor/integration_test.go` | 331 |
+> | 7d | `agents/engineer.md`, this task record — post-review fix, see below | 56 (documentation only) |
 >
 > Two independent reasons forced the split. First, the single slice measured 517 authored lines
 > against the 400-line budget. Second, the four-lens adversarial review of the single slice could
@@ -318,9 +319,43 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
 > content filter, so that lineage stopped at `unachievable_lens_slot` with authority never
 > approved. The `review-risk` lens captured successfully from the same input, so the candidate
 > content alone is not the cause. Isolating the agent-persona markdown into a documentation-only
-> slice removes the most plausible (though unproven) trigger from the code slices and brings every
-> slice inside budget, so no `size:exception` is required. Each slice is independently green
-> (`gofmt`, `go vet`, `go build`, `go test ./... -race -count=1`).
+> slice removes the most plausible trigger from the code slices and brings every slice inside
+> budget, so no `size:exception` is required. Each slice is independently green (`gofmt`,
+> `go vet`, `go build`, `go test ./... -race -count=1`).
+>
+> **The content-filter hypothesis gained real evidence, but it is still not proven.** All three
+> original slices later passed the native RDD lifecycle to `approved` with authority burned and
+> zero blockers, each reviewed against its predecessor's head so the candidate was that slice
+> alone: 7a (`review-43186f676baf782d`, medium), 7b (`review-b6043ef1c2847ff1`, medium), 7c
+> (`review-61ee9fce5339939c`, high via `process_boundary`, all four lenses). 7c's
+> `review-resilience` lens — the one refused twice on the unsplit candidate — captured cleanly
+> on the first attempt with the persona markdown isolated in 7a.
+>
+> That is correlation, and this record deliberately stops short of calling it cause. **No
+> negative control was run**: the unsplit candidate was never re-reviewed to see whether the
+> refusal reproduces. The filter is also demonstrably nondeterministic with respect to content,
+> since `review-risk` captured successfully from the very same unsplit input that
+> `review-resilience` refused — so one clean capture cannot establish why. Treat "keep agent-
+> persona prose out of code slices" as a cheap mitigation worth keeping, not as a settled
+> finding. The honest test is still available: re-review the preserved `pr7-monolith-backup`
+> branch and observe whether `review-resilience` is refused again.
+>
+> **Slice 7d** closes review finding `R3-persona-contradiction`, raised by 7a's reliability
+> lens: `agents/engineer.md` told the engineer its reply "may be read back by whichever agent
+> delegated the task to you", while `agents/ceo.md` states the outcome is permanently
+> unavailable to the delegating agent. `agents/ceo.md` is the accurate one. The peer's text is
+> propagated — `resultFromTask` reads it from the terminal COMPLETED `Status.Message` (D9),
+> `executeDelegation` returns it as the delegating task's output — but into the task *record*,
+> read by the human operator, never by the delegating agent, whose single CLI invocation has
+> already returned (proved by `TestIntegration_DelegatingCLIInvokedExactlyOnce`). 7d rewrites
+> the engineer's "Your reply" section to say exactly that.
+>
+> 7d's own review (`review-5377e462bbc3447a`, medium, approved) then caught the first attempt
+> overstating three claims, and a follow-up commit corrected all three: the propagation
+> guarantee is now scoped to the COMPLETED path (a failed or canceled peer task returns an
+> error and carries no output), the "the delegating agent never reads it" absolute is now
+> scoped to what the exactly-once invocation test actually proves, and the content-filter
+> paragraph above was walked back from "confirmed" to evidence without a negative control.
 
 - [x] 7.1 Edit `company.yaml` — add `risk_policy.delegate_task: {risk: safe, allowed_roles:
       [ceo]}` (design D13: shipped as `safe` → `Permit`, so internal hand-offs don't require human
