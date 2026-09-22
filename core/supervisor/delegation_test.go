@@ -603,36 +603,8 @@ func TestDelegateTask_FromNonAllowedRoleIsHardDenied(t *testing.T) {
 	}
 }
 
-// TestResume_DelegateTaskWithoutPersistedTargetFailsExplicitly documents a known
-// limitation of this change: an escalated delegate_task cannot be resumed because
-// TaskRecord persists only PendingIntentKind/PendingIntentBody (task 8.3 forbids
-// new fields here). The shipped policy classifies delegate_task as safe, so this
-// path is unreachable in production; if an operator marks it risky, approval must
-// fail loudly rather than delegate to an empty role.
-func TestResume_DelegateTaskWithoutPersistedTargetFailsExplicitly(t *testing.T) {
-	del := &fake.Delegator{Results: map[string]port.DelegationResult{
-		"engineer": {PeerTaskID: "P1", State: string(sdka2a.TaskStateCompleted), Output: "ok"},
-	}}
-	h := newDelegatingSupervisor(t, "ceo", []port.ActionIntent{delegateIntent("engineer", "build X")}, del, 0)
-	// Override: make delegate_task risky so it escalates instead of executing.
-	h.sup.cfg.PolicyConfig[port.KindDelegateTask] = config.Policy{Risk: "risky", AllowedRoles: []string{"ceo"}}
-
-	ctx := context.Background()
-	const taskID = "task-resume-delegate-1"
-	parked := terminalEventOrLast(collectStatusEvents(ctx, h.sup, newExecCtx(taskID, "please delegate")))
-	if parked.Status.State != sdka2a.TaskStateInputRequired {
-		t.Fatalf("expected INPUT_REQUIRED, got %v", parked.Status.State)
-	}
-
-	events := collectStatusEvents(ctx, h.sup, newResumeExecCtx(taskID, "approve"))
-	last := terminalEvent(t, events)
-	rec, err := h.sup.cfg.Store.Load(h.sup.cfg.Addr, taskID)
-	if err != nil {
-		t.Fatalf("store.Load: %v", err)
-	}
-
-	h.assertFailed(t, last, rec)
-	if del.CallCount() != 0 {
-		t.Errorf("must not delegate to an empty role; got %d Delegate calls", del.CallCount())
-	}
-}
+// The limitation once pinned here — an escalated delegate_task could not be
+// resumed, because TaskRecord persisted no target role and approval had to fail
+// loudly rather than delegate to an empty one — no longer exists. TaskRecord now
+// persists PendingIntentTarget, and the resume path uses it. The behaviour is
+// covered by TestMultiIntent_ResumedDelegationKeepsItsTarget in multi_intent_test.go.

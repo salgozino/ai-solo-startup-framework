@@ -442,15 +442,37 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
 
 ## Phase 8: Final Cross-Slice Regression Sweep
 
-- [ ] 8.1 Re-run `go test ./... -race -count=1` once all seven PR slices have merged, to catch any
-      cross-slice interaction the per-slice test runs in Phases 1–7 could not see in isolation
+> **Run pre-merge on the chain tip, not post-merge — and that is sound here.** In a
+> feature-branch-chain each branch is based on its predecessor, so the tip of 7d already carries
+> the whole chain: 26 commits, 39 files, +5280/-422 against `origin/master`. The sweep was run
+> there on 2026-09-22 with `origin/master` verified at `f065616` and **zero commits of
+> divergence** (`git merge-base origin/master <tip>` equals `origin/master` HEAD), so the tip is
+> content-identical to the post-merge tree. The maintainer confirmed master will not move before
+> the merge. The tracker branch head `ea1683b` is fully contained in the tip (`git log
+> tracker ^tip` is empty), so no planning-artifact commit is missing.
+>
+> **The one condition attached:** 8.1's guarantee holds only while `origin/master` stays at
+> `f065616`. If any unrelated PR merges to master first, re-run 8.1 against the merged tree —
+> 8.2 and 8.3 are unaffected, as they inspect this change's own content rather than the
+> integration.
+
+- [x] 8.1 Ran `go test ./... -race -count=1` on the integrated chain tip: **green, no failures**.
+      No cross-slice interaction that the per-slice runs in Phases 1-7 could not see in isolation
       (for example, Phase 4's `PeerTaskState` reading Phase 5's output-on-the-wire change against
-      a real peer).
-- [ ] 8.2 Confirm no code, comment, test, or doc file introduced by this change references
+      a real peer) surfaced.
+- [x] 8.2 Confirmed no code, comment, test, or doc file introduced by this change references
       `AwaitingPeerRole`, `AwaitingPeerTaskID`, `AwaitingPeerDeadline`, `TaskResumer`,
       `SetResumer`, a watcher goroutine, `companyUIAdapter`, or a UI awaiting-peer badge — a
       accidental leak of deferred-scope (slices 7–9 in the design's numbering, not this
       document's Phase 7) work into this change would silently duplicate work the follow-up
       change `agent-delegation-chained-approval` is responsible for.
-- [ ] 8.3 Confirm `core/supervisor/store.go`'s `TaskRecord` gained no new fields in this change —
-      the awaiting-peer fields belong entirely to the deferred follow-up.
+      **Result: zero leakage.** Every occurrence across the change's diff lives in exactly three
+      documents — this file, `design.md`, and `agent-delegation-chained-approval/proposal.md` —
+      i.e. the records that declare those symbols deferred and the follow-up change's own
+      proposal, which must name them. `git diff origin/master...<tip> --name-only -G'AwaitingPeer|
+      TaskResumer|SetResumer|companyUIAdapter'` returns nothing outside `openspec/`: no Go file,
+      no test, no UI asset.
+- [x] 8.3 Confirmed `core/supervisor/store.go`'s `TaskRecord` gained no new fields in this change.
+      Diffing the struct between `origin/master` and the chain tip is **byte-identical**: the same
+      seven fields (`TaskID`, `State`, `Input`, `Owner`, `PendingIntentKind`, `PendingIntentBody`,
+      `Output`). The awaiting-peer fields remain entirely the deferred follow-up's.
