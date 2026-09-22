@@ -75,22 +75,22 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
 
 ## Phase 2: `supervisor.New` Returns a Construction Error (PR 2)
 
-- [ ] 2.1 RED: In `core/supervisor/supervisor_test.go`, add
+- [x] 2.1 RED: In `core/supervisor/supervisor_test.go`, add
       `TestNew_NilPolicyEngineReturnsError` asserting `New(Config{PolicyEngine: nil, ...})` returns
       a non-nil error and a nil `*Supervisor`, and `TestNew_ValidConfigSucceeds` asserting a
       non-nil `Config.PolicyEngine` constructs successfully and the resulting supervisor
       progresses to `IDLE` via `MarkReady()`. Run and confirm both fail against the current
       single-return `New`.
-- [ ] 2.2 GREEN: Edit `core/supervisor/supervisor.go` — change `New(cfg Config) *Supervisor` to
+- [x] 2.2 GREEN: Edit `core/supervisor/supervisor.go` — change `New(cfg Config) *Supervisor` to
       `New(cfg Config) (*Supervisor, error)`, returning an explicit error when
       `cfg.PolicyEngine == nil` before constructing the FSM. Update the doc comment: "there is no
       supported delegation-only, no-policy construction mode."
-- [ ] 2.3 GREEN: Update every `supervisor.New(...)` call site to handle the new error return:
+- [x] 2.3 GREEN: Update every `supervisor.New(...)` call site to handle the new error return:
       `cmd/company/wire.go` (all 11 call-site references reported by the current blast radius),
       `core/supervisor/policy_test.go`, `core/supervisor/integration_test.go`,
       `transport/a2a/server_test.go`. Each production call site in `wire.go` must propagate the
       error out of `materializeAgents` rather than panicking or ignoring it.
-- [ ] 2.4 Run `go test ./core/supervisor/... ./cmd/company/... -race` and confirm 2.1's tests pass
+- [x] 2.4 Run `go test ./core/supervisor/... ./cmd/company/... -race` and confirm 2.1's tests pass
       and no existing test broke from the signature change. Run `go build ./...`.
 
 ## Phase 3: Peer Directory (PR 3)

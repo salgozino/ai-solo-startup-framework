@@ -66,7 +66,15 @@ type Supervisor struct {
 
 // New creates a Supervisor in STARTING state.
 // Call MarkReady() after the A2A endpoint is registered.
-func New(cfg Config) *Supervisor {
+//
+// Config.PolicyEngine is required: there is no supported delegation-only,
+// no-policy construction mode. A nil PolicyEngine returns an explicit error
+// here, at construction time, rather than nil-pointer-panicking the first
+// time a task is executed.
+func New(cfg Config) (*Supervisor, error) {
+	if cfg.PolicyEngine == nil {
+		return nil, fmt.Errorf("supervisor: New: Config.PolicyEngine must not be nil")
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	}
@@ -74,7 +82,7 @@ func New(cfg Config) *Supervisor {
 		cfg: cfg,
 		fsm: newFSM(),
 	}
-	return s
+	return s, nil
 }
 
 // log returns the supervisor's logger, scoped with the task and agent context.
