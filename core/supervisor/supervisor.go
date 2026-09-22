@@ -323,7 +323,9 @@ func (s *Supervisor) executeResume(
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 		return
 	}
-	if outcome.Output != "" {
+	// Gated on Delegated, not on a non-empty Output — see executeWithPolicy's
+	// Permit branch for why an empty peer result must still replace the agent's text.
+	if outcome.Delegated {
 		rec.Output = outcome.Output
 	}
 
@@ -410,9 +412,12 @@ func (s *Supervisor) executeWithPolicy(
 				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 				return
 			}
-			if outcome.Output != "" {
+			if outcome.Delegated {
 				// The peer's terminal output becomes the delegating task's output
 				// (spec: "The Peer's Terminal Result Is Copied Into the Delegating Task's Output").
+				// Gated on Delegated, not on a non-empty Output: a COMPLETED peer that
+				// produced nothing must not leave the agent's own text standing in for
+				// the result. Non-delegation actions return a zero outcome and are skipped.
 				rec.Output = outcome.Output
 			}
 			log.Info("action.done", "kind", intent.Kind)
@@ -445,6 +450,10 @@ type actionOutcome struct {
 	// Output is the peer's terminal output for a completed delegation; empty for
 	// every other action kind.
 	Output string
+	// Delegated reports that this outcome came from a delegation, so an empty
+	// Output is the peer's actual empty result and must replace the agent's own
+	// text rather than leaving it in place.
+	Delegated bool
 }
 
 // executeAction executes a Permit-classified (or human-approved) action intent.
@@ -470,10 +479,14 @@ func (s *Supervisor) executeAction(ctx context.Context, actionKind, body, target
 // maps the peer's observed state onto the delegating task's fate:
 //   - COMPLETED → success, peer output returned in the outcome;
 //   - any other terminal state (FAILED, REJECTED, CANCELED) → error naming the role;
-//   - any NON-terminal state (the peer escalated to INPUT_REQUIRED) → immediate error
-//     stating the peer escalated and chained approval is not yet wired (spec
-//     agent-delegation, interim requirement). Chained approval is delivered by the
-//     follow-up change agent-delegation-chained-approval; nothing here polls or parks.
+//   - INPUT_REQUIRED (the peer escalated) → immediate error stating the peer escalated
+//     and chained approval is not yet wired (spec agent-delegation, interim
+//     requirement). Chained approval is delivered by the follow-up change
+//     agent-delegation-chained-approval; nothing here polls or parks;
+//   - any other non-terminal state → error naming it as a port.Delegator protocol
+//     violation, because that port requires such a state to arrive as an error, never
+//     as a result. It is a bug in the Delegator, not an escalation, and must not be
+//     described as one.
 //
 // The call is bounded by DelegateTimeout; on expiry the error names the role and
 // the configured duration. The peer's task is never canceled (design D10).
@@ -502,11 +515,16 @@ func (s *Supervisor) executeDelegation(ctx context.Context, role, body string) (
 	state := a2a.TaskState(res.State)
 	switch {
 	case state == a2a.TaskStateCompleted:
-		return actionOutcome{Output: res.Output}, nil
+		return actionOutcome{Output: res.Output, Delegated: true}, nil
 	case state.Terminal():
 		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q failed: peer task %q ended in state %s", role, res.PeerTaskID, res.State)
-	default:
+	case state == a2a.TaskStateInputRequired:
 		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q: peer escalated (peer task %q is %s) and chained approval is not yet wired; the peer task is left running for its own human verdict", role, res.PeerTaskID, res.State)
+	default:
+		// Not COMPLETED, not terminal, not the one legal non-terminal state: the
+		// Delegator implementation broke its own contract. Reporting this as an
+		// escalation would invent a human verdict that no peer is waiting for.
+		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q: peer returned unrecognized state %q; port.Delegator requires any non-terminal state other than %s to be returned as an error, never as a result", role, res.State, a2a.TaskStateInputRequired)
 	}
 }
 

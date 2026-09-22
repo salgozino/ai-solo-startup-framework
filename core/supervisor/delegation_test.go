@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,13 +23,16 @@ import (
 	"github.com/salgozino/ai-solo-startup-framework/core/port/fake"
 )
 
+// agentOwnOutput is the delegating agent's own provider text. Tests assert against
+// it to prove a peer's result never gets confused with what the local agent said.
+const agentOwnOutput = "ceo own text"
+
 // delegationHarness bundles the collaborators of a delegating supervisor test.
 type delegationHarness struct {
 	sup  *Supervisor
 	prov *fake.Provider
 	gw   *fake.Gateway
 	del  *fake.Delegator
-	logs *bytes.Buffer
 }
 
 // delegateIntent builds a delegate_task intent with the {target, body} payload shape.
@@ -41,8 +45,10 @@ func delegateIntent(target, body string) port.ActionIntent {
 
 // newDelegatingSupervisor builds a "ceo" supervisor whose provider emits the given
 // intents, with delegate_task permitted (risk safe) for ceo only. The structured
-// log is captured so tests can assert on the delegation error text, which the
-// A2A FAILED event deliberately does not carry (errorMessage stays generic).
+// log is routed to a discarded buffer purely to keep it out of the test output;
+// no test asserts on it. Delegation error text is asserted on executeDelegation's
+// returned error instead, since the A2A FAILED event deliberately carries only a
+// generic errorMessage.
 func newDelegatingSupervisor(
 	t *testing.T,
 	role string,
@@ -58,7 +64,7 @@ func newDelegatingSupervisor(
 	}
 	t.Helper()
 	prov := &fake.Provider{ReturnRunResult: port.ProviderResult{
-		Output:        "ceo own text",
+		Output:        agentOwnOutput,
 		ActionIntents: intents,
 	}}
 	gw := &fake.Gateway{}
@@ -87,7 +93,7 @@ func newDelegatingSupervisor(
 		t.Fatalf("New: %v", err)
 	}
 	sup.MarkReady()
-	return &delegationHarness{sup: sup, prov: prov, gw: gw, del: del, logs: logs}
+	return &delegationHarness{sup: sup, prov: prov, gw: gw, del: del}
 }
 
 // run drives one new task through the supervisor and returns the terminal status
@@ -103,8 +109,17 @@ func (h *delegationHarness) run(t *testing.T, taskID string) (*sdka2a.TaskStatus
 	return last, rec
 }
 
-// assertFailedNaming asserts the task FAILED and the logged error mentions every needle.
-func (h *delegationHarness) assertFailedNaming(t *testing.T, last *sdka2a.TaskStatusUpdateEvent, rec TaskRecord, needles ...string) {
+// assertFailed asserts the end-to-end guarantees a full run can actually observe:
+// the terminal event is FAILED, the persisted record is FAILED, and no output was
+// fabricated (the record still holds the delegating agent's own provider text).
+//
+// It deliberately does NOT match needles against the captured log buffer. That
+// proved a failure error "names the peer role" only up to "this string appears
+// somewhere in the whole run log", so a regression dropping the role from the error
+// while still logging it elsewhere would have passed. Error-text precision belongs
+// to TestExecuteDelegation_ErrorTextNamesTheFailure, which asserts on the returned
+// error string directly.
+func (h *delegationHarness) assertFailed(t *testing.T, last *sdka2a.TaskStatusUpdateEvent, rec TaskRecord) {
 	t.Helper()
 	if last.Status.State != sdka2a.TaskStateFailed {
 		t.Fatalf("expected FAILED, got %v", last.Status.State)
@@ -112,11 +127,8 @@ func (h *delegationHarness) assertFailedNaming(t *testing.T, last *sdka2a.TaskSt
 	if rec.State != string(sdka2a.TaskStateFailed) {
 		t.Errorf("persisted state = %q, want FAILED", rec.State)
 	}
-	logged := h.logs.String()
-	for _, n := range needles {
-		if !strings.Contains(logged, n) {
-			t.Errorf("delegation error must name %q; logged:\n%s", n, logged)
-		}
+	if rec.Output != agentOwnOutput {
+		t.Errorf("a failed delegation must fabricate no output; got %q, want the agent's own text %q", rec.Output, agentOwnOutput)
 	}
 }
 
@@ -134,7 +146,10 @@ func TestExecuteAction_DelegateTaskRoutesToPortNotGateway(t *testing.T) {
 	if got := del.CallCount(); got != 1 {
 		t.Fatalf("Delegator.Delegate calls = %d, want 1", got)
 	}
-	call := del.Calls[0]
+	call, ok := del.LastCall()
+	if !ok {
+		t.Fatal("Delegator.LastCall reported no recorded call")
+	}
 	if call.Role != "engineer" || call.Body != "build X" {
 		t.Errorf("Delegate called with role=%q body=%q; want engineer / build X", call.Role, call.Body)
 	}
@@ -150,10 +165,15 @@ func TestExecuteAction_TelegramSendStillRoutesToGateway(t *testing.T) {
 	intent := port.ActionIntent{Kind: "telegram_send", Payload: map[string]any{"body": "hi"}}
 	h := newDelegatingSupervisor(t, "ceo", []port.ActionIntent{intent}, del, 0)
 
-	last, _ := h.run(t, "task-tg-1")
+	last, rec := h.run(t, "task-tg-1")
 
 	if last.Status.State != sdka2a.TaskStateCompleted {
 		t.Fatalf("expected COMPLETED, got %v", last.Status.State)
+	}
+	// Regression guard for the empty-delegation-output fix: a non-delegation action
+	// returns a zero actionOutcome, and that must never wipe the agent's own output.
+	if rec.Output != "ceo own text" {
+		t.Errorf("a gateway action must leave the agent's own output intact; got %q", rec.Output)
 	}
 	if h.gw.CallCount() != 1 {
 		t.Errorf("Gateway.Send calls = %d, want 1", h.gw.CallCount())
@@ -188,8 +208,38 @@ func TestExecuteAction_DelegationCompletesWithPeerOutput(t *testing.T) {
 	}
 }
 
+// TestExecuteAction_CompletedPeerWithEmptyOutputReplacesAgentText — reliability fix.
+// transport/a2a's resultFromTask documents that Output stays empty for a COMPLETED
+// task that produced no output. Gating the copy on a non-empty Output therefore left
+// the delegating agent's OWN provider text in the record, so the task reported
+// COMPLETED while presenting local agent babble as the peer's result — the worst
+// failure mode for a human supervising agents through the monitoring UI.
+func TestExecuteAction_CompletedPeerWithEmptyOutputReplacesAgentText(t *testing.T) {
+	del := &fake.Delegator{Results: map[string]port.DelegationResult{
+		"engineer": {PeerTaskID: "P1", State: string(sdka2a.TaskStateCompleted)},
+	}}
+	h := newDelegatingSupervisor(t, "ceo", []port.ActionIntent{delegateIntent("engineer", "build X")}, del, 0)
+
+	last, rec := h.run(t, "task-empty-output-1")
+
+	if last.Status.State != sdka2a.TaskStateCompleted {
+		t.Fatalf("expected COMPLETED, got %v", last.Status.State)
+	}
+	if rec.Output == "ceo own text" {
+		t.Errorf("the delegating agent's own text must never be presented as the peer's result; got %q", rec.Output)
+	}
+	// Core stores the truth: the peer produced nothing. Rendering an absent result
+	// is a UI concern, so no substitute display text is fabricated here.
+	if rec.Output != "" {
+		t.Errorf("an empty peer result must be stored verbatim, not fabricated; got %q", rec.Output)
+	}
+}
+
 // TestExecuteAction_DelegationFailedPeerFailsDelegatingTask — task 6.6.
 // Spec: agent-delegation "A failed peer delegation fails the delegating task".
+// This end-to-end half proves persistence and that the gateway stays untouched;
+// that the error names the peer role is proved by
+// TestExecuteDelegation_ErrorTextNamesTheFailure.
 func TestExecuteAction_DelegationFailedPeerFailsDelegatingTask(t *testing.T) {
 	cases := []struct {
 		name string
@@ -212,10 +262,7 @@ func TestExecuteAction_DelegationFailedPeerFailsDelegatingTask(t *testing.T) {
 
 			last, rec := h.run(t, "task-failed-1")
 
-			h.assertFailedNaming(t, last, rec, "engineer")
-			if rec.Output != "ceo own text" {
-				t.Errorf("Output must not be fabricated from a failed peer; got %q", rec.Output)
-			}
+			h.assertFailed(t, last, rec)
 			if h.gw.CallCount() != 0 {
 				t.Errorf("gateway must not be touched; got %d calls", h.gw.CallCount())
 			}
@@ -227,6 +274,8 @@ func TestExecuteAction_DelegationFailedPeerFailsDelegatingTask(t *testing.T) {
 // The timeout is enforced with context.WithTimeout around Delegate; the fake honors
 // ctx cancellation, so a tiny DelegateTimeout drives the path without sleeping.
 // Spec: agent-delegation "A hung peer fails the delegating task within the timeout".
+// The role-and-duration naming half is proved by
+// TestExecuteDelegation_ErrorTextNamesTheFailure's timeout case.
 func TestExecuteAction_DelegationTimeoutFailsTaskNamingPeerAndDuration(t *testing.T) {
 	del := &fake.Delegator{BlockUntilCtxDone: true}
 	const timeout = 20 * time.Millisecond
@@ -234,7 +283,7 @@ func TestExecuteAction_DelegationTimeoutFailsTaskNamingPeerAndDuration(t *testin
 
 	last, rec := h.run(t, "task-timeout-1")
 
-	h.assertFailedNaming(t, last, rec, "engineer", timeout.String())
+	h.assertFailed(t, last, rec)
 	if rec.State == string(sdka2a.TaskStateCompleted) {
 		t.Error("timed-out delegation must never COMPLETE")
 	}
@@ -253,12 +302,14 @@ func TestExecuteAction_DelegationUnknownRoleFailsTaskExplicitly(t *testing.T) {
 
 	last, rec := h.run(t, "task-unknown-1")
 
-	h.assertFailedNaming(t, last, rec, "designer")
+	h.assertFailed(t, last, rec)
 }
 
 // TestExecuteAction_DelegationNonTerminalPeerFailsWithNotYetWiredError — task 6.12.
 // Spec: agent-delegation "A Non-Terminal Peer Result Fails the Delegating Task With
-// an Explicit Not-Yet-Wired Error" (all four scenarios).
+// an Explicit Not-Yet-Wired Error". This half proves the task fails immediately,
+// persists FAILED, fabricates no output, and never polls PeerTaskState; the error
+// wording is proved by TestExecuteDelegation_ErrorTextNamesTheFailure.
 func TestExecuteAction_DelegationNonTerminalPeerFailsWithNotYetWiredError(t *testing.T) {
 	del := &fake.Delegator{Results: map[string]port.DelegationResult{
 		"engineer": {PeerTaskID: "P", State: string(sdka2a.TaskStateInputRequired)},
@@ -272,13 +323,239 @@ func TestExecuteAction_DelegationNonTerminalPeerFailsWithNotYetWiredError(t *tes
 		t.Fatalf("non-terminal peer must fail immediately, took %s", elapsed)
 	}
 
-	// slog's TextHandler escapes the quoted peer task ID inside the error attr.
-	h.assertFailedNaming(t, last, rec, "escalated", "chained approval", "not yet wired", "engineer", `peer task \"P\"`)
-	if rec.Output != "ceo own text" {
-		t.Errorf("no output may be fabricated for a parked peer; got %q", rec.Output)
-	}
+	h.assertFailed(t, last, rec)
 	if del.StateCallCount() != 0 {
 		t.Errorf("no PeerTaskState polling in this change; got %d calls", del.StateCallCount())
+	}
+}
+
+// TestExecuteDelegation_UnrecognizedPeerStateIsProtocolViolation — reliability fix.
+// port.Delegator documents that INPUT_REQUIRED is the ONLY legal non-terminal state
+// on a nil-error return: "Any other non-terminal state is a protocol violation and
+// MUST be returned as an error, never as a result". An unrecognized or empty state
+// is therefore a defect in the Delegator implementation, not a peer escalation, and
+// must never be reported with the escalation wording.
+func TestExecuteDelegation_UnrecognizedPeerStateIsProtocolViolation(t *testing.T) {
+	cases := []struct {
+		name  string
+		state string
+	}{
+		{name: "empty state", state: ""},
+		{name: "unrecognized state", state: "TASK_STATE_BOGUS"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			del := &fake.Delegator{Results: map[string]port.DelegationResult{
+				"engineer": {PeerTaskID: "P1", State: tc.state},
+			}}
+			h := newDelegatingSupervisor(t, "ceo", []port.ActionIntent{delegateIntent("engineer", "build X")}, del, 0)
+
+			_, err := h.sup.executeDelegation(context.Background(), "engineer", "build X")
+			if err == nil {
+				t.Fatal("an unrecognized peer state must be an error, not a silent success")
+			}
+			msg := err.Error()
+
+			// The point of this fix: a protocol violation is not an escalation.
+			for _, forbidden := range []string{"escalated", "chained approval"} {
+				if strings.Contains(msg, forbidden) {
+					t.Errorf("protocol violation must not be reported as an escalation; error contains %q: %s", forbidden, msg)
+				}
+			}
+			for _, needle := range []string{"engineer", strconv.Quote(tc.state), "port.Delegator"} {
+				if !strings.Contains(msg, needle) {
+					t.Errorf("protocol-violation error must name %q; got: %s", needle, msg)
+				}
+			}
+
+			last, rec := h.run(t, "task-violation-1")
+			if last.Status.State != sdka2a.TaskStateFailed {
+				t.Fatalf("expected FAILED, got %v", last.Status.State)
+			}
+			if rec.State != string(sdka2a.TaskStateFailed) {
+				t.Errorf("persisted state = %q, want FAILED", rec.State)
+			}
+		})
+	}
+}
+
+// TestExecuteDelegation_CompletedPeerReturnsOutcome — reliability fix, direct call.
+// The success half of the mapping, asserted on the returned outcome rather than
+// through a full run: a COMPLETED peer yields no error, carries the peer's output,
+// and marks the outcome Delegated so the caller replaces the agent's own text.
+func TestExecuteDelegation_CompletedPeerReturnsOutcome(t *testing.T) {
+	del := &fake.Delegator{Results: map[string]port.DelegationResult{
+		"engineer": {PeerTaskID: "P1", State: string(sdka2a.TaskStateCompleted), Output: "Done: implemented X"},
+	}}
+	h := newDelegatingSupervisor(t, "ceo", nil, del, 0)
+
+	outcome, err := h.sup.executeDelegation(context.Background(), "engineer", "build X")
+	if err != nil {
+		t.Fatalf("executeDelegation: unexpected error: %v", err)
+	}
+	if outcome.Output != "Done: implemented X" {
+		t.Errorf("outcome.Output = %q, want the peer's output", outcome.Output)
+	}
+	if !outcome.Delegated {
+		t.Error("outcome.Delegated must be true so an empty peer result still replaces the agent's text")
+	}
+}
+
+// TestExecuteDelegation_ErrorTextNamesTheFailure — reliability fix, direct call.
+// The delegation error reaches only the structured log end-to-end (the A2A FAILED
+// event deliberately keeps a generic errorMessage), so the end-to-end tests could
+// only match needles against the whole captured log buffer: a regression dropping
+// the role from the error while still logging it elsewhere would have passed.
+// executeDelegation is a method in this package, so assert the returned error
+// string directly — no log encoding, no buffer ambiguity.
+func TestExecuteDelegation_ErrorTextNamesTheFailure(t *testing.T) {
+	cases := []struct {
+		name    string
+		del     *fake.Delegator
+		role    string
+		timeout time.Duration
+		want    []string
+	}{
+		{
+			name: "terminal FAILED names the role and the peer task",
+			del: &fake.Delegator{Results: map[string]port.DelegationResult{
+				"engineer": {PeerTaskID: "P1", State: string(sdka2a.TaskStateFailed)},
+			}},
+			role: "engineer",
+			want: []string{"engineer", `peer task "P1"`, string(sdka2a.TaskStateFailed)},
+		},
+		{
+			name: "delegator error is surfaced with the role",
+			del:  &fake.Delegator{Errors: map[string]error{"designer": errors.New(`unknown role "designer"`)}},
+			role: "designer",
+			want: []string{"designer", "unknown role"},
+		},
+		{
+			// The peer task ID is asserted UNESCAPED here. The end-to-end version of
+			// this needle had to spell it `peer task \"P\"` to match slog TextHandler
+			// quoting, coupling a behavioral requirement to the harness's log handler.
+			name: "INPUT_REQUIRED escalation names the role and the peer task",
+			del: &fake.Delegator{Results: map[string]port.DelegationResult{
+				"engineer": {PeerTaskID: "P", State: string(sdka2a.TaskStateInputRequired)},
+			}},
+			role: "engineer",
+			want: []string{"escalated", "chained approval", "not yet wired", "engineer", `peer task "P"`},
+		},
+		{
+			name: "no delegator configured",
+			del:  nil,
+			role: "engineer",
+			want: []string{"delegator"},
+		},
+		{
+			name: "empty target role",
+			del:  &fake.Delegator{},
+			role: "",
+			want: []string{"target role"},
+		},
+		{
+			name:    "timeout names the role and the configured duration",
+			del:     &fake.Delegator{BlockUntilCtxDone: true},
+			role:    "engineer",
+			timeout: 20 * time.Millisecond,
+			want:    []string{"engineer", "timed out", (20 * time.Millisecond).String()},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newDelegatingSupervisor(t, "ceo", nil, tc.del, tc.timeout)
+
+			_, err := h.sup.executeDelegation(context.Background(), tc.role, "build X")
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			for _, needle := range tc.want {
+				if !strings.Contains(err.Error(), needle) {
+					t.Errorf("error must name %q; got: %s", needle, err)
+				}
+			}
+		})
+	}
+}
+
+// TestExecuteDelegation_DefaultTimeoutAppliesWhenUnset — reliability fix.
+// A non-positive Config.DelegateTimeout maps to defaultDelegateTimeout before
+// context.WithTimeout. Nothing observed that: every test passing timeout 0 used a
+// fake that ignores the context on its non-blocking path, so deleting the fallback
+// — leaving context.WithTimeout(ctx, 0), an already-expired deadline — kept them
+// all green. The fallback becomes load-bearing once the real client is wired, so
+// assert the deadline the Delegate call actually receives.
+func TestExecuteDelegation_DefaultTimeoutAppliesWhenUnset(t *testing.T) {
+	del := &fake.Delegator{Results: map[string]port.DelegationResult{
+		"engineer": {PeerTaskID: "P1", State: string(sdka2a.TaskStateCompleted), Output: "ok"},
+	}}
+	h := newDelegatingSupervisor(t, "ceo", nil, del, 0)
+
+	if _, err := h.sup.executeDelegation(context.Background(), "engineer", "build X"); err != nil {
+		t.Fatalf("executeDelegation: unexpected error: %v", err)
+	}
+
+	deadline, ok := del.ObservedDeadline()
+	if !ok {
+		t.Fatal("Delegate must receive a context carrying the delegation deadline")
+	}
+	// A generous window: wide enough not to flake on a slow runner, tight enough
+	// that an already-expired or wildly different deadline fails.
+	if remaining := time.Until(deadline); remaining <= 9*time.Minute || remaining > defaultDelegateTimeout {
+		t.Errorf("remaining time on the default deadline = %s, want (9m, %s]", remaining, defaultDelegateTimeout)
+	}
+}
+
+// TestExecuteDelegation_ConfiguredTimeoutBoundsTheCall — reliability fix.
+// The counterpart to the default: an explicit DelegateTimeout must be the deadline
+// handed to Delegate, not silently replaced by the fallback.
+func TestExecuteDelegation_ConfiguredTimeoutBoundsTheCall(t *testing.T) {
+	const timeout = 2 * time.Second
+	del := &fake.Delegator{Results: map[string]port.DelegationResult{
+		"engineer": {PeerTaskID: "P1", State: string(sdka2a.TaskStateCompleted), Output: "ok"},
+	}}
+	h := newDelegatingSupervisor(t, "ceo", nil, del, timeout)
+
+	if _, err := h.sup.executeDelegation(context.Background(), "engineer", "build X"); err != nil {
+		t.Fatalf("executeDelegation: unexpected error: %v", err)
+	}
+
+	deadline, ok := del.ObservedDeadline()
+	if !ok {
+		t.Fatal("Delegate must receive a context carrying the delegation deadline")
+	}
+	if remaining := time.Until(deadline); remaining <= timeout/2 || remaining > timeout {
+		t.Errorf("remaining time on the configured deadline = %s, want (%s, %s]", remaining, timeout/2, timeout)
+	}
+}
+
+// TestExecuteDelegation_ParentCancellationIsNotReportedAsTimeout — reliability fix.
+// executeDelegation only blames the delegation timeout when the PARENT context is
+// still live (errors.Is(err, DeadlineExceeded) && ctx.Err() == nil). That guard was
+// unexercised. A parent deadline far shorter than DelegateTimeout must not produce
+// "timed out after 1h0m0s", because the delegation timeout was never the cause.
+func TestExecuteDelegation_ParentCancellationIsNotReportedAsTimeout(t *testing.T) {
+	const delegateTimeout = time.Hour
+	del := &fake.Delegator{BlockUntilCtxDone: true}
+	h := newDelegatingSupervisor(t, "ceo", nil, del, delegateTimeout)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	_, err := h.sup.executeDelegation(ctx, "engineer", "build X")
+	if err == nil {
+		t.Fatal("a canceled parent context must fail the delegation")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, delegateTimeout.String()) || strings.Contains(msg, "timed out") {
+		t.Errorf("parent cancellation must not be blamed on the delegation timeout; got: %s", msg)
+	}
+	// The generic failure form instead: role named, underlying cause wrapped.
+	if !strings.Contains(msg, "engineer") || !strings.Contains(msg, "failed") {
+		t.Errorf("error must name the role and report a failure; got: %s", msg)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("the parent's cause must stay wrapped; got: %s", msg)
 	}
 }
 
@@ -290,7 +567,7 @@ func TestExecuteAction_DelegationWithoutDelegatorFailsExplicitly(t *testing.T) {
 
 	last, rec := h.run(t, "task-nodelegator-1")
 
-	h.assertFailedNaming(t, last, rec, "delegator")
+	h.assertFailed(t, last, rec)
 }
 
 // TestDelegateTask_FromNonAllowedRoleIsHardDenied — task 6.14.
@@ -354,7 +631,7 @@ func TestResume_DelegateTaskWithoutPersistedTargetFailsExplicitly(t *testing.T) 
 		t.Fatalf("store.Load: %v", err)
 	}
 
-	h.assertFailedNaming(t, last, rec, "target")
+	h.assertFailed(t, last, rec)
 	if del.CallCount() != 0 {
 		t.Errorf("must not delegate to an empty role; got %d Delegate calls", del.CallCount())
 	}
