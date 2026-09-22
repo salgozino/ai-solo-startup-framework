@@ -312,24 +312,37 @@ func (s *Supervisor) executeResume(
 
 	token := s.cfg.PolicyEngine.MintApprovalToken()
 
-	// A resumed delegate_task has no persisted target role (TaskRecord carries only
-	// PendingIntentKind/PendingIntentBody), so executeDelegation fails it explicitly;
-	// the shipped policy classifies delegate_task as safe, so this path is unreachable
-	// unless an operator marks it risky.
-	outcome, err := s.executeAction(ctx, rec.PendingIntentKind, rec.PendingIntentBody, "", token)
+	// The target role is persisted alongside the kind and body, so an approved
+	// delegate_task can still reach its peer after the park.
+	outcome, err := s.executeAction(ctx, rec.PendingIntentKind, rec.PendingIntentBody, rec.PendingIntentTarget, token)
 	if err != nil {
 		log.Error("resume.action.failed", "intent", rec.PendingIntentKind, "error", err)
 		s.markFailed(rec)
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 		return
 	}
-	// Gated on Delegated, not on a non-empty Output — see executeWithPolicy's
-	// Permit branch for why an empty peer result must still replace the agent's text.
+	// Gated on Delegated, not on a non-empty Output — see runIntents' Permit
+	// branch for why an empty peer result must still replace the agent's text.
 	if outcome.Delegated {
 		rec.Output = outcome.Output
 	}
+	log.Info("resume.action.done", "intent", rec.PendingIntentKind)
 
-	log.Info("resume.completed", "intent", rec.PendingIntentKind)
+	// The approved intent is spent: clear it before running whatever the same
+	// provider turn emitted after it, so a completion leaves no stale pending
+	// intent behind and a re-park writes a fresh one.
+	remaining := rec.RemainingIntents
+	rec.PendingIntentKind = ""
+	rec.PendingIntentBody = ""
+	rec.PendingIntentTarget = ""
+	rec.RemainingIntents = nil
+
+	rec, halted := s.runIntents(ctx, execCtx, yield, rec, remaining)
+	if halted {
+		return
+	}
+
+	log.Info("resume.completed")
 	rec.State = string(a2a.TaskStateCompleted)
 	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
 	s.notify()
@@ -362,10 +375,45 @@ func (s *Supervisor) executeWithPolicy(
 	)
 	rec.Output = result.Output
 
-	// Classify each action intent.
-	for _, intent := range result.ActionIntents {
-		portIntent := policy.ActionIntent{Kind: intent.Kind}
-		classResult := s.cfg.PolicyEngine.Classify(portIntent, s.cfg.Role, s.cfg.PolicyConfig)
+	rec, halted := s.runIntents(ctx, execCtx, yield, rec, toPendingIntents(result.ActionIntents))
+	if halted {
+		return
+	}
+
+	// All intents handled (or none) → COMPLETED. The terminal event carries the
+	// task output so a delegating peer can read it back via GetTask (design D9).
+	log.Info("task.completed", "state", "COMPLETED")
+	rec.State = string(a2a.TaskStateCompleted)
+	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
+	s.notify()
+	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, outputMessage(rec.Output)), nil) //nolint
+}
+
+// runIntents classifies and executes intents in the order the provider emitted
+// them, routing HardDeny → REJECTED, Escalate → INPUT_REQUIRED, Permit → gateway
+// or delegation port.
+//
+// It returns the updated record and whether the walk halted. A halt means a
+// terminal or parked status event was already yielded and the record already
+// persisted, so the caller must return without completing the task.
+//
+// An escalation persists the intents that follow it on the record rather than
+// dropping them; executeResume feeds that slice back here after the human
+// verdict, which re-parks naturally when it meets another risky intent. This is
+// shared by the first-run and resume paths precisely so both classify intents
+// under the same rules — a resumed intent is not exempt from policy.
+func (s *Supervisor) runIntents(
+	ctx context.Context,
+	execCtx *a2asrv.ExecutorContext,
+	yield func(a2a.Event, error) bool,
+	rec TaskRecord,
+	intents []PendingIntent,
+) (TaskRecord, bool) {
+	log := s.log(rec.TaskID)
+
+	for i, intent := range intents {
+		classResult := s.cfg.PolicyEngine.Classify(
+			policy.ActionIntent{Kind: intent.Kind}, s.cfg.Role, s.cfg.PolicyConfig)
 
 		log.Info("intent.classified",
 			"kind", intent.Kind,
@@ -375,19 +423,25 @@ func (s *Supervisor) executeWithPolicy(
 		switch classResult.Kind { //nolint:exhaustive
 		case policy.HardDeny:
 			// REJECTED — not FAILED. Terminal, no escalation, no send, no token.
-			log.Warn("intent.hard_deny", "kind", intent.Kind)
+			// The intents after a denied one die with it: the turn is over.
+			log.Warn("intent.hard_deny", "kind", intent.Kind, "dropped_intents", len(intents)-i-1)
 			rec.State = string(a2a.TaskStateRejected)
+			rec.RemainingIntents = nil
 			_ = s.cfg.Store.Save(s.cfg.Addr, rec)
 			s.notify()
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateRejected, nil), nil) //nolint
-			return
+			return rec, true
 
 		case policy.Escalate:
-			// Persist as INPUT_REQUIRED with the pending intent kind and body so the resume path knows what to approve.
-			log.Info("intent.escalate", "kind", intent.Kind)
+			// Persist as INPUT_REQUIRED with the pending intent's kind, body and
+			// target so the resume path knows what to approve and can reach the
+			// peer, plus everything still queued behind it.
+			log.Info("intent.escalate", "kind", intent.Kind, "remaining_intents", len(intents)-i-1)
 			rec.State = string(a2a.TaskStateInputRequired)
 			rec.PendingIntentKind = intent.Kind
-			rec.PendingIntentBody = extractBody(intent)
+			rec.PendingIntentBody = intent.Body
+			rec.PendingIntentTarget = intent.Target
+			rec.RemainingIntents = remainingAfter(intents, i)
 
 			payload, _ := policy.MarshalPayload(policy.EscalationPayload{
 				ActionKind: intent.Kind,
@@ -401,16 +455,17 @@ func (s *Supervisor) executeWithPolicy(
 			// register json.RawMessage / jsontext.Value with gob.
 			msg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(string(payload)))
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateInputRequired, msg), nil) //nolint
-			return
+			return rec, true
 
 		case policy.Permit:
 			log.Info("action.execute", "kind", intent.Kind)
-			outcome, err := s.executeAction(ctx, intent.Kind, extractBody(intent), extractTarget(intent), classResult.ApprovalToken)
+			outcome, err := s.executeAction(ctx, intent.Kind, intent.Body, intent.Target, classResult.ApprovalToken)
 			if err != nil {
 				log.Error("action.failed", "kind", intent.Kind, "error", err)
+				rec.RemainingIntents = nil
 				s.markFailed(rec)
 				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
-				return
+				return rec, true
 			}
 			if outcome.Delegated {
 				// The peer's terminal output becomes the delegating task's output
@@ -424,13 +479,7 @@ func (s *Supervisor) executeWithPolicy(
 		}
 	}
 
-	// All intents handled (or none) → COMPLETED. The terminal event carries the
-	// task output so a delegating peer can read it back via GetTask (design D9).
-	log.Info("task.completed", "state", "COMPLETED")
-	rec.State = string(a2a.TaskStateCompleted)
-	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
-	s.notify()
-	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, outputMessage(rec.Output)), nil) //nolint
+	return rec, false
 }
 
 // effectiveBudget returns the context budget to use for context assembly.
@@ -572,6 +621,38 @@ func messageText(msg *a2a.Message) string {
 		}
 	}
 	return ""
+}
+
+// toPendingIntents converts a provider turn's intents into the persisted form
+// the supervisor executes and stores. The order the provider chose is preserved:
+// reordering intents to dodge an escalation would silently rewrite what the
+// agent asked for.
+func toPendingIntents(intents []port.ActionIntent) []PendingIntent {
+	if len(intents) == 0 {
+		return nil
+	}
+	out := make([]PendingIntent, 0, len(intents))
+	for _, intent := range intents {
+		out = append(out, PendingIntent{
+			Kind:   intent.Kind,
+			Body:   extractBody(intent),
+			Target: extractTarget(intent),
+		})
+	}
+	return out
+}
+
+// remainingAfter returns a copy of the intents queued after index i, or nil when
+// none are. The copy matters: the slice is persisted on the record and outlives
+// the loop walking it, so it must not alias the caller's backing array.
+func remainingAfter(intents []PendingIntent, i int) []PendingIntent {
+	rest := intents[i+1:]
+	if len(rest) == 0 {
+		return nil
+	}
+	out := make([]PendingIntent, len(rest))
+	copy(out, rest)
+	return out
 }
 
 // extractBody reads the "body" key from intent.Payload as a string.

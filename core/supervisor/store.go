@@ -31,8 +31,33 @@ type TaskRecord struct {
 	// approved. Stored alongside PendingIntentKind; zero-value safe (omitempty
 	// preserves backward compatibility with records written before this field existed).
 	PendingIntentBody string `json:"pending_intent_body,omitempty"`
+	// PendingIntentTarget is the target role of the pending intent, set only for
+	// kinds that address a peer (delegate_task). Without it an approved
+	// delegation has no role to reach and fails explicitly. Zero-value safe:
+	// an absent target reproduces the pre-existing empty-target behaviour.
+	PendingIntentTarget string `json:"pending_intent_target,omitempty"`
+	// RemainingIntents holds the action intents the provider emitted after the
+	// one the task is parked on. They are persisted rather than dropped, and the
+	// resume path runs them in order once the pending intent is approved.
+	// Zero-value safe: a nil slice means the turn had nothing left to run.
+	RemainingIntents []PendingIntent `json:"remaining_intents,omitempty"`
 	// Output is the result produced by the provider when the task completes.
 	Output string `json:"output,omitempty"`
+}
+
+// PendingIntent is the persisted form of a port.ActionIntent. It carries the
+// three things the supervisor needs to execute the intent later: the action
+// kind, the message body, and the target role for peer-addressed kinds.
+// It deliberately does not persist the whole payload map: only these keys are
+// ever read back, and a narrow record keeps the on-disk schema explicit.
+type PendingIntent struct {
+	// Kind is the action identifier declared in risk_policy (e.g. "telegram_send").
+	Kind string `json:"kind"`
+	// Body is the message body carried by the intent payload.
+	Body string `json:"body,omitempty"`
+	// Target is the peer role addressed by the intent, empty for kinds that
+	// address no peer.
+	Target string `json:"target,omitempty"`
 }
 
 // ErrTaskNotFound is returned by Store.Load when the task does not exist.
