@@ -6,6 +6,7 @@ package port_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/salgozino/ai-solo-startup-framework/core/address"
@@ -82,113 +83,37 @@ func TestProvider_CompleteError_Idempotent(t *testing.T) {
 	}
 }
 
-// TestProvider_SendMessage_NoWait verifies SendMessage(wait=false) returns taskID immediately.
-func TestProvider_SendMessage_NoWait(t *testing.T) {
-	fp := &fake.Provider{ReturnTaskID: "task-42"}
-	target := mustAddr(t, "worker", "acme")
-
-	taskID, err := fp.SendMessage(context.Background(), target, "hello", false)
-	if err != nil {
-		t.Fatalf("SendMessage(wait=false): %v", err)
-	}
-	if taskID != "task-42" {
-		t.Fatalf("expected taskID %q, got %q", "task-42", taskID)
-	}
-	if fp.SendMessageCallCount() != 1 {
-		t.Fatalf("expected 1 SendMessage call, got %d", fp.SendMessageCallCount())
-	}
-}
-
-// TestProvider_SendMessage_Wait verifies SendMessage(wait=true) uses the same return path.
-func TestProvider_SendMessage_Wait(t *testing.T) {
-	fp := &fake.Provider{ReturnTaskID: "task-99"}
-	target := mustAddr(t, "ceo", "acme")
-
-	taskID, err := fp.SendMessage(context.Background(), target, "please analyze", true)
-	if err != nil {
-		t.Fatalf("SendMessage(wait=true): %v", err)
-	}
-	if taskID != "task-99" {
-		t.Fatalf("expected %q, got %q", "task-99", taskID)
-	}
-}
-
-// TestProvider_SendMessage_Error verifies error propagation.
-func TestProvider_SendMessage_Error(t *testing.T) {
-	fp := &fake.Provider{ReturnErr: errors.New("network: unreachable")}
-	target := mustAddr(t, "worker", "acme")
-
-	_, err := fp.SendMessage(context.Background(), target, "hi", false)
-	if err == nil {
-		t.Fatal("expected error from SendMessage, got nil")
-	}
-}
-
-// TestProvider_SendMessageStream verifies the stream channel closes with a Done event.
-func TestProvider_SendMessageStream(t *testing.T) {
-	fp := &fake.Provider{
-		ReturnStream: []port.StreamEvent{
-			{TaskID: "t1", Text: "chunk 1"},
-			{TaskID: "t1", Text: "chunk 2"},
-		},
-	}
-	target := mustAddr(t, "worker", "acme")
-
-	ch, err := fp.SendMessageStream(context.Background(), target, "stream me")
-	if err != nil {
-		t.Fatalf("SendMessageStream: %v", err)
+// TestProvider_MethodSet verifies port.Provider is scoped to local execution and lifecycle
+// reporting, not A2A networking: it declares exactly Complete, CompleteError, SendTask, RunTask,
+// and Capabilities — no SendMessage, SendMessageStream, or ResolveAgent method is present.
+// Spec: provider-adapter — "port.Provider's method set excludes A2A network operations".
+func TestProvider_MethodSet(t *testing.T) {
+	want := map[string]bool{
+		"Complete":      true,
+		"CompleteError": true,
+		"SendTask":      true,
+		"RunTask":       true,
+		"Capabilities":  true,
 	}
 
-	var events []port.StreamEvent
-	for e := range ch {
-		events = append(events, e)
+	providerType := reflect.TypeOf((*port.Provider)(nil)).Elem()
+	if got := providerType.NumMethod(); got != len(want) {
+		names := make([]string, got)
+		for i := range got {
+			names[i] = providerType.Method(i).Name
+		}
+		t.Fatalf("expected exactly %d methods %v, got %d: %v", len(want), want, got, names)
 	}
-
-	// Expect the two canned events plus the auto-appended Done sentinel.
-	if len(events) < 3 {
-		t.Fatalf("expected ≥3 events (2 content + 1 Done), got %d", len(events))
+	for i := range providerType.NumMethod() {
+		name := providerType.Method(i).Name
+		if !want[name] {
+			t.Errorf("unexpected A2A-networking method on port.Provider: %s", name)
+		}
 	}
-	last := events[len(events)-1]
-	if !last.Done {
-		t.Fatalf("last event must be Done, got %+v", last)
-	}
-}
-
-// TestProvider_SendMessageStream_Error verifies error return when ReturnErr is set.
-func TestProvider_SendMessageStream_Error(t *testing.T) {
-	fp := &fake.Provider{ReturnErr: errors.New("stream: broken")}
-	target := mustAddr(t, "worker", "acme")
-
-	ch, err := fp.SendMessageStream(context.Background(), target, "stream")
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if ch != nil {
-		t.Fatal("channel must be nil when error is returned")
-	}
-}
-
-// TestProvider_ResolveAgent_Known verifies a configured address is returned.
-func TestProvider_ResolveAgent_Known(t *testing.T) {
-	expected := mustAddr(t, "worker", "acme")
-	fp := &fake.Provider{ReturnAddress: expected}
-
-	got, err := fp.ResolveAgent(context.Background(), "engineer")
-	if err != nil {
-		t.Fatalf("ResolveAgent(known): %v", err)
-	}
-	if got != expected {
-		t.Fatalf("expected %q, got %q", expected, got)
-	}
-}
-
-// TestProvider_ResolveAgent_Unknown verifies an error is returned for an unknown role.
-func TestProvider_ResolveAgent_Unknown(t *testing.T) {
-	fp := &fake.Provider{ReturnErr: errors.New("provider: role \"janitor\" not registered")}
-
-	_, err := fp.ResolveAgent(context.Background(), "janitor")
-	if err == nil {
-		t.Fatal("expected error for unknown role, got nil")
+	for name := range want {
+		if _, ok := providerType.MethodByName(name); !ok {
+			t.Errorf("port.Provider is missing required method: %s", name)
+		}
 	}
 }
 

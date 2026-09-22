@@ -114,14 +114,11 @@ func TestIntegration_CEODelegatesToWorkerOverRealWire(t *testing.T) {
 	// CEO has no tasks yet (no message was sent to it), but ListTasks must work.
 	_ = listResp
 
-	// Verify worker provider was called (received the delegated task).
-	if workerProvider.SendMessageCallCount() == 0 {
-		// Worker's supervisor provider received the call from the a2a handler.
-		// The provider call may or may not have happened depending on the provider
-		// injection — for this test the fake provider returns success without actually
-		// calling a peer.
-		t.Log("note: fake provider did not call SendMessage (expected in integration mode)")
-	}
+	// port.Provider no longer declares SendMessage (provider-adapter delta,
+	// agent-delegation-over-a2a Phase 1): the fake.Provider.SendMessageCallCount
+	// this test used to log against no longer exists. This test itself is retargeted
+	// to a real end-to-end delegation assertion in a later slice of this change
+	// (design.md "PR Slicing" #7, deferred here to keep Phase 1 pure deletion).
 
 	t.Logf("Worker result type: %T", result)
 	t.Logf("CEO ListTasks: %d tasks", len(listResp.Tasks))
