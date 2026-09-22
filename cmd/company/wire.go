@@ -199,6 +199,11 @@ type wireOptions struct {
 	// Used in tests that do not need real MCP wiring (they typically also set
 	// providerOverride, bypassing per-adapter MCP registry injection entirely).
 	mcpServer *transmcp.Server
+	// delegateTimeout overrides supervisor.Config.DelegateTimeout for every
+	// materialized agent's Delegator (design D10). Zero uses the supervisor's own
+	// 10-minute default. Exposed here — the composition root — per task 7.8;
+	// there is no CLI flag or env var for it yet.
+	delegateTimeout time.Duration
 }
 
 // mcpServerAddr safely reads srv.Addr(), converting a panic from a never-Start()ed
@@ -307,6 +312,13 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 		return nil, fmt.Errorf("wire: %w", err)
 	}
 
+	// Construct the delegation client once, shared by every supervisor in this
+	// company. It resolves dir.BaseURL lazily on each Delegate/PeerTaskState
+	// call, so building it before the per-agent loop below finishes binding
+	// every role is safe — no delegation happens until a supervisor actually
+	// receives a Permitted delegate_task intent (task 7.8; design D8).
+	delegator := transa2a.NewClient(dir, cfg.Tenant, authToken, nil)
+
 	runtimes = make([]*agentRuntime, 0, len(cfg.Agents))
 
 	for _, agCfg := range cfg.Agents {
@@ -365,13 +377,15 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 		}
 
 		sup, err := supervisor.New(supervisor.Config{
-			Addr:         addr,
-			Provider:     prov,
-			Store:        store,
-			PolicyEngine: policyEngine,
-			Gateway:      gw,
-			Role:         agCfg.Role,
-			PolicyConfig: cfg.RiskPolicy,
+			Addr:            addr,
+			Provider:        prov,
+			Store:           store,
+			PolicyEngine:    policyEngine,
+			Gateway:         gw,
+			Delegator:       delegator,
+			DelegateTimeout: opts.delegateTimeout,
+			Role:            agCfg.Role,
+			PolicyConfig:    cfg.RiskPolicy,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("wire: supervisor for %q: %w", agCfg.Name, err)
