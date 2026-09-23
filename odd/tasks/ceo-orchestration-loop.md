@@ -450,6 +450,11 @@ Branch: `feat/ceo-orchestration-loop-pr2-input-delivery`. Commits:
 - `dd1ae17` `fix(claudecode): deliver task input on stdin instead of argv` (T4 + T5)
 - `1fa1b0d` `docs(odd): record Slice 2 outcome and the opencode argv won't-do` (this entry,
   plus the `AGENTS.md` provider-compatibility note)
+- `79f16ee` `docs(odd): record the Slice 2 docs commit SHA as evidence`
+- `bf53ff5` `fix(claudecode): make the input-delivery tests and notes say what the code does`
+  (post-review follow-up; closes four advisory findings — see the native review entry below)
+- `a7701b3` `docs(odd): record the Slice 2 native review outcome and its follow-ups`
+  (the `### Slice 2 — native review` entry below)
 
 **T4 — RED observed.** New file `adapters/claudecode/input_delivery_test.go`, two tests,
 added with no production change. `go test ./adapters/claudecode/ -run 'TestRunTask_DeliversInputLargerThanArgvCeiling|TestRunTask_OversizedInputIsNotOnArgv' -v`,
