@@ -56,8 +56,9 @@ The provider adapters drive external agent CLIs as subprocesses and parse their 
   `--output-format stream-json`. It never requests `--json-schema`. Its `--mcp-config` file
   uses the Claude-shaped `mcpServers` envelope, which is unrelated to opencode's schema above.
   Input delivery: the task input is written to the child's **stdin**, never argv — `claude -p`
-  reads the prompt from stdin when no positional prompt argument is given. This is what keeps
-  a growing input below no ceiling at all; argv would cap it at 131072 bytes (see opencode above).
+  reads the prompt from stdin when no positional prompt argument is given. stdin imposes no
+  per-argument ceiling at all, while argv caps a single argument at 131072 bytes, so a growing
+  input (a multi-round transcript) stays deliverable here but not on argv (see opencode above).
 
 Both adapters receive MCP configuration ephemerally per invocation — claude through a `0600`
 temp file removed on exit, opencode through the subprocess-scoped `OPENCODE_CONFIG_CONTENT`

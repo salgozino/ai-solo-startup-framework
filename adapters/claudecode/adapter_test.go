@@ -1,7 +1,8 @@
 // Package claudecode_test contains threat-matrix RED tests for the Claude Code adapter.
 // These tests cover the provider-subprocess threat cases from design.md:
 //
-//	(a) argv-as-slice: shell metacharacters in input are literal data, never interpreted
+//	(a) no shell: shell metacharacters in input are literal data, never interpreted
+//	    (flags are an argv slice; the input itself is written to the child's stdin)
 //	(b) hung child killed after ctx deadline → FAILED
 //	(c) oversized output truncated with marker before parse
 //	(d) non-zero exit → failure outcome, not success
@@ -94,16 +95,21 @@ func helperBinary(t *testing.T) string {
 	return bin
 }
 
-// TestArgvSlice_ShellMetacharactersAreLiteral verifies threat-matrix case (a):
-// shell metacharacters in input do not alter the invocation — they are passed as literal data.
+// TestInput_ShellMetacharactersAreNeverInterpreted verifies threat-matrix case (a):
+// shell metacharacters in input do not alter the invocation — no shell ever sees the input
+// bytes, so they reach the child as literal data.
 //
-// If the adapter used "sh -c", the shell would execute `echo INJECTED` and `rm -rf /` as
-// separate commands, producing a multi-line output where INJECTED appears on its own line.
-// The adapter never builds a shell command line: the flags are an argv slice and the input
-// is written to the child's stdin as opaque bytes (Slice 2 moved it there off argv), so
-// fakeclaude echoes it verbatim on a single line. No newline within the output means no
-// command was interpreted.
-func TestArgvSlice_ShellMetacharactersAreLiteral(t *testing.T) {
+// If the adapter used "sh -c", the shell would execute `echo INJECTED` as a separate
+// command, producing a multi-line output where INJECTED appears on its own line. The
+// adapter never builds a shell command line: the flags are an argv slice and, since Slice 2
+// moved the prompt off argv, the input is written to the child's stdin as opaque bytes.
+// fakeclaude therefore echoes it verbatim on a single line. No newline within the output
+// means no command was interpreted.
+//
+// The test was named TestArgvSlice_ShellMetacharactersAreLiteral while the input travelled
+// on argv; the name was corrected because the input no longer rides argv at all, while the
+// property under test — nothing interprets those bytes — is unchanged.
+func TestInput_ShellMetacharactersAreNeverInterpreted(t *testing.T) {
 	bin := helperBinary(t)
 	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "", "")
 
@@ -115,7 +121,7 @@ func TestArgvSlice_ShellMetacharactersAreLiteral(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTask with metachar input: unexpected error: %v", err)
 	}
-	// With argv-as-slice: fakeclaude echoes the full string as one token, no newline inside.
+	// With no shell in the path: fakeclaude echoes the stdin bytes verbatim, no newline inside.
 	// The output has an "iso:1|" prefix (isolation flags are always present) then the literal input.
 	expected := "iso:1|" + maliciousInput
 	if result.Output != expected {
