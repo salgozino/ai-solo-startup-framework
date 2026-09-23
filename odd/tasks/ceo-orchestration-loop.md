@@ -117,6 +117,9 @@ Out of scope: policy engine semantics, the Telegram gateway, adding new gateways
 
 ## Tasks
 
+Marker legend: `[ ]` not started · `[x]` done · `[~]` deliberately not done (won't do), with
+the decision recorded under Progress.
+
 Slice 1 — transcript persistence
 - [x] **T1** — RED: test that a `TaskRecord` round-trips a non-empty turn list and that
       literal pre-change JSON still loads with the new field as zero value.
@@ -542,14 +545,196 @@ conversations must be configured on the `claude` adapter. Recorded in `AGENTS.md
 - `go test ./...` — all 12 packages `ok`, 1 `[no test files]`
 - `go test -race ./adapters/...` — `claudecode` ok 26.119s, `opencode` ok 13.587s
 
+### Slice 2 — native review
+
+Lineage `review-d4381466f584182d`, four lenses (`review-risk`, `review-resilience`,
+`review-readability`, `review-reliability`), risk `high`, 6 files / 333 lines. Result:
+**approved**, authority acknowledged and burned. **Zero blockers, zero corrections opened.**
+All 18 findings are advisory and non-blocking.
+
+`review-risk` returned **no findings at all**, and explicitly recorded that the change
+*improves* data-exposure posture: the task input no longer appears in `/proc/<pid>/cmdline`
+or in `ps` output, because it is no longer an element of the child's command line.
+
+Follow-up commit: `bf53ff5` `fix(claudecode): make the input-delivery tests and notes say
+what the code does`.
+
+**Closed — three findings where a comment asserted something the code did not do.**
+
+- **R2-agents-claude-note-garbled** (WARNING, `AGENTS.md:59-60`) — **closed**. The sentence
+  *"This is what keeps a growing input below no ceiling at all"* was a garbled double
+  negative, and it is the one sentence a configurator reads to learn why stdin was chosen.
+  Rewritten to say plainly that stdin imposes no per-argument ceiling at all, while argv caps
+  a single argument at 131072 bytes, so a growing input stays deliverable on stdin and not on
+  argv.
+- **R2-pagesize-claim-not-supported-by-fixture** (WARNING) + **R3-ceiling-constant-platform-bound**
+  (WARNING), `adapters/claudecode/input_delivery_test.go` — **closed together**, because they
+  are two faces of one hardcoded constant. The comment claimed the 2x sizing kept the test
+  meaningful on a kernel with a larger `PAGE_SIZE`. It did not: the fixture *and* its own
+  self-check guard both derived from the same hardcoded `32 * 4096`, so on a 16 KiB-page
+  kernel the fixture would sit *under* the real ceiling and the test would degrade into a
+  silent no-op instead of failing. The same constant was also plainly Linux-only — macOS and
+  the BSDs budget argv as a total with no per-argument cap, so
+  `TestRunTask_DeliversInputLargerThanArgvCeiling` would pass there even with the prompt back
+  on argv.
+
+  Both halves of the honest fix were taken rather than one: `maxArgStrLen` now derives from
+  the host (`32 * os.Getpagesize()`), and the delivery test carries a
+  `runtime.GOOS != "linux"` skip that names the premise it needs. The comments now describe
+  exactly that and nothing more. `TestRunTask_OversizedInputIsNotOnArgv` is structural — it
+  inspects the argv the child received and depends on no kernel ceiling — and keeps running
+  on every GOOS, as required.
+
+  One consequence surfaced while fixing it and was fixed too: the delivery test pinned
+  `OutputLimit: 1 << 20` while the fixture is `2 * maxArgStrLen`. On a 16 KiB-page host the
+  fixture becomes 1 MiB plus markers, so the echoed output would be *truncated* and
+  truncation — not delivery — would decide the byte-for-byte comparison. `OutputLimit` now
+  derives from the fixture length.
+- **R2-argv-slice-test-name-now-misleading** (WARNING, `adapters/claudecode/adapter_test.go:102-105`)
+  — **closed**. `TestArgvSlice_ShellMetacharactersAreLiteral` was named after a mechanism it
+  can no longer exercise, since the metacharacter string travels on stdin. Renamed to
+  `TestInput_ShellMetacharactersAreNeverInterpreted`, which is what it actually proves: no
+  shell ever sees the input bytes. Its comment and the file's threat-matrix header were
+  corrected to match, and the old name is recorded in the comment so the rename is traceable.
+- **R2-undefined-checkbox-marker** (SUGGESTION) — **closed**. The `[~]` marker on T6 was
+  undefined beside `[ ]` and `[x]`. A marker legend is now stated under `## Tasks`; `[~]`
+  means "deliberately not done, decision recorded under Progress", which is exactly T6.
+
+**Evidence for the scoping change.** The rename and the comment corrections change no
+assertion, so no RED is claimed for them. The `runtime.GOOS` skip *does* change where a test
+runs, so it was proven reachable rather than asserted — the guard was temporarily inverted to
+`runtime.GOOS != "plan9"`:
+
+```
+=== RUN   TestRunTask_DeliversInputLargerThanArgvCeiling
+    input_delivery_test.go:67: MAX_ARG_STRLEN is a Linux per-argument ceiling; on linux argv is budgeted as a total, so an oversized single argument does not fail at execve and this test cannot detect argv delivery
+--- SKIP: TestRunTask_DeliversInputLargerThanArgvCeiling (0.00s)
+PASS
+ok  	github.com/salgozino/ai-solo-startup-framework/adapters/claudecode	0.005s
+```
+
+The mutation was reverted; the guard reads `runtime.GOOS != "linux"` again, and the committed
+diff contains no `plan9`.
+
+The derived ceiling was measured on the host rather than assumed:
+`os.Getpagesize()=4096  32*PAGE_SIZE=131072`, with `getconf PAGESIZE` agreeing at `4096`.
+That 131072 is the same boundary the T4 RED above hit with `E2BIG`, so the derived value is
+the real ceiling on this host, not a number that happens to match.
+
+Renamed test green and both delivery tests still green:
+
+```
+=== RUN   TestInput_ShellMetacharactersAreNeverInterpreted
+--- PASS: TestInput_ShellMetacharactersAreNeverInterpreted (0.42s)
+=== RUN   TestRunTask_DeliversInputLargerThanArgvCeiling
+--- PASS: TestRunTask_DeliversInputLargerThanArgvCeiling (0.43s)
+=== RUN   TestRunTask_OversizedInputIsNotOnArgv
+--- PASS: TestRunTask_OversizedInputIsNotOnArgv (0.43s)
+PASS
+ok  	github.com/salgozino/ai-solo-startup-framework/adapters/claudecode	1.288s
+```
+
+The old name is gone rather than shadowed —
+`go test ./adapters/claudecode/ -run '^TestArgvSlice_ShellMetacharactersAreLiteral$' -v`:
+
+```
+testing: warning: no tests to run
+PASS
+ok  	github.com/salgozino/ai-solo-startup-framework/adapters/claudecode	0.004s [no tests to run]
+```
+
+**Open follow-up — the premise itself is unproven against the real CLI.** This is the group
+that matters most, because the whole slice rests on it.
+
+- **R3-real-cli-stdin-contract-unproven** (WARNING) — **open**. The premise that `claude -p`
+  reads the prompt from stdin when no positional is given is proven only against
+  `fakeclaude`, whose stdin support was authored in this same candidate. The suite is
+  therefore self-consistent, not evidence about the real CLI: the fake was taught the
+  behaviour the adapter needs, and then the adapter was tested against the fake. The recorded
+  mutation (reverting `RunTask` to `args = append(args, input)`) proves the adapter cannot
+  regress to argv; it does **not** prove the installed CLI honours stdin. Closing it needs an
+  opt-in, build-tagged integration test against the installed `claude`, skipped by default so
+  CI stays hermetic.
+- **R4-stdin-delivery-has-no-failure-signal** (WARNING) — **open**, and the reason the item
+  above is not merely academic. If a future CLI build stops reading stdin under `-p`,
+  `RunTask` either returns a *successful* `ProviderResult` built from an empty prompt, or
+  blocks until the ctx deadline. There is no runtime confirmation that the child consumed the
+  bytes, so the failure mode is a confident wrong answer or a timeout, not a diagnosable
+  error.
+
+**Open follow-up — the failure moved, it did not disappear.**
+
+- **R4-input-size-now-unbounded** (WARNING) — **open**. The old 131072-byte argv ceiling
+  failed locally in milliseconds at zero token cost, before the CLI ran. The same oversized
+  transcript now ships to the provider and fails at the model's context limit, after a full
+  upload and real token spend. Nothing caps the input any more. This is a deliberate
+  consequence of the slice, not a regression to fix blindly, and it belongs with the Slice 3
+  transcript work — T8 is what actually makes the input grow.
+
+**Open follow-up — the test double can lie, and one path makes it lie silently.**
+
+- **R2-fake-positional-catchall-controls-stdin** / **R3-fake-prompt-source-fragile** (WARNING)
+  — **open**. `positionalSeen` is set by the argv loop's `default` catch-all, so *any* token
+  the fake does not recognise — including the value of a flag added later — marks a positional
+  and silently suppresses the stdin read. The result is a fake that reports an empty prompt
+  while the adapter is correct, and the failure points at the wrong side. An explicit
+  unknown-argument fatal in the fake would keep it diagnosable.
+- **R2-fake-stdin-read-error-dropped** / **R3-fake-stdin-read-errors-swallowed** /
+  **R4-fake-swallows-stdin-read-error** (WARNING) — **open**. The fake discards both the error
+  and any partial bytes returned by `io.ReadAll`, which collapses "truncated delivery" into
+  "missing delivery". That is precisely the distinction the `HEAD-MARKER`/`TAIL-MARKER`
+  bookends exist to expose.
+- **R4-oversized-input-test-has-no-deadline** (SUGGESTION) — **open**. The oversized test
+  drives the blocking stdin path with `context.Background()`, so the very regression it guards
+  — a child that never drains stdin — would hang the suite rather than fail it.
+
+**Open follow-up — cosmetic, idiomatic, or pre-existing.**
+
+- **R3-off-argv-guard-name-and-shape** (SUGGESTION) — `TestRunTask_OversizedInputIsNotOnArgv`
+  uses no oversized input; the name overstates what the body does.
+- **R2-iso-prefix-presence-check-idiom** (SUGGESTION) — the `strings.TrimPrefix` +
+  `delivered == result.Output` comparison is an indirect way to assert prefix presence.
+- **R2-arg-ceiling-constant-duplicated** (SUGGESTION) — the ceiling is expressed in the test
+  and again in prose in `AGENTS.md`; the two can drift.
+- **R4-opencode-e2big-doc-only-mitigation** (SUGGESTION) — pre-existing and already recorded
+  as the T6 won't-do above: `opencode`'s `E2BIG` is mitigated by documentation only.
+
+**Disclosed, not fixed — outside this slice's authorized edit roots.**
+`openspec/changes/agent-startup-framework-foundation/verify-report.md:139` still names
+`TestArgvSlice_ShellMetacharactersAreLiteral` in its compliance table. That reference is now
+stale for the `claudecode` package. It was left untouched deliberately: it is an archived
+verify report for a different change, and `openspec/` was not in scope here. The identically
+named test in `adapters/opencode/adapter_test.go:153` is unaffected and still exists.
+
+**Verification after the follow-up commit, observed:**
+
+- `gofmt -l .` — no output (clean)
+- `go build ./cmd/company` — OK
+- `go vet ./...` — OK
+- `go test ./...` — 12 packages `ok`, 1 `[no test files]`; `claudecode` ok 23.096s
+- `go test -race ./adapters/claudecode/` — `ok ... 24.845s`
+
 ## Next step
 
-Slice 3, T7 (RED): a CEO turn that delegates gets a second `RunTask` call whose input
-contains the peer's output. Input delivery is no longer a ceiling for that transcript on the
-`claude` adapter; agents that need the loop must not be configured on `opencode` (see the
-T6 won't-do above).
+**Slice 2 is closed.** T4 and T5 are done, T6 is a recorded won't-do, and the native review
+on lineage `review-d4381466f584182d` is approved with its authority acknowledged and burned,
+zero blockers and zero corrections. Its three lying-comment findings are fixed in `bf53ff5`;
+the rest are advisory follow-ups listed above.
 
-Slice 1's review findings are settled. Two native reviews ran on this slice:
+**Next: Slice 3, T7 (RED)** — a CEO turn that delegates gets a second `RunTask` call whose
+input contains the peer's output. Input delivery is no longer a ceiling for that transcript
+on the `claude` adapter; agents that need the loop must not be configured on `opencode` (see
+the T6 won't-do above).
+
+Carried into Slice 3 deliberately, because T8 is what makes these bite:
+
+- **R4-input-size-now-unbounded** (Slice 2) — the argv ceiling is gone, so the growing
+  transcript now fails at the model's context limit after real token spend instead of locally
+  at `execve`. Size it where the transcript is assembled.
+- **R3-bench-replace-path-only** and **R3-bench-quadratic-seed** (Slice 1) — both live in the
+  benchmark file and pair with the Slice 3 benchmark revisit the T3 verdict already schedules.
+
+Slice 1's review findings are settled. Two native reviews ran on Slice 1:
 
 - `review-787c47fe13b36fa2` — approved. R3-toolchain-floor closed by evidence;
   R3-single-record-store and R3-roundtrip-field-subset folded into this slice and closed
@@ -573,5 +758,6 @@ Slice 1's review findings are settled. Two native reviews ran on this slice:
 Both open findings live in the benchmark file and pair naturally with the Slice 3 revisit
 the T3 verdict already schedules. Neither affects the persisted schema.
 
-This document amendment is passive documentation correcting an audit note; it does not
-reopen review on the already-acknowledged candidate.
+Document amendments recorded here — the Slice 1 audit-note correction and this Slice 2
+review record — are passive documentation. They do not reopen review on any
+already-acknowledged candidate.
