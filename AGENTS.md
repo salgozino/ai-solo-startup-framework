@@ -45,9 +45,19 @@ The provider adapters drive external agent CLIs as subprocesses and parse their 
   unrecognized top-level key such as `mcpServers` invalidates the whole config and the server
   is silently never registered. The adapter emits `{"mcp": {"framework": {"type": "remote",
   "url": ..., "enabled": true, "headers": {"Authorization": "Bearer <token>"}}}}`.
+  Input size limit: the opencode adapter passes the task input as a positional **argv**
+  argument, so a task whose input grows past the Linux per-argument ceiling
+  (`MAX_ARG_STRLEN`, 131072 bytes) fails at `execve` with `E2BIG`. opencode hits this
+  sooner than claude because the system prompt is concatenated into that same argv string.
+  This is unsupported by decision, not by oversight: there is no preflight size check and
+  no stdin fallback. Use the claude adapter for any agent whose input can grow (a
+  multi-round transcript, a long document).
 - **claude**: the adapter requires `--mcp-config`, `--strict-mcp-config`, and
   `--output-format stream-json`. It never requests `--json-schema`. Its `--mcp-config` file
   uses the Claude-shaped `mcpServers` envelope, which is unrelated to opencode's schema above.
+  Input delivery: the task input is written to the child's **stdin**, never argv — `claude -p`
+  reads the prompt from stdin when no positional prompt argument is given. This is what keeps
+  a growing input below no ceiling at all; argv would cap it at 131072 bytes (see opencode above).
 
 Both adapters receive MCP configuration ephemerally per invocation — claude through a `0600`
 temp file removed on exit, opencode through the subprocess-scoped `OPENCODE_CONFIG_CONTENT`

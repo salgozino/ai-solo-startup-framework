@@ -127,12 +127,12 @@ Slice 1 — transcript persistence
       file, before any other slice depends on the layout.
 
 Slice 2 — input delivery
-- [ ] **T4** — RED: test proving an input larger than the argv ceiling is delivered intact.
-- [ ] **T5** — Move the prompt from argv to stdin in `claudecode` (verified: `claude -p`
+- [x] **T4** — RED: test proving an input larger than the argv ceiling is delivered intact.
+- [x] **T5** — Move the prompt from argv to stdin in `claudecode` (verified: `claude -p`
       reads stdin). Keep `--system-prompt-file` as is.
-- [ ] **T6** — Same for `opencode`. **Blocked**: the local `opencode` CLI currently fails on
-      every invocation, argv included, so stdin support is unverified. Re-run the spike
-      before implementing; do not guess.
+- [~] **T6** — Same for `opencode`. **WON'T DO** — maintainer decision, see the Slice 2
+      entry under Progress. `opencode` stays on argv with no stdin support and no preflight
+      size guard.
 
 Slice 3 — the second turn
 - [ ] **T7** — RED: test proving a CEO turn that delegates gets a second `RunTask` call
@@ -440,10 +440,113 @@ would have stayed green while `Tokens` silently vanished.
   per sub-benchmark per `-count`. It makes `go test -bench .` slow and temp-dir dependent.
   Seeding the array in one write would fix it without changing what is measured.
 
+### Slice 2 — complete (T4, T5; T6 won't do)
+
+Branch: `feat/ceo-orchestration-loop-pr2-input-delivery`. Commits:
+
+- `dd1ae17` `fix(claudecode): deliver task input on stdin instead of argv` (T4 + T5)
+- `<docs commit>` `docs(odd): record Slice 2 outcome and the opencode argv won't-do` (this entry)
+
+**T4 — RED observed.** New file `adapters/claudecode/input_delivery_test.go`, two tests,
+added with no production change. `go test ./adapters/claudecode/ -run 'TestRunTask_DeliversInputLargerThanArgvCeiling|TestRunTask_OversizedInputIsNotOnArgv' -v`,
+verbatim:
+
+```
+=== RUN   TestRunTask_DeliversInputLargerThanArgvCeiling
+    input_delivery_test.go:63: RunTask with a 262168-byte input (argv ceiling is 131072): claudecode: start: fork/exec /tmp/TestRunTask_DeliversInputLargerThanArgvCeiling807467973/001/fakeclaude: argument list too long
+--- FAIL: TestRunTask_DeliversInputLargerThanArgvCeiling (0.42s)
+=== RUN   TestRunTask_OversizedInputIsNotOnArgv
+    input_delivery_test.go:91: prompt found at argv[9]="the CEO asks the engineer for a draft"; the prompt must travel on stdin, because a single argv string is capped at 131072 bytes on Linux; argv=[/tmp/TestRunTask_OversizedInputIsNotOnArgv3108784410/001/fakeclaude -p --no-session-persistence --setting-sources  --disable-slash-commands --output-format stream-json --verbose the CEO asks the engineer for a draft]
+--- FAIL: TestRunTask_OversizedInputIsNotOnArgv (0.42s)
+FAIL
+FAIL	github.com/salgozino/ai-solo-startup-framework/adapters/claudecode	0.853s
+```
+
+This is B5 reproduced exactly: `E2BIG` at `execve`, surfaced by Go as *"argument list too
+long"*, before the CLI runs at all. The fixture is 2x `MAX_ARG_STRLEN` rather than a few
+bytes over, so the first test stays meaningful on a kernel with a larger `PAGE_SIZE`; the
+second test is structural and holds on any page size.
+
+**T5.** `RunTask` no longer appends `input` to argv; it sets `cmd.Stdin =
+strings.NewReader(input)` (`adapters/claudecode/adapter.go`). Nothing else about the
+invocation changed: `--system-prompt-file` keeps its own flag and path, and every isolation
+flag (`--no-session-persistence`, `--setting-sources ""`, `--disable-slash-commands`,
+`--strict-mcp-config`) is untouched. `os/exec` copies the reader into the child's stdin pipe
+from a goroutine that `cmd.Wait()` joins, so an input past the 64 KiB pipe buffer cannot
+deadlock against the adapter's own stdout read.
+
+Threat-matrix case (a) is preserved and slightly strengthened: the remaining argv is still
+an exec slice, never a shell string, and the input is now opaque bytes on a pipe rather than
+an element of a command line.
+
+**The test double had to learn stdin, and that is exactly where a lying test was possible.**
+`fakeclaude` now mirrors the real CLI's dual prompt source: a positional argument wins when
+present, stdin is read only when argv carries no positional. Keeping argv authoritative is
+load-bearing — it is what stops the fake from making the suite green over a broken adapter.
+
+Proven by mutation rather than argued. With the fake's stdin support in place, `RunTask` was
+temporarily reverted to `args = append(args, input)`:
+
+```
+=== RUN   TestRunTask_DeliversInputLargerThanArgvCeiling
+    input_delivery_test.go:63: RunTask with a 262168-byte input (argv ceiling is 131072): claudecode: start: fork/exec /tmp/TestRunTask_DeliversInputLargerThanArgvCeiling942504138/001/fakeclaude: argument list too long
+--- FAIL: TestRunTask_DeliversInputLargerThanArgvCeiling (0.40s)
+=== RUN   TestRunTask_OversizedInputIsNotOnArgv
+    input_delivery_test.go:91: prompt found at argv[9]="the CEO asks the engineer for a draft"; the prompt must travel on stdin, because a single argv string is capped at 131072 bytes on Linux; argv=[...]
+--- FAIL: TestRunTask_OversizedInputIsNotOnArgv (0.41s)
+```
+
+The mutation was reverted and `git diff adapters/claudecode/adapter.go` against the commit
+is clean of it. The failure survives the fake's new capability because it happens at
+`execve`, before the fake has any say.
+
+**One test-asserted decision deliberately overturned.**
+`TestClaudeAdapter_AllowedTools_NeverSwallowsThePrompt` asserted
+`argv[len(argv)-1] == prompt`. That is false by design now. The assertion was removed and
+the replacement is named in the test's own comment:
+`TestRunTask_OversizedInputIsNotOnArgv` asserts the opposite and stronger property (the
+prompt appears nowhere in argv), and `TestRunTask_DeliversInputLargerThanArgvCeiling`
+proves an over-ceiling input still arrives intact. The rest of that test — the structural
+guard that the variadic `--allowedTools` list is terminated by another flag — is kept,
+because a future trailing positional would reintroduce the original hazard.
+
+**T6 — WON'T DO. Maintainer decision: `opencode` stays on argv, without stdin support.**
+
+Consequence, stated plainly rather than softened: on the `opencode` adapter, a task whose
+input grows past the Linux per-argument ceiling (`MAX_ARG_STRLEN`, 131072 bytes) fails at
+`execve` with `E2BIG`. The invocation dies before the CLI starts; there is no partial
+result and no graceful degradation. `opencode` hits this **sooner than claude did**, because
+the system prompt is concatenated into the very same argv string
+(`adapters/opencode/adapter.go:230-234`: `effectiveInput = "[SYSTEM]\n" + systemPromptContent
++ "\n\n" + input`), so the agent's own persona eats part of the budget before the task input
+does.
+
+Deliberately **not** implemented as part of this decision: no preflight length check, no
+size guard, no truncation, no stdin fallback. The decision is "leave it unsupported", not
+"handle it gracefully" — a guard would convert a loud `execve` failure into a quieter
+framework error without making any task succeed, and would cost code in an adapter the
+maintainer chose not to invest in.
+
+Practical consequence for later slices: the CEO orchestration loop's re-injected transcript
+is the exact workload that crosses this ceiling, so an agent expected to run multi-round
+conversations must be configured on the `claude` adapter. Recorded in `AGENTS.md` under
+`## Provider CLI compatibility` so it is visible at configuration time, not at failure time.
+`adapters/opencode/` was not touched by this slice.
+
+**Verification, observed:**
+
+- `gofmt -l .` — no output (clean)
+- `go build ./cmd/company` — OK
+- `go vet ./...` — OK
+- `go test ./...` — all 12 packages `ok`, 1 `[no test files]`
+- `go test -race ./adapters/...` — `claudecode` ok 26.119s, `opencode` ok 13.587s
+
 ## Next step
 
-Slice 2, T4 (RED): input larger than the argv ceiling delivered intact. T6 remains blocked
-on re-running the `opencode` stdin spike.
+Slice 3, T7 (RED): a CEO turn that delegates gets a second `RunTask` call whose input
+contains the peer's output. Input delivery is no longer a ceiling for that transcript on the
+`claude` adapter; agents that need the loop must not be configured on `opencode` (see the
+T6 won't-do above).
 
 Slice 1's review findings are settled. Two native reviews ran on this slice:
 
