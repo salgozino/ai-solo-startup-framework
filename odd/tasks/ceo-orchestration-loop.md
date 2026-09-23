@@ -1,0 +1,259 @@
+# CEO orchestration loop: multi-round delegation with per-task memory
+
+## Objective
+
+Let a single CEO task survive multiple delegation rounds, remember what happened in the
+earlier ones, judge each peer's answer, and decide the next delegation — so one human task
+like *"plan A, have the engineer draft it, validate the draft, delegate the implementation,
+then hand it to QA"* runs to completion without the human re-driving every hop.
+
+## Problem
+
+Every agent interaction is single-shot, and it is structural, not a missing flag.
+
+`executeWithPolicy` (`core/supervisor/supervisor.go:354-390`) calls
+`Provider.RunTask` at `:364`, and only *afterwards* runs the action intents at `:378`.
+The CLI subprocess has already exited by the time the peer is contacted. The peer's answer
+lands in `rec.Output` (`:476`), which is read by the store and the UI — and by **no model,
+ever**.
+
+Five distinct blockers, each with its own fix:
+
+| # | Blocker | Evidence |
+|---|---------|----------|
+| B1 | No transcript on the persistence unit. `TaskRecord` is flat `Input` → `Output`. | `core/supervisor/store.go:18-46` |
+| B2 | `RunTask` is called once per `Execute`. The only re-invocation hook (`executeResume:283-293`) re-runs the **original** `rec.Input` and discards the new input. | `supervisor.go:364`, `:283-293` |
+| B3 | The model has no vocabulary for "another round" vs "I am done". MCP tools are generated **only** from `risk_policy`, and `buildAckResult` tells the model *"outcome unavailable this turn. Do not call again."* | `transport/mcp/tools.go:142`, `:109-125` |
+| B4 | A peer that returns `INPUT_REQUIRED` hard-fails the delegating task (*"chained approval is not yet wired"*). The engineer can never ask a clarifying question, and any risky action in a peer kills the CEO's task. | `supervisor.go:570-571` |
+| B5 | Task input is passed as a positional **argv** argument. Linux caps a single argv string at `MAX_ARG_STRLEN` (~131072 bytes). A growing transcript eventually fails `execve` with `E2BIG`. opencode is worse: the system prompt is concatenated into the same string. | `adapters/claudecode/adapter.go:283`, `adapters/opencode/adapter.go:230-234` |
+
+## Why
+
+The framework's whole premise is that the human talks only to the CEO and the CEO runs the
+company. Today the CEO can fan out exactly one hop and then dies, so every orchestration
+step costs a human round trip. This is the gap between "a company of agents" and "a task
+router".
+
+## Seams that already exist and are unplugged
+
+These were designed for exactly this problem and never wired. Reuse them; do not reinvent.
+
+- `core/supervisor/context.go` — `assembleBoundedContext` + `contextText`: complete,
+  tested, **zero non-test callers**.
+- `core/supervisor/supervisor.go:490` — `effectiveBudget()`: test-only.
+- `core/port/provider.go:112-121` — `port.ResumePoint{TaskID, ApprovalToken, Input}`: zero
+  usages anywhere. Its doc says *"no provider-side session is required"*.
+- `core/port/delegator.go:37` — `PeerTaskState`, implemented at
+  `transport/a2a/client.go:147`, no production caller. Half of a peer-wait already exists.
+- `a2a.Message` carries unused `Metadata`, `ContextID`, `ReferenceTasks`
+  (a2a-go v2.5.0 `a2a/core.go:200-228`); `client.go:118` sets none of them.
+
+## Approach
+
+**Fresh process + re-injected transcript.** Not a persistent CLI session.
+
+Evidence for the fork (both `--help` outputs read directly):
+
+- `claude` supports `--session-id <uuid>` (caller-chosen), `-r/--resume`, `--fork-session`
+  — but `--no-session-persistence` states verbatim *"sessions will not be saved to disk and
+  cannot be resumed"*. Using CLI sessions means dropping an isolation flag.
+- `opencode` supports `-s/--session`, `-c/--continue`, `--fork`; `--pure` only disables
+  plugins and does not conflict. It already emits `sessionID` on every NDJSON event and the
+  adapter discards it.
+
+Re-injection wins because the transcript stays in **our** store (so crash recovery keeps
+working), no isolation flag is surrendered, and it is portable to any future provider. The
+accepted cost is re-tokenizing the transcript each round.
+
+**Park/resume, not a blocking loop.** A blocking loop inside `executeWithPolicy` is a
+smaller diff, but while the task is `WORKING` the a2asrv execution stays registered, so any
+resume is rejected with `ErrExecutionInProgress`
+(`a2asrv/local_manager.go:209-211`) and `PostVerdict` returns 409 (`cmd/company/wire.go:136-138`).
+That makes the task unapprovable and uncancellable for the whole conversation — and B4 means
+the target scenario (engineer implements, QA verifies) cannot run at all. Park/resume is
+roughly 4x the code and is the only shape that supports the requested scenario.
+
+## Scope
+
+Authorized edit roots:
+
+- `core/supervisor/` — loop, task record schema, context assembly, tests
+- `core/port/` — provider/delegator/resumer contracts
+- `adapters/claudecode/`, `adapters/opencode/` — input delivery, session handling
+- `transport/mcp/` — termination vocabulary, ack text
+- `transport/a2a/` — peer follow-up, non-terminal peer states
+- `cmd/company/` — wiring, multi-runtime UI aggregation
+- `ui/` — multi-agent task view
+- `agents/*.md` — persona rewrites (the current text actively sabotages the loop)
+- `odd/tasks/ceo-orchestration-loop.md` — this document
+
+Out of scope: policy engine semantics, the Telegram gateway, adding new gateways, the
+`risk` field validation bug (tracked separately), CodeGraph/tooling config.
+
+## Constraints
+
+- TDD is mandatory (source: project `AGENTS.md`). Runner: `go test ./...`.
+  RED must be observed before implementation; no invented evidence.
+- `TaskRecord` is persisted as JSON. Every new field must be `omitempty` and zero-value
+  safe, proven against literal pre-change JSON bytes (precedent:
+  `TestStore_LoadsRecordWrittenBeforeRemainingIntents`).
+- `Store.Save` rewrites the **entire per-agent array** on every call
+  (`core/supervisor/store.go:129-145`), and the supervisor saves 8+ times per task. A
+  transcript on `TaskRecord` makes every save O(N tasks x M turns). Measure before assuming
+  it is fine.
+- Default store base is `os.TempDir()` (`cmd/company/wire.go:288`). Transcripts in `/tmp`
+  are a known smell; do not silently make it worse.
+- The a2asrv in-memory task store is **gob-encoded**. `DataPart` carrying
+  `json.RawMessage`/`jsontext.Value` fails to serialize (`supervisor.go:453-455`, `:720-721`).
+  Prefer `Metadata`/`ContextID` plain strings over data parts.
+- Output is capped at 1 MiB per adapter; on overflow NDJSON parsing is abandoned and raw
+  bytes are returned (`claudecode/adapter.go:336-339`). A round can therefore yield noise.
+- `dedupeKey(token, kind, payload)` (`transport/mcp/tools.go:91-104`) swallows an identical
+  repeat. A legitimately repeated delegation across rounds must not be deduped away.
+- Do not surrender the isolation flags (`--no-session-persistence`, `--pure`) to buy
+  convenience.
+- Existing behaviour that is already test-asserted must keep passing or be explicitly and
+  deliberately overturned, with the replacement named in a comment.
+
+## Tasks
+
+Slice 1 — transcript persistence
+- [ ] **T1** — RED: test that a `TaskRecord` round-trips a non-empty turn list and that
+      literal pre-change JSON still loads with the new field as zero value.
+- [ ] **T2** — Add `Turns []port.ContextMessage` to `TaskRecord` (`omitempty`, zero-value
+      safe), following the `RemainingIntents` precedent.
+- [ ] **T3** — Measure `Store.Save` cost with a realistic transcript and record the number
+      here. If it is bad, decide now whether the transcript moves to a sibling per-task
+      file, before any other slice depends on the layout.
+
+Slice 2 — input delivery
+- [ ] **T4** — RED: test proving an input larger than the argv ceiling is delivered intact.
+- [ ] **T5** — Move the prompt from argv to stdin in `claudecode` (verified: `claude -p`
+      reads stdin). Keep `--system-prompt-file` as is.
+- [ ] **T6** — Same for `opencode`. **Blocked**: the local `opencode` CLI currently fails on
+      every invocation, argv included, so stdin support is unverified. Re-run the spike
+      before implementing; do not guess.
+
+Slice 3 — the second turn
+- [ ] **T7** — RED: test proving a CEO turn that delegates gets a second `RunTask` call
+      whose input contains the peer's output.
+- [ ] **T8** — Re-invoke the provider after a delegation round with the assembled
+      transcript. Bounded rounds; exhaustion must be an explicit terminal state, not a hang.
+      This is where `assembleBoundedContext` / `contextText` / `effectiveBudget` finally get
+      production callers — wiring them earlier would change the first turn's input for no
+      reason.
+- [ ] **T9** — Stop `rec.Output` from being clobbered by the peer's raw text
+      (`supervisor.go:476`, `:326-328`). `Output` must end up as the CEO's final answer.
+      This deliberately overturns a test-asserted decision; name the replacement.
+
+Slice 4 — termination vocabulary
+- [ ] **T10** — RED: test proving the model can end the loop explicitly, and that a missing
+      signal hits the round cap instead of looping forever.
+- [ ] **T11** — Introduce the "continue / done" signal. Decide and record: a non-policy MCP
+      tool (breaks the "every tool is a policy-classified action" invariant) versus a
+      `risk: safe` policy kind (pollutes `risk_policy` with non-actions).
+- [ ] **T12** — Rewrite `buildAckResult` (`transport/mcp/tools.go:109-125`). Its current
+      text becomes false the moment T8 lands.
+
+Slice 5 — personas
+- [ ] **T13** — Rewrite `agents/ceo.md` (`:24-36`, `:48-59`) and `agents/engineer.md`
+      (`:30-39`, `:50-53`). They currently instruct the model that memory is impossible and
+      that outcomes never arrive. Left alone, they will actively sabotage the loop.
+
+Slice 6 — park/resume
+- [ ] **T14** — RED: test proving a parked CEO task is resumable and approvable while it
+      waits on a peer.
+- [ ] **T15** — Add `port.TaskResumer` + `Supervisor.SetResumer` and the awaiting-peer
+      fields on `TaskRecord`; replace the blocking wait with park + watcher, reusing
+      `PeerTaskState`.
+- [ ] **T16** — Prove crash recovery across a round boundary: restart mid-conversation and
+      continue.
+
+Slice 7 — chained approval
+- [ ] **T17** — RED: test proving a peer escalation reaches the human instead of failing the
+      delegating task.
+- [ ] **T18** — Remove the hard-fail at `supervisor.go:570-571` and propagate the peer's
+      `INPUT_REQUIRED` upward.
+- [ ] **T19** — Let the CEO send a follow-up to an existing peer task
+      (`msg.TaskID = peerTaskID`); `transport/a2a/client.go:118` never sets it today. The
+      SDK already supports this.
+
+Slice 8 — multi-agent UI
+- [ ] **T20** — RED: test proving a non-CEO agent's task is listed and approvable.
+- [ ] **T21** — Aggregate every runtime in the UI instead of `runtimes[0]`
+      (`cmd/company/main.go:67`, `:72`).
+
+## Acceptance criteria
+
+- A single human task drives at least three delegation rounds with the CEO reading and
+  judging each peer answer, proven by an integration test.
+- The CEO's second and later turns demonstrably receive the earlier rounds' content.
+- A parked CEO task is approvable and cancellable while it waits on a peer.
+- A peer escalation reaches the human; it does not fail the delegating task.
+- A restart mid-conversation resumes without losing earlier rounds.
+- Round exhaustion produces an explicit terminal state, never a hang.
+- Records written before this change still load (literal pre-change JSON, not a
+  re-marshalled struct).
+- `go build ./cmd/company`, `go vet ./...` and `go test ./...` all clean.
+
+## Checks
+
+- `go build ./cmd/company`
+- `go test ./...`
+- `go test -race ./...`
+- `go vet ./...`
+- `gofmt -l .`
+
+## Delivery
+
+Forecast: ~2250 authored changed lines across 8 slices — far past the ~400 heuristic, so
+this ships as a chain, never as one PR. Each slice above is one PR boundary and each task
+closes with at least one work-unit commit carrying its tests.
+
+Chain strategy: **feature-branch-chain**, matching the convention this repo already uses
+(tracker `feat/agent-delegation-over-a2a` with stacked `pr1..prN` children, tracker PR #75).
+
+- Tracker branch: `feat/ceo-orchestration-loop` — draft/no-merge PR, accumulates the whole
+  feature, and is the only branch that merges to `master`.
+- Child branches: `feat/ceo-orchestration-loop-pr<N>-<slice>`. PR #1 targets the tracker;
+  every later child targets the immediate previous child branch, so each review diff shows
+  only its own slice.
+- Every child PR carries a dependency diagram marking itself with a pin, plus start, end,
+  prior dependencies, follow-ups and out-of-scope items.
+
+Slice 6 is the largest and may need splitting once its RED is written.
+
+## Route
+
+Delegated direct. The writer trigger fires on every slice: each one touches 2+ non-trivial
+files. One bounded writer per slice, no parallel writers in this worktree. Per-slice
+exploration only when the slice's blast radius is not already mapped here.
+
+## TDD
+
+Mode: on. Source: project `AGENTS.md` ("TDD is mandatory for this project").
+Runner: `go test ./...`.
+
+## Progress
+
+- Architecture mapped through two read-only explorations plus direct `--help` verification
+  of both provider CLIs. Findings recorded above with file:line evidence.
+- Fork decided: fresh process + re-injected transcript, park/resume rather than a blocking
+  loop. Rationale and the rejected alternative are recorded under Approach.
+- Spike (Fase 0) partially complete: `claude -p` reads the prompt from **stdin**, verified
+  by observed output. `opencode run` could not be verified — it currently fails on every
+  invocation including the argv path the adapter uses today, so the failure says nothing
+  about stdin. T6 stays blocked on re-running this spike.
+- Baseline before any change: `gofmt -l .`, `go build ./cmd/company`, `go vet ./...` and
+  `go test ./...` all clean on `master`.
+- Chain strategy resolved: feature-branch-chain, matching the repo's existing convention.
+- T3 was rewritten. It originally asked for `assembleBoundedContext` / `contextText` /
+  `effectiveBudget` to gain production callers in Slice 1, which is wrong: with no second
+  turn yet, wiring them would only change the first turn's input for no benefit. That work
+  moved to T8, where it is actually needed. Slice 1 stays pure persistence plus the
+  `Store.Save` cost measurement that decides the transcript's storage layout.
+- No source file has been modified for this feature yet.
+
+## Next step
+
+Slice 1, T1 (RED) on `feat/ceo-orchestration-loop-pr1-transcript-persistence`.
