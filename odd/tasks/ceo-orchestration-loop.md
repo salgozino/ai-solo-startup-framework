@@ -346,7 +346,34 @@ is the second lever, available at any time at zero consumer cost.
 - `go test -race ./core/supervisor/` — `ok` 1.294s
 - `go test -bench . -benchmem ./core/supervisor/` — numbers above
 
+### Slice 1 — native review
+
+Lineage `review-787c47fe13b36fa2`, one lens (`review-reliability`), risk `medium`,
+4 files / 384 lines. Result: **approved**, authority acknowledged and burned. No blocker,
+no correction opened. Four advisory findings, all non-blocking and recorded here as
+follow-ups rather than as reasons to re-review this candidate:
+
+- **R3-toolchain-floor** (SUGGESTION) — `b.Loop()` and range-over-integer need a recent Go
+  language version, which the reviewer could not see from the patch. **Closed by evidence**:
+  `go.mod` declares `go 1.25.0`; `b.Loop()` landed in 1.24 and range-over-integer in 1.22,
+  and CI resolves its toolchain with `go-version-file: go.mod`. No action needed.
+- **R3-single-record-store** (SUGGESTION) — both new tests use a store holding exactly one
+  record, so nothing proves that saving one task preserves a *different* task's transcript
+  in the same per-agent file. Given that `Store.Save` rewrites the whole array, this is the
+  most likely silent-clobber failure mode. Real gap; cheap to close at unit level.
+- **R3-roundtrip-field-subset** (SUGGESTION) — the round-trip test compares `Role`,
+  `Content` and `At` individually instead of the decoded message as a whole, so a future
+  field on `port.ContextMessage` could fail to persist and leave the test green.
+- **R3-bench-quadratic-seed** (WARNING) — the benchmark seed loop calls `Save` once per
+  task, and `Save` rewrites the whole array, so setup is quadratic in file bytes: the
+  500-task transcript sweep writes on the order of gigabytes before the timer starts, once
+  per sub-benchmark per `-count`. It makes `go test -bench .` slow and temp-dir dependent.
+  Seeding the array in one write would fix it without changing what is measured.
+
 ## Next step
 
 Slice 2, T4 (RED): input larger than the argv ceiling delivered intact. T6 remains blocked
 on re-running the `opencode` stdin spike.
+
+Pending decision before opening PR #1: whether to fold R3-single-record-store and
+R3-roundtrip-field-subset into this slice, or track them as follow-ups.
