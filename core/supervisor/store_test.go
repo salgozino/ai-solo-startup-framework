@@ -5,8 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/salgozino/ai-solo-startup-framework/core/address"
+	"github.com/salgozino/ai-solo-startup-framework/core/port"
 )
 
 func mustAddr(t *testing.T, name, tenant string) address.A2AAddress {
@@ -206,6 +208,121 @@ func TestStore_LoadsRecordWrittenBeforeRemainingIntents(t *testing.T) {
 		if strings.Contains(string(data), key) {
 			t.Errorf("omitempty must keep %q out of a record that has none; got %s", key, data)
 		}
+	}
+}
+
+// TestStore_RoundTripsTurns proves a task record carries its conversation
+// transcript across a Save/Load cycle. Without this the supervisor can persist a
+// multi-round task but reads back an amnesiac record, which is the whole point of
+// the field.
+// Satisfies: feature task T1, "a TaskRecord round-trips a non-empty turn list".
+func TestStore_RoundTripsTurns(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	addr := mustAddr(t, "ceo", "acme")
+	// Fixed, UTC instants: a wall-clock now() would make the comparison depend on
+	// the JSON encoder's monotonic-clock stripping rather than on persistence.
+	first := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
+	second := first.Add(90 * time.Second)
+	rec := TaskRecord{
+		TaskID: "task-turns",
+		State:  "TASK_STATE_WORKING",
+		Input:  "plan the migration",
+		Owner:  string(addr),
+		Turns: []port.ContextMessage{
+			{Role: "assistant", Content: "delegating the draft to the engineer", At: first},
+			{Role: "peer", Content: "draft ready: three phases", At: second},
+		},
+	}
+
+	if err := s.Save(addr, rec); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := s.Load(addr, "task-turns")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Turns) != len(rec.Turns) {
+		t.Fatalf("Turns length: got %d, want %d", len(got.Turns), len(rec.Turns))
+	}
+	for i, want := range rec.Turns {
+		g := got.Turns[i]
+		if g.Role != want.Role {
+			t.Errorf("Turns[%d].Role: got %q, want %q", i, g.Role, want.Role)
+		}
+		if g.Content != want.Content {
+			t.Errorf("Turns[%d].Content: got %q, want %q", i, g.Content, want.Content)
+		}
+		if !g.At.Equal(want.At) {
+			t.Errorf("Turns[%d].At: got %s, want %s", i, g.At, want.At)
+		}
+	}
+}
+
+// TestStore_LoadsRecordWrittenBeforeTurns proves that a record file written by a
+// build that predates Turns still loads. The bytes below are the exact on-disk
+// shape of the older schema, not a re-marshalled TaskRecord, so the assertion
+// cannot drift with the struct.
+// Satisfies: feature task T1, "literal pre-change JSON still loads with the new
+// field as zero value".
+func TestStore_LoadsRecordWrittenBeforeTurns(t *testing.T) {
+	dir := t.TempDir()
+	addr := mustAddr(t, "ceo", "acme")
+	legacy := `[{"task_id":"task-legacy-schema","state":"TASK_STATE_INPUT_REQUIRED",` +
+		`"input":"send a telegram","owner":"ceo/acme",` +
+		`"pending_intent_kind":"telegram_send","pending_intent_body":"Hello from CEO",` +
+		`"pending_intent_target":"engineer",` +
+		`"remaining_intents":[{"kind":"telegram_send","body":"second message"}],` +
+		`"output":"queued"}]`
+	if err := os.WriteFile(filepath.Join(dir, filenameFor(addr)), []byte(legacy), 0o600); err != nil {
+		t.Fatalf("seed legacy record: %v", err)
+	}
+
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	got, err := s.Load(addr, "task-legacy-schema")
+	if err != nil {
+		t.Fatalf("Load legacy record: %v", err)
+	}
+
+	// Everything the older writer did know about must survive untouched.
+	if got.State != "TASK_STATE_INPUT_REQUIRED" {
+		t.Errorf("State: got %q, want TASK_STATE_INPUT_REQUIRED", got.State)
+	}
+	if got.PendingIntentTarget != "engineer" {
+		t.Errorf("PendingIntentTarget: got %q, want engineer", got.PendingIntentTarget)
+	}
+	if len(got.RemainingIntents) != 1 || got.RemainingIntents[0].Kind != "telegram_send" {
+		t.Errorf("RemainingIntents: got %v, want one telegram_send intent", got.RemainingIntents)
+	}
+	if got.Output != "queued" {
+		t.Errorf("Output: got %q, want queued", got.Output)
+	}
+	// The field the older writer knew nothing about must read back as a zero
+	// value, never as an error and never as garbage.
+	if got.Turns != nil {
+		t.Errorf("Turns: got %v, want nil", got.Turns)
+	}
+
+	// Re-saving must not corrupt the record: the absent field stays absent.
+	if err := s.Save(addr, got); err != nil {
+		t.Fatalf("Save round trip: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, filenameFor(addr)))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	// Match the quoted JSON key, not the bare word: a bare "turns" also matches
+	// task IDs and free-text content, which would make this assertion lie.
+	if strings.Contains(string(data), `"turns"`) {
+		t.Errorf("omitempty must keep the %q key out of a record that has none; got %s", "turns", data)
 	}
 }
 
