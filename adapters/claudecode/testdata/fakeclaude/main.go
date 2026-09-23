@@ -1,10 +1,20 @@
 // fakeclaude simulates the claude CLI for unit testing the Claude Code adapter.
-// It reads argv and behaves as follows:
+//
+// PROMPT SOURCE — mirrors the real CLI, which accepts the prompt either way:
+// when a positional prompt argument is present on argv it wins; when there is none,
+// the prompt is read from stdin instead. The adapter's RunTask uses the stdin path
+// (argv has a per-argument MAX_ARG_STRLEN ceiling; see adapters/claudecode/adapter.go),
+// while ProbeModel still passes an empty positional argument. Keeping argv authoritative
+// when present is what makes the stdin support unable to mask an adapter regression: if
+// the adapter went back to putting the prompt on argv, that argv value would be used and
+// the oversized-input test would still die at execve with E2BIG.
+//
+// The resulting prompt, from either source, behaves as follows:
 //
 //	"fail"   — exits with code 1, prints nothing
 //	"hang"   — sleeps until SIGKILL (simulates a hung process)
 //	"large"  — prints 1 MiB of 'x' characters then exits 0
-//	anything else — prints the argument as output text then exits 0
+//	anything else — prints the prompt as output text then exits 0
 //
 // When --setting-sources and --disable-slash-commands are both present (the isolation
 // substitute for --safe-mode — see adapters/claudecode/adapter.go), it prepends "iso:1|"
@@ -38,6 +48,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -89,13 +100,15 @@ func main() {
 	// Args: [-p [--no-session-persistence] [--setting-sources <sources>]
 	//        [--disable-slash-commands] [--model <model>] [--system-prompt-file <path>]
 	//        [--mcp-config <path>] [--strict-mcp-config] [--output-format <format>]
-	//        [--verbose]] <input>
-	// Parse flags, then take the last positional argument as the prompt.
+	//        [--verbose]] [<prompt>]
+	// Parse flags, then take the last positional argument as the prompt. When argv
+	// carries no positional at all, read the prompt from stdin instead.
 	var model string
 	var systemPromptFile string
 	settingSourcesSeen := false
 	disableSlashCommands := false
 	input := ""
+	positionalSeen := false
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "-p":
@@ -129,6 +142,16 @@ func main() {
 			}
 		default:
 			input = os.Args[i]
+			positionalSeen = true
+		}
+	}
+
+	// No positional prompt on argv → the prompt came in on stdin. An empty or absent
+	// stdin (exec leaves it as /dev/null when the parent sets no Stdin) reads as "" and
+	// falls through to the same "Input must be provided" path an empty prompt takes.
+	if !positionalSeen {
+		if raw, err := io.ReadAll(os.Stdin); err == nil {
+			input = string(raw)
 		}
 	}
 

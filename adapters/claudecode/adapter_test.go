@@ -99,8 +99,10 @@ func helperBinary(t *testing.T) string {
 //
 // If the adapter used "sh -c", the shell would execute `echo INJECTED` and `rm -rf /` as
 // separate commands, producing a multi-line output where INJECTED appears on its own line.
-// With argv-as-slice, the entire string is passed verbatim as one argument; fakeclaude echoes
-// it as-is on a single line. No newline within the output means no command was interpreted.
+// The adapter never builds a shell command line: the flags are an argv slice and the input
+// is written to the child's stdin as opaque bytes (Slice 2 moved it there off argv), so
+// fakeclaude echoes it verbatim on a single line. No newline within the output means no
+// command was interpreted.
 func TestArgvSlice_ShellMetacharactersAreLiteral(t *testing.T) {
 	bin := helperBinary(t)
 	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "", "")
@@ -740,11 +742,20 @@ func TestClaudeAdapter_AllowedTools_GrantsEveryPolicyActionKind(t *testing.T) {
 
 // TestClaudeAdapter_AllowedTools_NeverSwallowsThePrompt is the regression guard for the
 // placement hazard: --allowedTools is VARIADIC on the real CLI (verified: it accepts
-// multiple space-separated values), so if it were appended last the trailing positional
-// prompt would be parsed as one more allowed tool name and the agent would receive no task
-// at all. The guard is structural rather than index-based so it survives any future flag
-// being added before or after the allowlist: whatever follows the last allowlist entry must
-// be another flag, and the prompt must still be the final argv element.
+// multiple space-separated values), so if it were appended last its value list would run
+// to the end of argv and absorb whatever trailed it. The guard is structural rather than
+// index-based so it survives any future flag being added before or after the allowlist:
+// whatever follows the last allowlist entry must be another flag.
+//
+// DELIBERATE OVERTURN (Slice 2 / B5): this test used to also assert
+// `argv[len(argv)-1] == prompt` — that the prompt was still the final argv element. That
+// assertion is now false BY DESIGN: the prompt moved off argv onto the child's stdin,
+// because a single argv string is capped at MAX_ARG_STRLEN (131072 bytes) on Linux and a
+// re-injected transcript outgrows it. The replacement guard is
+// TestRunTask_OversizedInputIsNotOnArgv (adapters/claudecode/input_delivery_test.go),
+// which asserts the opposite and stronger property — the prompt appears NOWHERE in argv —
+// alongside TestRunTask_DeliversInputLargerThanArgvCeiling, which proves an over-ceiling
+// input still reaches the subprocess intact.
 func TestClaudeAdapter_AllowedTools_NeverSwallowsThePrompt(t *testing.T) {
 	const prompt = "hello"
 	argv := dumpArgvForRun(t, mcpWiredOptions(t, "telegram_send", "github_pr_open"), "task-allowed-tools-placement", prompt)
@@ -760,13 +771,10 @@ func TestClaudeAdapter_AllowedTools_NeverSwallowsThePrompt(t *testing.T) {
 		end++
 	}
 	if end >= len(argv) {
-		t.Fatalf("the --allowedTools variadic list runs to the end of argv, so the CLI would absorb the positional prompt as an allowed tool name; argv=%v", argv)
+		t.Fatalf("the --allowedTools variadic list runs to the end of argv, so the CLI would absorb anything appended after it as an allowed tool name; argv=%v", argv)
 	}
 	if end == idx+1 {
 		t.Errorf("--allowedTools is immediately followed by another flag (%q), so no tool is granted; argv=%v", argv[end], argv)
-	}
-	if got := argv[len(argv)-1]; got != prompt {
-		t.Errorf("expected the last argv element to still be the prompt %q, got %q; argv=%v", prompt, got, argv)
 	}
 }
 
