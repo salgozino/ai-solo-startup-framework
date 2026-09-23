@@ -223,6 +223,28 @@ Chain strategy: **feature-branch-chain**, matching the convention this repo alre
 
 Slice 6 is the largest and may need splitting once its RED is written.
 
+### Slice 1 PR size: `size:exception`, maintainer-approved
+
+Slice 1 closes at 539 changed lines against the tracker, 35% over the ~400 heuristic. A
+cohesive split existed and was offered — PR 1a "add the field" (`store.go` +
+`store_test.go`, ~285 lines) and PR 1b "measure the cost and decide the layout"
+(`store_bench_test.go` + the T3 verdict, ~255 lines). The maintainer explicitly chose one
+PR instead, so this slice ships under `size:exception`.
+
+Recorded because the heuristic exists to protect reviewers, and an exception is only
+legitimate when it is deliberate and visible:
+
+| Part | Lines | Review load |
+|---|---|---|
+| `core/supervisor/store.go` | 11 | production, one additive field |
+| `core/supervisor/store_test.go` | 203 | tests |
+| `core/supervisor/store_bench_test.go` | 153 | benchmark |
+| `odd/tasks/ceo-orchestration-loop.md` | 172 | progress log, read as context |
+
+356 of the 539 lines are Go tests and 172 are a progress log; production code is 11 lines.
+This exception applies to Slice 1 only. Later slices carry real production weight and are
+expected to split rather than repeat it.
+
 ## Route
 
 Delegated direct. The writer trigger fires on every slice: each one touches 2+ non-trivial
