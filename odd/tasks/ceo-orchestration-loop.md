@@ -118,11 +118,11 @@ Out of scope: policy engine semantics, the Telegram gateway, adding new gateways
 ## Tasks
 
 Slice 1 — transcript persistence
-- [ ] **T1** — RED: test that a `TaskRecord` round-trips a non-empty turn list and that
+- [x] **T1** — RED: test that a `TaskRecord` round-trips a non-empty turn list and that
       literal pre-change JSON still loads with the new field as zero value.
-- [ ] **T2** — Add `Turns []port.ContextMessage` to `TaskRecord` (`omitempty`, zero-value
+- [x] **T2** — Add `Turns []port.ContextMessage` to `TaskRecord` (`omitempty`, zero-value
       safe), following the `RemainingIntents` precedent.
-- [ ] **T3** — Measure `Store.Save` cost with a realistic transcript and record the number
+- [x] **T3** — Measure `Store.Save` cost with a realistic transcript and record the number
       here. If it is bad, decide now whether the transcript moves to a sibling per-task
       file, before any other slice depends on the layout.
 
@@ -252,8 +252,101 @@ Runner: `go test ./...`.
   turn yet, wiring them would only change the first turn's input for no benefit. That work
   moved to T8, where it is actually needed. Slice 1 stays pure persistence plus the
   `Store.Save` cost measurement that decides the transcript's storage layout.
-- No source file has been modified for this feature yet.
+
+### Slice 1 — complete (T1, T2, T3)
+
+Branch: `feat/ceo-orchestration-loop-pr1-transcript-persistence`. Commits:
+
+- `4bdc9bb` `feat(supervisor): persist per-task turn transcript on TaskRecord` (T1 + T2)
+- `b5f33c3` `test(supervisor): benchmark Store.Save cost with a realistic transcript` (T3)
+
+**T1 — RED observed.** `go test ./core/supervisor/ -run 'TestStore_RoundTripsTurns|TestStore_LoadsRecordWrittenBeforeTurns'`,
+verbatim:
+
+```
+# github.com/salgozino/ai-solo-startup-framework/core/supervisor [.../core/supervisor.test]
+core/supervisor/store_test.go:236:3: unknown field Turns in struct literal of type TaskRecord
+core/supervisor/store_test.go:250:13: got.Turns undefined (type TaskRecord has no field or method Turns)
+core/supervisor/store_test.go:250:31: rec.Turns undefined (type TaskRecord has no field or method Turns)
+core/supervisor/store_test.go:251:53: got.Turns undefined (type TaskRecord has no field or method Turns)
+core/supervisor/store_test.go:251:69: rec.Turns undefined (type TaskRecord has no field or method Turns)
+core/supervisor/store_test.go:253:27: rec.Turns undefined (type TaskRecord has no field or method Turns)
+core/supervisor/store_test.go:254:12: got.Turns undefined (type TaskRecord has no field or method Turns)
+core/supervisor/store_test.go:310:9: got.Turns undefined (type TaskRecord has no field or method Turns)
+core/supervisor/store_test.go:311:43: got.Turns undefined (type TaskRecord has no field or method Turns)
+FAIL	github.com/salgozino/ai-solo-startup-framework/core/supervisor [build failed]
+```
+
+A second, self-inflicted RED is worth recording because it nearly produced a lying test: the
+backward-compat test first seeded task id `task-preturns` and asserted on the bare substring
+`turns`, which the task id itself contains. The assertion failed against correct code. Fixed
+in the test (quoted JSON key `"turns"`, task id `task-legacy-schema`), not in `store.go`. No
+existing test's assertions were modified.
+
+**T2.** `Turns []port.ContextMessage` with `json:"turns,omitempty"` on `TaskRecord`
+(`core/supervisor/store.go`). `core/port` was NOT modified: `port.ContextMessage` already
+round-trips through `encoding/json` unchanged (exported fields, `time.Time` carries its own
+marshaller). Schema only — nothing writes the field this slice, by design.
+
+**T3 — measured.** `go test -bench . -benchmem -benchtime=3s -count=3 -run '^$' ./core/supervisor/`,
+AMD Ryzen 7 PRO 6850U, linux/amd64, go1.27.0. Median of 3, 20 tasks in the agent file, each
+record carrying 10 turns x 4 KiB:
+
+| store | on-disk file | ns/op (no transcript) | ns/op (transcript) | B/op (no transcript) | B/op (transcript) |
+|---|---|---|---|---|---|
+| 20 tasks | 1.97 KiB → 814 KiB | 134,897 | 6,100,565 | 18,015 | 5,624,102 |
+| 100 tasks | 9.86 KiB → 4.0 MiB | 225,991 | 25,648,803 | 73,781 | 26,813,881 |
+| 500 tasks | 49.3 KiB → 19.9 MiB | 658,464 | 142,288,310 | 339,425 | 150,783,013 |
+
+At the realistic 20-task point the transcript costs **45x more time** (6.10 ms vs 0.135 ms)
+and **312x more allocation** (5.4 MiB vs 18 KiB) per save. Cost is linear in file bytes
+(5x the tasks → 4.2x then 5.5x the time), confirming the predicted O(N tasks x M turn bytes).
+Allocation tracks ~7x the file size — the unmarshal-plus-marshal working set. Across the 8
+`Store.Save` call sites in `supervisor.go` (`:247, :288, :303, :347, :387, :430, :450, :609`)
+that is ~49 ms and ~43 MiB of garbage per task at 20 tasks, ~1.14 s and ~1.15 GiB at 500.
+One 500-task sample hit 492 ms on a GC pause; the median is reported.
+
+**T3 verdict — keep `Turns` on `TaskRecord`. It does not need to move before later slices,
+because no later slice can depend on the layout.**
+
+The task framing assumed the on-disk layout is a shared contract. Verified: it is not.
+`TaskRecord` is JSON-encoded in exactly two places, both private to `store.go`
+(`:116` unmarshal, `:124` marshal). Every consumer reads the Go struct via `Store.Load`/
+`LoadAll` — `supervisor.go`, and `ui/handler.go` through its own deliberately decoupled
+`ui.TaskRecord`, converted field-by-field at `cmd/company/wire.go:113`. Splitting the
+transcript into a sibling per-task file later is therefore a pure `Store` internal refactor
+with a zero-line blast radius outside `core/supervisor/store.go`. Slices 3-8 couple to the
+**field**, never to where the bytes live. Paying for that refactor now would buy no optionality.
+
+At the realistic operating point the cost is also genuinely noise: ~49 ms of `Save` per task
+against a `RunTask` that spawns an LLM CLI subprocess measured in seconds to minutes — well
+under 1% of one round.
+
+This is not an unconditional "it is fine". Two unbounded multipliers make it a real future
+problem, just not a Slice 1 one:
+
+- `Store.Delete` has exactly ONE production caller, `Cancel` (`supervisor.go:583`). Completed
+  tasks are never pruned, so N grows for the life of the process, and the default store base
+  is `os.TempDir()` (`wire.go:288`), which nothing prunes between runs either.
+- Slice 3 pushes on both axes at once: re-invocation raises saves-per-task above 8, and the
+  transcript grows per round so each save costs more within a single task. This benchmark
+  held turns fixed at 10; the real loop will not.
+
+Named trigger instead of vibes: revisit in **Slice 3**, when turns are actually written, and
+reach for the cheaper lever first — pruning terminal tasks (the missing `Store.Delete` caller)
+keeps N small and keeps the shared-array layout viable indefinitely. The sibling-file split
+is the second lever, available at any time at zero consumer cost.
+
+**Verification, observed:**
+
+- `gofmt -l .` — no output (clean)
+- `go build ./cmd/company` — OK
+- `go vet ./...` — OK
+- `go test ./...` — all 12 packages `ok`
+- `go test -race ./core/supervisor/` — `ok` 1.294s
+- `go test -bench . -benchmem ./core/supervisor/` — numbers above
 
 ## Next step
 
-Slice 1, T1 (RED) on `feat/ceo-orchestration-loop-pr1-transcript-persistence`.
+Slice 2, T4 (RED): input larger than the argv ceiling delivered intact. T6 remains blocked
+on re-running the `opencode` stdin spike.
