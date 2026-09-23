@@ -122,9 +122,9 @@ Slice 1 — transcript persistence
       literal pre-change JSON still loads with the new field as zero value.
 - [ ] **T2** — Add `Turns []port.ContextMessage` to `TaskRecord` (`omitempty`, zero-value
       safe), following the `RemainingIntents` precedent.
-- [ ] **T3** — Call `assembleBoundedContext` / `contextText` / `effectiveBudget` from
-      production code. Benchmark or measure `Store.Save` cost with a realistic transcript
-      and record the number; if it is bad, move the transcript to a sibling file.
+- [ ] **T3** — Measure `Store.Save` cost with a realistic transcript and record the number
+      here. If it is bad, decide now whether the transcript moves to a sibling per-task
+      file, before any other slice depends on the layout.
 
 Slice 2 — input delivery
 - [ ] **T4** — RED: test proving an input larger than the argv ceiling is delivered intact.
@@ -139,6 +139,9 @@ Slice 3 — the second turn
       whose input contains the peer's output.
 - [ ] **T8** — Re-invoke the provider after a delegation round with the assembled
       transcript. Bounded rounds; exhaustion must be an explicit terminal state, not a hang.
+      This is where `assembleBoundedContext` / `contextText` / `effectiveBudget` finally get
+      production callers — wiring them earlier would change the first turn's input for no
+      reason.
 - [ ] **T9** — Stop `rec.Output` from being clobbered by the peer's raw text
       (`supervisor.go:476`, `:326-328`). `Output` must end up as the CEO's final answer.
       This deliberately overturns a test-asserted decision; name the replacement.
@@ -207,9 +210,16 @@ Forecast: ~2250 authored changed lines across 8 slices — far past the ~400 heu
 this ships as a chain, never as one PR. Each slice above is one PR boundary and each task
 closes with at least one work-unit commit carrying its tests.
 
-Chain strategy: **pending human decision** (stacked-to-main vs feature-branch-chain).
-Resolve the `work-unit-commits` and `chained-pr` skills by registry name before opening the
-first PR.
+Chain strategy: **feature-branch-chain**, matching the convention this repo already uses
+(tracker `feat/agent-delegation-over-a2a` with stacked `pr1..prN` children, tracker PR #75).
+
+- Tracker branch: `feat/ceo-orchestration-loop` — draft/no-merge PR, accumulates the whole
+  feature, and is the only branch that merges to `master`.
+- Child branches: `feat/ceo-orchestration-loop-pr<N>-<slice>`. PR #1 targets the tracker;
+  every later child targets the immediate previous child branch, so each review diff shows
+  only its own slice.
+- Every child PR carries a dependency diagram marking itself with a pin, plus start, end,
+  prior dependencies, follow-ups and out-of-scope items.
 
 Slice 6 is the largest and may need splitting once its RED is written.
 
@@ -234,8 +244,16 @@ Runner: `go test ./...`.
   by observed output. `opencode run` could not be verified — it currently fails on every
   invocation including the argv path the adapter uses today, so the failure says nothing
   about stdin. T6 stays blocked on re-running this spike.
+- Baseline before any change: `gofmt -l .`, `go build ./cmd/company`, `go vet ./...` and
+  `go test ./...` all clean on `master`.
+- Chain strategy resolved: feature-branch-chain, matching the repo's existing convention.
+- T3 was rewritten. It originally asked for `assembleBoundedContext` / `contextText` /
+  `effectiveBudget` to gain production callers in Slice 1, which is wrong: with no second
+  turn yet, wiring them would only change the first turn's input for no benefit. That work
+  moved to T8, where it is actually needed. Slice 1 stays pure persistence plus the
+  `Store.Save` cost measurement that decides the transcript's storage layout.
 - No source file has been modified for this feature yet.
 
 ## Next step
 
-Resolve the chain strategy, then start Slice 1 with T1 (RED).
+Slice 1, T1 (RED) on `feat/ceo-orchestration-loop-pr1-transcript-persistence`.
