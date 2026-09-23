@@ -5,7 +5,6 @@ A framework for running startups entirely by AI agents. You declare your company
 - YAML to define a new company.
 - Markdown to define the skills of each agent inside of a company
 - A2A protocol to build the communication between agents (Linux Foundation)
-- We follow the SDD flow for every feature made, and storing the specs in openspec and engram (if available)
 
 # How to build
 go build ./cmd/company
