@@ -445,7 +445,8 @@ would have stayed green while `Tokens` silently vanished.
 Branch: `feat/ceo-orchestration-loop-pr2-input-delivery`. Commits:
 
 - `dd1ae17` `fix(claudecode): deliver task input on stdin instead of argv` (T4 + T5)
-- `<docs commit>` `docs(odd): record Slice 2 outcome and the opencode argv won't-do` (this entry)
+- `1fa1b0d` `docs(odd): record Slice 2 outcome and the opencode argv won't-do` (this entry,
+  plus the `AGENTS.md` provider-compatibility note)
 
 **T4 — RED observed.** New file `adapters/claudecode/input_delivery_test.go`, two tests,
 added with no production change. `go test ./adapters/claudecode/ -run 'TestRunTask_DeliversInputLargerThanArgvCeiling|TestRunTask_OversizedInputIsNotOnArgv' -v`,
