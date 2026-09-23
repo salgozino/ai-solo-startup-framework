@@ -3,6 +3,7 @@ package supervisor
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -247,20 +248,105 @@ func TestStore_RoundTripsTurns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+	// Compare each decoded message as a whole value rather than field by field:
+	// a field added to port.ContextMessage later must break this test if it fails
+	// to persist, instead of being silently skipped by a hand-written field list.
+	//
+	// reflect.DeepEqual is safe here precisely because the fixtures above are
+	// fixed UTC instants. time.Time carries an optional monotonic reading and a
+	// *Location pointer, neither of which survives JSON, so DeepEqual would be
+	// wrong for a wall-clock now() or a non-UTC zone; for a UTC instant the
+	// decoded value is bit-identical to the encoded one.
 	if len(got.Turns) != len(rec.Turns) {
 		t.Fatalf("Turns length: got %d, want %d", len(got.Turns), len(rec.Turns))
 	}
 	for i, want := range rec.Turns {
-		g := got.Turns[i]
-		if g.Role != want.Role {
-			t.Errorf("Turns[%d].Role: got %q, want %q", i, g.Role, want.Role)
+		if !reflect.DeepEqual(got.Turns[i], want) {
+			t.Errorf("Turns[%d]: got %+v, want %+v", i, got.Turns[i], want)
 		}
-		if g.Content != want.Content {
-			t.Errorf("Turns[%d].Content: got %q, want %q", i, g.Content, want.Content)
-		}
-		if !g.At.Equal(want.At) {
-			t.Errorf("Turns[%d].At: got %s, want %s", i, g.At, want.At)
-		}
+	}
+}
+
+// TestStore_SavePreservesOtherRecordTurns proves that saving one task leaves a
+// different task's transcript in the same per-agent file untouched. Store.Save
+// rewrites the ENTIRE per-agent array on every call, so silently clobbering or
+// truncating a neighbour's turns is the most likely failure mode this field
+// introduces, and a single-record store can never catch it.
+// Closes native-review finding R3-single-record-store.
+func TestStore_SavePreservesOtherRecordTurns(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	addr := mustAddr(t, "ceo", "acme")
+	// Fixed, UTC instants for the same reason as TestStore_RoundTripsTurns.
+	base := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
+
+	neighbour := TaskRecord{
+		TaskID: "task-neighbour",
+		State:  "TASK_STATE_WORKING",
+		Input:  "audit the invoices",
+		Owner:  string(addr),
+		Turns: []port.ContextMessage{
+			{Role: "assistant", Content: "neighbour round one", At: base},
+			{Role: "peer", Content: "neighbour round two", At: base.Add(30 * time.Second)},
+			{Role: "assistant", Content: "neighbour round three", At: base.Add(60 * time.Second)},
+		},
+	}
+	subject := TaskRecord{
+		TaskID: "task-subject",
+		State:  "TASK_STATE_WORKING",
+		Input:  "plan the migration",
+		Owner:  string(addr),
+		Turns: []port.ContextMessage{
+			{Role: "assistant", Content: "subject round one", At: base.Add(90 * time.Second)},
+		},
+	}
+
+	if err := s.Save(addr, neighbour); err != nil {
+		t.Fatalf("Save neighbour: %v", err)
+	}
+	if err := s.Save(addr, subject); err != nil {
+		t.Fatalf("Save subject: %v", err)
+	}
+
+	// Grow the subject's transcript, exactly as a later delegation round would.
+	subject.Turns = append(subject.Turns, port.ContextMessage{
+		Role: "peer", Content: "subject round two", At: base.Add(120 * time.Second),
+	})
+	subject.State = "TASK_STATE_COMPLETED"
+	if err := s.Save(addr, subject); err != nil {
+		t.Fatalf("Save subject update: %v", err)
+	}
+
+	// The neighbour must survive content, order and count intact.
+	got, err := s.Load(addr, "task-neighbour")
+	if err != nil {
+		t.Fatalf("Load neighbour: %v", err)
+	}
+	if !reflect.DeepEqual(got.Turns, neighbour.Turns) {
+		t.Errorf("neighbour Turns: got %+v, want %+v", got.Turns, neighbour.Turns)
+	}
+
+	// And the write that triggered the rewrite must itself have landed, so a
+	// Save that quietly does nothing cannot pass this test either.
+	gotSubject, err := s.Load(addr, "task-subject")
+	if err != nil {
+		t.Fatalf("Load subject: %v", err)
+	}
+	if !reflect.DeepEqual(gotSubject.Turns, subject.Turns) {
+		t.Errorf("subject Turns: got %+v, want %+v", gotSubject.Turns, subject.Turns)
+	}
+
+	// Neither record may be dropped or duplicated by the rewrite.
+	all, err := s.LoadAll(addr)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("LoadAll: got %d records, want 2 (%+v)", len(all), all)
 	}
 }
 

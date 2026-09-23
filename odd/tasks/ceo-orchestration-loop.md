@@ -361,9 +361,48 @@ follow-ups rather than as reasons to re-review this candidate:
   record, so nothing proves that saving one task preserves a *different* task's transcript
   in the same per-agent file. Given that `Store.Save` rewrites the whole array, this is the
   most likely silent-clobber failure mode. Real gap; cheap to close at unit level.
+  **Closed** by `TestStore_SavePreservesOtherRecordTurns` (`core/supervisor/store_test.go`):
+  two tasks with distinct transcripts, one saved, the neighbour asserted intact by whole-value
+  comparison plus a `LoadAll` count so a dropped or duplicated record also fails.
 - **R3-roundtrip-field-subset** (SUGGESTION) — the round-trip test compares `Role`,
   `Content` and `At` individually instead of the decoded message as a whole, so a future
   field on `port.ContextMessage` could fail to persist and leave the test green.
+  **Closed**: `TestStore_RoundTripsTurns` now compares each decoded message as a whole value
+  via `reflect.DeepEqual`, so a new field is covered automatically. `reflect.DeepEqual` is
+  correct here only because the fixtures are fixed UTC instants — `time.Time` carries a
+  monotonic reading and a `*Location` that do not survive JSON — and that property is now
+  stated in the test.
+
+**Teeth proven by mutation, not by assertion.** Both tests are coverage, not bug fixes, and
+both passed the moment they were written: `Store.Save` was already correct. No RED was
+fabricated. Each was instead proven non-vacuous by temporarily breaking the behaviour it
+claims to protect, and both mutations were reverted (`git diff core/supervisor/store.go` and
+`git diff core/port/provider.go` both empty).
+
+Mutation A — `Save` nils every *other* record's `Turns` before writing the array:
+
+```
+=== RUN   TestStore_SavePreservesOtherRecordTurns
+    store_test.go:330: neighbour Turns: got [], want [{Role:assistant Content:neighbour round one At:2026-09-23 10:00:00 +0000 UTC} {Role:peer Content:neighbour round two At:2026-09-23 10:00:30 +0000 UTC} {Role:assistant Content:neighbour round three At:2026-09-23 10:01:00 +0000 UTC}]
+--- FAIL: TestStore_SavePreservesOtherRecordTurns (0.00s)
+```
+
+Under that mutation every *other* `TestStore_*` test — including both Slice 1 tests as
+originally written — still passed. That is the finding's whole point, now demonstrated
+rather than argued.
+
+Mutation B — a future field added to `port.ContextMessage` that fails to persist
+(`Tokens int \`json:"-"\``, set in the fixture):
+
+```
+=== RUN   TestStore_RoundTripsTurns
+    store_test.go:265: Turns[0]: got {Role:assistant Content:delegating the draft to the engineer At:2026-09-23 10:00:00 +0000 UTC Tokens:0}, want {Role:assistant Content:delegating the draft to the engineer At:2026-09-23 10:00:00 +0000 UTC Tokens:7}
+    store_test.go:265: Turns[1]: got {Role:peer Content:draft ready: three phases At:2026-09-23 10:01:30 +0000 UTC Tokens:0}, want {Role:peer Content:draft ready: three phases At:2026-09-23 10:01:30 +0000 UTC Tokens:11}
+--- FAIL: TestStore_RoundTripsTurns (0.00s)
+```
+
+`Role`, `Content` and `At` all match in that output, so the previous field-subset comparison
+would have stayed green while `Tokens` silently vanished.
 - **R3-bench-quadratic-seed** (WARNING) — the benchmark seed loop calls `Save` once per
   task, and `Save` rewrites the whole array, so setup is quadratic in file bytes: the
   500-task transcript sweep writes on the order of gigabytes before the timer starts, once
@@ -375,5 +414,8 @@ follow-ups rather than as reasons to re-review this candidate:
 Slice 2, T4 (RED): input larger than the argv ceiling delivered intact. T6 remains blocked
 on re-running the `opencode` stdin spike.
 
-Pending decision before opening PR #1: whether to fold R3-single-record-store and
-R3-roundtrip-field-subset into this slice, or track them as follow-ups.
+Slice 1's review findings are settled: R3-toolchain-floor closed by evidence,
+R3-single-record-store and R3-roundtrip-field-subset folded into this slice and closed above.
+R3-bench-quadratic-seed stays an open follow-up — it costs `go test -bench .` time only, not
+correctness, and is best paid alongside the Slice 3 benchmark revisit the T3 verdict already
+schedules.
