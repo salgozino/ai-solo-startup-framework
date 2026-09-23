@@ -225,11 +225,10 @@ Slice 6 is the largest and may need splitting once its RED is written.
 
 ### Slice 1 PR size: `size:exception`, maintainer-approved
 
-Slice 1 closes at 539 changed lines against the tracker, 35% over the ~400 heuristic. A
-cohesive split existed and was offered — PR 1a "add the field" (`store.go` +
-`store_test.go`, ~285 lines) and PR 1b "measure the cost and decide the layout"
-(`store_bench_test.go` + the T3 verdict, ~255 lines). The maintainer explicitly chose one
-PR instead, so this slice ships under `size:exception`.
+Slice 1 closes well over the ~400-line heuristic. A cohesive split existed and was offered
+— PR 1a "add the field" (`store.go` + `store_test.go`) and PR 1b "measure the cost and
+decide the layout" (`store_bench_test.go` + the T3 verdict), each comfortably under budget.
+The maintainer explicitly chose one PR instead, so this slice ships under `size:exception`.
 
 Recorded because the heuristic exists to protect reviewers, and an exception is only
 legitimate when it is deliberate and visible:
@@ -239,9 +238,19 @@ legitimate when it is deliberate and visible:
 | `core/supervisor/store.go` | 11 | production, one additive field |
 | `core/supervisor/store_test.go` | 203 | tests |
 | `core/supervisor/store_bench_test.go` | 153 | benchmark |
-| `odd/tasks/ceo-orchestration-loop.md` | 172 | progress log, read as context |
+| `odd/tasks/ceo-orchestration-loop.md` | see below | progress log, read as context |
 
-356 of the 539 lines are Go tests and 172 are a progress log; production code is 11 lines.
+367 lines are Go, and only 11 of those are production code: one additive, `omitempty`,
+zero-value-safe struct field. The rest of the diff is this progress log.
+
+This note deliberately carries **no frozen total**, and that is the fix for native-review
+finding `R3-size-accounting-stale`. The first version stated 539 changed lines with 172 in
+this document — numbers that were already wrong when committed, because writing the note
+grew the very document it was counting. Any total stated here is stale the moment the next
+progress entry lands. The Go counts above are stable and are the actual review load; the
+document's own line count is self-referential and is left to `git diff --stat` to answer at
+read time.
+
 This exception applies to Slice 1 only. Later slices carry real production weight and are
 expected to split rather than repeat it.
 
@@ -436,8 +445,29 @@ would have stayed green while `Tokens` silently vanished.
 Slice 2, T4 (RED): input larger than the argv ceiling delivered intact. T6 remains blocked
 on re-running the `opencode` stdin spike.
 
-Slice 1's review findings are settled: R3-toolchain-floor closed by evidence,
-R3-single-record-store and R3-roundtrip-field-subset folded into this slice and closed above.
-R3-bench-quadratic-seed stays an open follow-up — it costs `go test -bench .` time only, not
-correctness, and is best paid alongside the Slice 3 benchmark revisit the T3 verdict already
-schedules.
+Slice 1's review findings are settled. Two native reviews ran on this slice:
+
+- `review-787c47fe13b36fa2` — approved. R3-toolchain-floor closed by evidence;
+  R3-single-record-store and R3-roundtrip-field-subset folded into this slice and closed
+  above with mutation proof.
+- `review-00c2c7d549dd7761` — approved on the amended candidate, no blocker. It confirmed
+  the two folded-in tests and raised three advisory findings:
+  - **R3-size-accounting-stale** (SUGGESTION) — **closed**: the size-exception note stated
+    539 changed lines with 172 in this document, while the real diff was 561 with 194.
+    Writing the audit note grew the document it audited. Fixed by removing the frozen
+    total; see the size-exception section above.
+  - **R3-bench-replace-path-only** (SUGGESTION) — **open**. The timed benchmark record
+    reuses a `TaskID` the seed already wrote, so every measured `Save` exercises only the
+    in-place replace path. The append path — a new task growing an already large array —
+    is unmeasured, and the T3 verdict extrapolates from replace-only. Worth closing when
+    the Slice 3 benchmark revisit happens, since it may shift the cost curve the verdict
+    rests on.
+  - **R3-bench-quadratic-seed** (WARNING) — **open**. The seed loop calls `Save` per task,
+    so setup is quadratic in file bytes; the 500-task sweep writes gigabytes before the
+    timer starts. Costs `go test -bench .` time only, not correctness.
+
+Both open findings live in the benchmark file and pair naturally with the Slice 3 revisit
+the T3 verdict already schedules. Neither affects the persisted schema.
+
+This document amendment is passive documentation correcting an audit note; it does not
+reopen review on the already-acknowledged candidate.
