@@ -179,8 +179,13 @@ func New(claudeBin string, opts Options, model string, systemPromptPath string) 
 // bearer token is delivered only inside that config file's JSON, never on argv.
 func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (port.ProviderResult, error) {
 	// The input travels on the child's STDIN, never on argv. `claude -p` reads the prompt
-	// from stdin when no positional prompt argument is given (verified against the
-	// installed 2.1.268 CLI). Two reasons, in order of importance:
+	// from stdin when no positional prompt argument is given. Verified against the installed
+	// 2.1.280 CLI by observed run, not by inference: this exact flag set with no positional
+	// and the prompt piped in exits 0 with subtype "success", and a 145204-byte prompt (past
+	// the argv ceiling below) arrives intact — the model echoed bookend markers from both the
+	// first and last line. The CLI's own error text names stdin as a supported source:
+	// "Input must be provided either through stdin or as a prompt argument when using
+	// --print". Two reasons for choosing it, in order of importance:
 	//
 	//  1. Linux caps a SINGLE argv string at MAX_ARG_STRLEN (32 pages = 131072 bytes),
 	//     independently of the far larger total ARG_MAX. A prompt past that ceiling makes
@@ -196,10 +201,11 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 	// -p requests non-interactive mode: claude processes the prompt and prints output to stdout,
 	// then exits. Without -p, claude starts an interactive REPL which blocks forever.
 	//
-	// --safe-mode is deliberately NOT passed. Per `claude --help` (verified against the
-	// installed 2.1.268 CLI), --safe-mode disables "CLAUDE.md, skills, plugins, hooks, MCP
-	// servers, custom commands and agents, output styles, workflows, custom themes,
-	// keybindings" as one bundle — MCP servers are explicitly in that disabled set, so
+	// --safe-mode is deliberately NOT passed. Per `claude --help` (re-verified against the
+	// installed 2.1.280 CLI), --safe-mode disables "CLAUDE.md, skills, installed plugins,
+	// hooks, MCP servers, custom commands and agents, output styles, workflows, custom
+	// themes, keybindings, and more" as one bundle — MCP servers are still explicitly in that
+	// disabled set on 2.1.280, so the decision holds for the same reason it did originally:
 	// combining --safe-mode with --mcp-config/--strict-mcp-config below made the MCP
 	// endpoint unreachable, which the never-contacted guard at the end of this function
 	// then turned into a hard failure on every MCP-wired invocation.
@@ -267,6 +273,9 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 		// installed CLI (2.1.268) with exactly this flag set: without an allowlist the
 		// tool result is "Claude requested permissions to use mcp__framework__<tool>, but
 		// you haven't granted it yet"; with --allowedTools naming that tool it succeeds.
+		// That 2.1.268 is the truthful record of when the behaviour was reproduced, with a
+		// live MCP server driving a real tool call. It has NOT been re-run on 2.1.280 —
+		// `claude --help` cannot re-verify a runtime permission decision.
 		//
 		// Least privilege on purpose: only this framework's own policy-declared action
 		// tools are granted. --dangerously-skip-permissions and

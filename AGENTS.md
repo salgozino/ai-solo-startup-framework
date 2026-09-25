@@ -67,9 +67,10 @@ environment variable. Neither adapter reads or writes a persisted user config.
 ## claude adapter isolation flags (decision item)
 
 The claude adapter deliberately does **not** pass `--safe-mode`. Per `claude --help`
-(verified against the installed 2.1.268 CLI), `--safe-mode` disables "CLAUDE.md, skills,
-plugins, hooks, MCP servers, custom commands and agents, output styles, workflows, custom
-themes, keybindings" as one bundle — MCP servers are explicitly included, so combining
+(re-verified against the installed 2.1.280 CLI), `--safe-mode` disables "CLAUDE.md, skills,
+installed plugins, hooks, MCP servers, custom commands and agents, output styles, workflows,
+custom themes, keybindings, and more" as one bundle — MCP servers are still explicitly
+included on 2.1.280, so the decision still holds for its original reason: combining
 `--safe-mode` with `--mcp-config`/`--strict-mcp-config` made the MCP endpoint permanently
 unreachable and every MCP-wired `RunTask` invocation fail.
 

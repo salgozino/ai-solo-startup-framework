@@ -709,7 +709,10 @@ func mcpWiredOptions(t *testing.T, actionKinds ...string) claudecode.Options {
 // (2.1.268) with exactly this adapter's flag set: without an allowlist the tool call comes
 // back as "Claude requested permissions to use mcp__framework__echo, but you haven't granted
 // it yet", while the agent's own text still claims the action was performed. With
-// "--allowedTools mcp__framework__echo" the same call succeeds.
+// "--allowedTools mcp__framework__echo" the same call succeeds. That 2.1.268 is the truthful
+// record of when the behaviour was reproduced, with a live MCP server driving a real tool
+// call; it has NOT been re-run on 2.1.280, because `claude --help` cannot re-verify a runtime
+// permission decision.
 //
 // The tool name the CLI expects is "mcp__<serverKey>__<toolName>", where serverKey is the
 // key under "mcpServers" in the ephemeral --mcp-config file. The literal "framework" is
@@ -801,9 +804,10 @@ func TestClaudeAdapter_AllowedTools_AbsentWithoutMCP(t *testing.T) {
 
 // TestClaudeAdapter_MCPFlags_NeverCombinedWithDisablingFlag is the falsifiable JD-2
 // regression test for the finding that --safe-mode disables MCP servers on the real CLI
-// (per `claude --help`, verified against the installed 2.1.268 binary: --safe-mode disables
-// "CLAUDE.md, skills, plugins, hooks, MCP servers, custom commands and agents, output
-// styles, workflows, custom themes, keybindings" as one bundle), so combining it with
+// (per `claude --help`, re-verified against the installed 2.1.280 binary: --safe-mode
+// disables "CLAUDE.md, skills, installed plugins, hooks, MCP servers, custom commands and
+// agents, output styles, workflows, custom themes, keybindings, and more" as one bundle —
+// MCP servers are still in the bundle on 2.1.280), so combining it with
 // --mcp-config/--strict-mcp-config made the MCP endpoint permanently unreachable and every
 // MCP-wired RunTask call fail via the never-contacted guard.
 //

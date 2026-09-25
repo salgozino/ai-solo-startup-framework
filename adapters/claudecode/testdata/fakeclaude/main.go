@@ -1,13 +1,27 @@
 // fakeclaude simulates the claude CLI for unit testing the Claude Code adapter.
 //
-// PROMPT SOURCE — mirrors the real CLI, which accepts the prompt either way:
-// when a positional prompt argument is present on argv it wins; when there is none,
-// the prompt is read from stdin instead. The adapter's RunTask uses the stdin path
-// (argv has a per-argument MAX_ARG_STRLEN ceiling; see adapters/claudecode/adapter.go),
-// while ProbeModel still passes an empty positional argument. Keeping argv authoritative
-// when present is what makes the stdin support unable to mask an adapter regression: if
-// the adapter went back to putting the prompt on argv, that argv value would be used and
-// the oversized-input test would still die at execve with E2BIG.
+// PROMPT SOURCE — a deliberate SIMPLIFICATION of the real CLI, not a mirror of it.
+//
+// The real CLI accepts the prompt from EITHER source, and when BOTH are supplied it
+// receives both rather than picking a winner. Observed on 2.1.280: stdin "ALPHA" plus a
+// positional "BRAVO" yields "ALPHA BRAVO"; positional only yields the positional; stdin
+// only yields stdin. Its own error text names both sources — "Input must be provided
+// either through stdin or as a prompt argument when using --print".
+//
+// fakeclaude does NOT reproduce that merge. It uses a simpler rule: a positional wins
+// when present, and stdin is read only when argv carries no positional at all. A
+// single-prompt model is all the suite needs, and keeping argv authoritative is what stops
+// the fake's stdin support from masking an adapter that regressed to argv.
+//
+// The simplification is safe because no caller in this codebase supplies both. RunTask
+// passes no positional at all (argv has a per-argument MAX_ARG_STRLEN ceiling; see
+// adapters/claudecode/adapter.go), and ProbeModel passes an empty positional while leaving
+// stdin at /dev/null. The merge case therefore never arises here today.
+//
+// Mutation resistance is unaffected, but the mechanism is execve, not precedence: if the
+// adapter went back to putting the prompt on argv, the oversized-input test would still die
+// at execve with E2BIG BEFORE the CLI parses anything — so the guard holds regardless of how
+// the real CLI would resolve a dual source.
 //
 // The resulting prompt, from either source, behaves as follows:
 //
@@ -102,7 +116,8 @@ func main() {
 	//        [--mcp-config <path>] [--strict-mcp-config] [--output-format <format>]
 	//        [--verbose]] [<prompt>]
 	// Parse flags, then take the last positional argument as the prompt. When argv
-	// carries no positional at all, read the prompt from stdin instead.
+	// carries no positional at all, read the prompt from stdin instead. This is the fake's
+	// own simplified rule, NOT the real CLI's behaviour — see the PROMPT SOURCE note above.
 	var model string
 	var systemPromptFile string
 	settingSourcesSeen := false
@@ -149,6 +164,11 @@ func main() {
 	// No positional prompt on argv → the prompt came in on stdin. An empty or absent
 	// stdin (exec leaves it as /dev/null when the parent sets no Stdin) reads as "" and
 	// falls through to the same "Input must be provided" path an empty prompt takes.
+	//
+	// The real CLI would read stdin here even WITH a positional present, and concatenate
+	// both. This gate deliberately does not: argv stays authoritative so the fake cannot
+	// green a suite over an adapter that put the prompt back on argv. No caller supplies
+	// both, so the divergence is unreachable in this codebase (see PROMPT SOURCE above).
 	if !positionalSeen {
 		if raw, err := io.ReadAll(os.Stdin); err == nil {
 			input = string(raw)
