@@ -169,24 +169,43 @@ func New(claudeBin string, opts Options, model string, systemPromptPath string) 
 }
 
 // RunTask implements port.Provider.RunTask.
-// It spawns a fresh claude process with -p (non-interactive mode), passes input as
-// a positional argv argument, reads stdout up to the size cap, and returns a parsed
-// ProviderResult. Non-zero exit → error. ctx deadline kills the child.
+// It spawns a fresh claude process with -p (non-interactive mode), writes input to the
+// child's stdin, reads stdout up to the size cap, and returns a parsed ProviderResult.
+// Non-zero exit → error. ctx deadline kills the child.
 //
 // When mcpRegistry is configured, RunTask mints a per-invocation MCP bearer token,
 // writes an ephemeral --mcp-config file (0600, removed via defer before returning),
 // and drains the token's recorded ActionIntents after the subprocess exits. The
 // bearer token is delivered only inside that config file's JSON, never on argv.
 func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (port.ProviderResult, error) {
-	// argv-as-slice: input is passed as a literal argument, never interpolated into a shell string.
-	// This is the primary guard against argument injection (threat-matrix case a).
+	// The input travels on the child's STDIN, never on argv. `claude -p` reads the prompt
+	// from stdin when no positional prompt argument is given. Verified against the installed
+	// 2.1.280 CLI by observed run, not by inference: this exact flag set with no positional
+	// and the prompt piped in exits 0 with subtype "success", and a 145204-byte prompt (past
+	// the argv ceiling below) arrives intact — the model echoed bookend markers from both the
+	// first and last line. The CLI's own error text names stdin as a supported source:
+	// "Input must be provided either through stdin or as a prompt argument when using
+	// --print". Two reasons for choosing it, in order of importance:
+	//
+	//  1. Linux caps a SINGLE argv string at MAX_ARG_STRLEN (32 pages = 131072 bytes),
+	//     independently of the far larger total ARG_MAX. A prompt past that ceiling makes
+	//     execve fail with E2BIG before the CLI ever runs. Task input is not bounded by
+	//     anything in this framework — a re-injected conversation transcript grows every
+	//     round — so argv delivery had a hard, low, silent ceiling. stdin is a pipe and
+	//     has no equivalent cap.
+	//  2. It keeps the injection guarantee that argv-as-slice already provided: input is
+	//     written as opaque bytes to a pipe, never interpolated into a shell string
+	//     (threat-matrix case a). The remaining argv is still built as a slice, never a
+	//     shell command line.
+	//
 	// -p requests non-interactive mode: claude processes the prompt and prints output to stdout,
 	// then exits. Without -p, claude starts an interactive REPL which blocks forever.
 	//
-	// --safe-mode is deliberately NOT passed. Per `claude --help` (verified against the
-	// installed 2.1.268 CLI), --safe-mode disables "CLAUDE.md, skills, plugins, hooks, MCP
-	// servers, custom commands and agents, output styles, workflows, custom themes,
-	// keybindings" as one bundle — MCP servers are explicitly in that disabled set, so
+	// --safe-mode is deliberately NOT passed. Per `claude --help` (re-verified against the
+	// installed 2.1.280 CLI), --safe-mode disables "CLAUDE.md, skills, installed plugins,
+	// hooks, MCP servers, custom commands and agents, output styles, workflows, custom
+	// themes, keybindings, and more" as one bundle — MCP servers are still explicitly in that
+	// disabled set on 2.1.280, so the decision holds for the same reason it did originally:
 	// combining --safe-mode with --mcp-config/--strict-mcp-config below made the MCP
 	// endpoint unreachable, which the never-contacted guard at the end of this function
 	// then turned into a hard failure on every MCP-wired invocation.
@@ -254,6 +273,9 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 		// installed CLI (2.1.268) with exactly this flag set: without an allowlist the
 		// tool result is "Claude requested permissions to use mcp__framework__<tool>, but
 		// you haven't granted it yet"; with --allowedTools naming that tool it succeeds.
+		// That 2.1.268 is the truthful record of when the behaviour was reproduced, with a
+		// live MCP server driving a real tool call. It has NOT been re-run on 2.1.280 —
+		// `claude --help` cannot re-verify a runtime permission decision.
 		//
 		// Least privilege on purpose: only this framework's own policy-declared action
 		// tools are granted. --dangerously-skip-permissions and
@@ -264,8 +286,13 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 		// PLACEMENT IS LOAD-BEARING: --allowedTools is variadic, so its value list runs
 		// until the next flag. It is appended here, inside the MCP block and therefore
 		// before the unconditional --output-format append below, so a flag always follows
-		// it. Appended last it would instead absorb the trailing positional prompt as one
-		// more tool name and the agent would receive no task at all.
+		// it and terminates the list.
+		//
+		// This used to also be the guard against the allowlist absorbing the trailing
+		// positional prompt as one more tool name. The prompt now travels on stdin, so
+		// that specific hazard is gone — but the placement is kept, because any future
+		// trailing positional argument would reintroduce it, and because a variadic flag
+		// that runs to the end of argv is a fragile shape regardless.
 		if len(a.policyActionKinds) > 0 {
 			args = append(args, "--allowedTools")
 			for _, kind := range a.policyActionKinds {
@@ -280,9 +307,13 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 	// Output alongside intents (spec: "Claude adapter does not request --json-schema").
 	args = append(args, "--output-format", "stream-json", "--verbose")
 
-	args = append(args, input)
-
 	cmd := exec.CommandContext(ctx, a.claudeBin, args...) //nolint:gosec // argv slice, no shell
+
+	// Input delivery. os/exec copies this reader into the child's stdin pipe from a
+	// dedicated goroutine that cmd.Wait() joins, so a prompt larger than the 64 KiB pipe
+	// buffer cannot deadlock against this function's own stdout read below.
+	cmd.Stdin = strings.NewReader(input)
+
 	if mcpConfigPath != "" {
 		// FAKECLAUDE_MCP_CONFIG is consumed only by the test double; the real claude CLI
 		// reads the config via --mcp-config. Subprocess-scoped only — never os.Setenv.

@@ -1,7 +1,8 @@
 // Package claudecode_test contains threat-matrix RED tests for the Claude Code adapter.
 // These tests cover the provider-subprocess threat cases from design.md:
 //
-//	(a) argv-as-slice: shell metacharacters in input are literal data, never interpreted
+//	(a) no shell: shell metacharacters in input are literal data, never interpreted
+//	    (flags are an argv slice; the input itself is written to the child's stdin)
 //	(b) hung child killed after ctx deadline → FAILED
 //	(c) oversized output truncated with marker before parse
 //	(d) non-zero exit → failure outcome, not success
@@ -94,14 +95,21 @@ func helperBinary(t *testing.T) string {
 	return bin
 }
 
-// TestArgvSlice_ShellMetacharactersAreLiteral verifies threat-matrix case (a):
-// shell metacharacters in input do not alter the invocation — they are passed as literal data.
+// TestInput_ShellMetacharactersAreNeverInterpreted verifies threat-matrix case (a):
+// shell metacharacters in input do not alter the invocation — no shell ever sees the input
+// bytes, so they reach the child as literal data.
 //
-// If the adapter used "sh -c", the shell would execute `echo INJECTED` and `rm -rf /` as
-// separate commands, producing a multi-line output where INJECTED appears on its own line.
-// With argv-as-slice, the entire string is passed verbatim as one argument; fakeclaude echoes
-// it as-is on a single line. No newline within the output means no command was interpreted.
-func TestArgvSlice_ShellMetacharactersAreLiteral(t *testing.T) {
+// If the adapter used "sh -c", the shell would execute `echo INJECTED` as a separate
+// command, producing a multi-line output where INJECTED appears on its own line. The
+// adapter never builds a shell command line: the flags are an argv slice and, since Slice 2
+// moved the prompt off argv, the input is written to the child's stdin as opaque bytes.
+// fakeclaude therefore echoes it verbatim on a single line. No newline within the output
+// means no command was interpreted.
+//
+// The test was named TestArgvSlice_ShellMetacharactersAreLiteral while the input travelled
+// on argv; the name was corrected because the input no longer rides argv at all, while the
+// property under test — nothing interprets those bytes — is unchanged.
+func TestInput_ShellMetacharactersAreNeverInterpreted(t *testing.T) {
 	bin := helperBinary(t)
 	adapter := claudecode.New(bin, claudecode.Options{OutputLimit: 1 << 20}, "", "")
 
@@ -113,7 +121,7 @@ func TestArgvSlice_ShellMetacharactersAreLiteral(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTask with metachar input: unexpected error: %v", err)
 	}
-	// With argv-as-slice: fakeclaude echoes the full string as one token, no newline inside.
+	// With no shell in the path: fakeclaude echoes the stdin bytes verbatim, no newline inside.
 	// The output has an "iso:1|" prefix (isolation flags are always present) then the literal input.
 	expected := "iso:1|" + maliciousInput
 	if result.Output != expected {
@@ -701,7 +709,10 @@ func mcpWiredOptions(t *testing.T, actionKinds ...string) claudecode.Options {
 // (2.1.268) with exactly this adapter's flag set: without an allowlist the tool call comes
 // back as "Claude requested permissions to use mcp__framework__echo, but you haven't granted
 // it yet", while the agent's own text still claims the action was performed. With
-// "--allowedTools mcp__framework__echo" the same call succeeds.
+// "--allowedTools mcp__framework__echo" the same call succeeds. That 2.1.268 is the truthful
+// record of when the behaviour was reproduced, with a live MCP server driving a real tool
+// call; it has NOT been re-run on 2.1.280, because `claude --help` cannot re-verify a runtime
+// permission decision.
 //
 // The tool name the CLI expects is "mcp__<serverKey>__<toolName>", where serverKey is the
 // key under "mcpServers" in the ephemeral --mcp-config file. The literal "framework" is
@@ -740,11 +751,20 @@ func TestClaudeAdapter_AllowedTools_GrantsEveryPolicyActionKind(t *testing.T) {
 
 // TestClaudeAdapter_AllowedTools_NeverSwallowsThePrompt is the regression guard for the
 // placement hazard: --allowedTools is VARIADIC on the real CLI (verified: it accepts
-// multiple space-separated values), so if it were appended last the trailing positional
-// prompt would be parsed as one more allowed tool name and the agent would receive no task
-// at all. The guard is structural rather than index-based so it survives any future flag
-// being added before or after the allowlist: whatever follows the last allowlist entry must
-// be another flag, and the prompt must still be the final argv element.
+// multiple space-separated values), so if it were appended last its value list would run
+// to the end of argv and absorb whatever trailed it. The guard is structural rather than
+// index-based so it survives any future flag being added before or after the allowlist:
+// whatever follows the last allowlist entry must be another flag.
+//
+// DELIBERATE OVERTURN (Slice 2 / B5): this test used to also assert
+// `argv[len(argv)-1] == prompt` — that the prompt was still the final argv element. That
+// assertion is now false BY DESIGN: the prompt moved off argv onto the child's stdin,
+// because a single argv string is capped at MAX_ARG_STRLEN (131072 bytes) on Linux and a
+// re-injected transcript outgrows it. The replacement guard is
+// TestRunTask_OversizedInputIsNotOnArgv (adapters/claudecode/input_delivery_test.go),
+// which asserts the opposite and stronger property — the prompt appears NOWHERE in argv —
+// alongside TestRunTask_DeliversInputLargerThanArgvCeiling, which proves an over-ceiling
+// input still reaches the subprocess intact.
 func TestClaudeAdapter_AllowedTools_NeverSwallowsThePrompt(t *testing.T) {
 	const prompt = "hello"
 	argv := dumpArgvForRun(t, mcpWiredOptions(t, "telegram_send", "github_pr_open"), "task-allowed-tools-placement", prompt)
@@ -760,13 +780,10 @@ func TestClaudeAdapter_AllowedTools_NeverSwallowsThePrompt(t *testing.T) {
 		end++
 	}
 	if end >= len(argv) {
-		t.Fatalf("the --allowedTools variadic list runs to the end of argv, so the CLI would absorb the positional prompt as an allowed tool name; argv=%v", argv)
+		t.Fatalf("the --allowedTools variadic list runs to the end of argv, so the CLI would absorb anything appended after it as an allowed tool name; argv=%v", argv)
 	}
 	if end == idx+1 {
 		t.Errorf("--allowedTools is immediately followed by another flag (%q), so no tool is granted; argv=%v", argv[end], argv)
-	}
-	if got := argv[len(argv)-1]; got != prompt {
-		t.Errorf("expected the last argv element to still be the prompt %q, got %q; argv=%v", prompt, got, argv)
 	}
 }
 
@@ -787,9 +804,10 @@ func TestClaudeAdapter_AllowedTools_AbsentWithoutMCP(t *testing.T) {
 
 // TestClaudeAdapter_MCPFlags_NeverCombinedWithDisablingFlag is the falsifiable JD-2
 // regression test for the finding that --safe-mode disables MCP servers on the real CLI
-// (per `claude --help`, verified against the installed 2.1.268 binary: --safe-mode disables
-// "CLAUDE.md, skills, plugins, hooks, MCP servers, custom commands and agents, output
-// styles, workflows, custom themes, keybindings" as one bundle), so combining it with
+// (per `claude --help`, re-verified against the installed 2.1.280 binary: --safe-mode
+// disables "CLAUDE.md, skills, installed plugins, hooks, MCP servers, custom commands and
+// agents, output styles, workflows, custom themes, keybindings, and more" as one bundle —
+// MCP servers are still in the bundle on 2.1.280), so combining it with
 // --mcp-config/--strict-mcp-config made the MCP endpoint permanently unreachable and every
 // MCP-wired RunTask call fail via the never-contacted guard.
 //
