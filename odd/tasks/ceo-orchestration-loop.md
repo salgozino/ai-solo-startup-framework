@@ -648,24 +648,29 @@ PASS
 ok  	github.com/salgozino/ai-solo-startup-framework/adapters/claudecode	0.004s [no tests to run]
 ```
 
-**Open follow-up — the premise itself is unproven against the real CLI.** This is the group
-that matters most, because the whole slice rests on it.
+**The premise itself — was unproven against the real CLI, now closed by observation.** This
+is the group that mattered most, because the whole slice rests on it.
 
-- **R3-real-cli-stdin-contract-unproven** (WARNING) — **open**. The premise that `claude -p`
-  reads the prompt from stdin when no positional is given is proven only against
-  `fakeclaude`, whose stdin support was authored in this same candidate. The suite is
-  therefore self-consistent, not evidence about the real CLI: the fake was taught the
-  behaviour the adapter needs, and then the adapter was tested against the fake. The recorded
-  mutation (reverting `RunTask` to `args = append(args, input)`) proves the adapter cannot
-  regress to argv; it does **not** prove the installed CLI honours stdin. Closing it needs an
-  opt-in, build-tagged integration test against the installed `claude`, skipped by default so
-  CI stays hermetic.
-- **R4-stdin-delivery-has-no-failure-signal** (WARNING) — **open**, and the reason the item
-  above is not merely academic. If a future CLI build stops reading stdin under `-p`,
+- **R3-real-cli-stdin-contract-unproven** (WARNING) — **closed by observation**. The premise
+  that `claude -p` reads the prompt from stdin when no positional is given was proven only
+  against `fakeclaude`, whose stdin support was authored in this same candidate — a
+  self-consistent suite, not evidence about the real CLI. It has now been run against the
+  installed `claude` 2.1.280 and holds. Full results, including a defect the spike found in
+  `fakeclaude`'s own comments, are recorded under `### Slice 2 — real-CLI spike` below.
+
+  Closed honestly, with the limit stated: a one-off spike proves the premise on 2.1.280
+  **today**, and cannot notice a future CLI build changing it. The mitigation is a recorded,
+  copy-paste **reproducible recipe** (in that section) to re-run at the next `claude`
+  upgrade. A build-tagged, opt-in integration test was considered and **deliberately not
+  added** — maintainer decision: an opt-in test nobody runs earns nothing over a recorded
+  recipe, while costing a permanent maintenance surface.
+- **R4-stdin-delivery-has-no-failure-signal** (WARNING) — **open**, and now better
+  characterised rather than closed. If a future CLI build stops reading stdin under `-p`,
   `RunTask` either returns a *successful* `ProviderResult` built from an empty prompt, or
   blocks until the ctx deadline. There is no runtime confirmation that the child consumed the
   bytes, so the failure mode is a confident wrong answer or a timeout, not a diagnosable
-  error.
+  error. The spike above confirms the premise **is** honoured on 2.1.280, so this is a risk of
+  future drift, not present breakage — which lowers its urgency without changing its shape.
 
 **Open follow-up — the failure moved, it did not disappear.**
 
@@ -675,6 +680,24 @@ that matters most, because the whole slice rests on it.
   upload and real token spend. Nothing caps the input any more. This is a deliberate
   consequence of the slice, not a regression to fix blindly, and it belongs with the Slice 3
   transcript work — T8 is what actually makes the input grow.
+
+**Open but deferred — the GOOS skip is unreachable in CI, so it costs nothing today.**
+
+- **R3-goos-skip-drops-large-input-roundtrip** / **R4-delivery-integrity-check-skipped-off-linux**
+  (WARNING) — **open, deferred with the reason attached.** The `runtime.GOOS != "linux"` guard
+  added to `TestRunTask_DeliversInputLargerThanArgvCeiling` in `bf53ff5` is correct about the
+  kernel premise (only Linux has a *per-argument* cap), but it means the only byte-for-byte
+  delivery-integrity assertion in the suite does not run off Linux. On macOS or a BSD the
+  round-trip is never checked and `TestRunTask_OversizedInputIsNotOnArgv` — structural, and
+  running on every GOOS — is all that remains.
+
+  Deferred on a checked CI fact, not on a guess: `.github/workflows/ci.yml` declares a single
+  `build-and-test` job on `runs-on: ubuntu-latest`, with **no OS matrix**. The skip is
+  therefore unreachable in CI entirely, and the gap affects only a developer working on
+  macOS/BSD. Trigger that would make closing it worthwhile: **adding a non-Linux job to the CI
+  matrix.** At that point the skip stops being theoretical and the integrity check should be
+  reworked into a platform-independent form (assert delivery via the round-trip without
+  depending on a per-argument ceiling) rather than skipped.
 
 **Open follow-up — the test double can lie, and one path makes it lie silently.**
 
@@ -718,6 +741,136 @@ named test in `adapters/opencode/adapter_test.go:153` is unaffected and still ex
 - `go vet ./...` — OK
 - `go test ./...` — 12 packages `ok`, 1 `[no test files]`; `claudecode` ok 23.096s
 - `go test -race ./adapters/claudecode/` — `ok ... 24.845s`
+
+### Slice 2 — real-CLI spike
+
+**Purpose.** Close `R3-real-cli-stdin-contract-unproven`, the native-review follow-up that
+said the whole slice rests on an unverified premise: that `claude -p` reads the prompt from
+stdin when no positional is given, proven only against a fake this same candidate authored.
+The spike ran that premise against the **installed `claude` 2.1.280**. It is now **closed by
+observation**. Everything below was observed, not inferred.
+
+**1. The premise holds.** `claude -p` with the adapter's exact flag set, **no positional
+argument**, prompt on stdin → exit 0, `result.subtype=success`, `result='STDIN_OK'`. The
+adapter's delivery channel is the one the real CLI actually reads.
+
+**2. `E2BIG` reproduced against the real CLI, not just the fake.** A **145204-byte** payload
+passed as a positional argv argument → **exit 127, `argument list too long`**. This is the
+same `MAX_ARG_STRLEN` wall the T4 RED hit through `fakeclaude`, now confirmed on the real
+binary. The argv ceiling was never an artifact of the test double.
+
+**3. The same bytes on stdin arrive intact, at both ends.** The identical **145204 bytes**
+piped to stdin → **exit 0**, success, and the model echoed **both** bookend markers verbatim:
+`HEAD_MARKER_7Q4Z` and `TAIL_MARKER_9X2W`. `cache_creation_input_tokens=58076` confirms the
+full payload was genuinely uploaded, not silently truncated on the way in. Both ends present
+is the point: a head-only echo would have proven truncation, which is exactly the failure the
+bookends exist to expose.
+
+**4. The CLI documents the contract itself.** Its own error text names both sources verbatim:
+
+```
+Error: Input must be provided either through stdin or as a prompt argument when using --print
+```
+
+stdin is a first-class, documented input source under `--print`, not an accident of
+implementation.
+
+**5. `ProbeModel`'s premise also holds on 2.1.280.** `claude -p "" < /dev/null` → exit 1,
+"Input must be provided..."; the same with `--model no-such-model-xyz` → exit 1 with a
+model-catalog error. The two outcomes are distinguishable **by stderr content**, which is
+exactly what `ProbeModel` assumes when it classifies the failure.
+
+**6. The spike found a defect — in `fakeclaude`'s comments, not in the adapter.** The fake's
+header claimed it "mirrors the real CLI, which accepts the prompt either way: when a
+positional prompt argument is present on argv it wins". **That is false.** Observed on
+2.1.280, the real CLI does not pick a winner — it receives **both**:
+
+| argv positional | stdin | real CLI `result` |
+|---|---|---|
+| `BRAVO. ...reply with the ones you actually received` | `ALPHA` | `ALPHA BRAVO` |
+| `FROM_ARGV` | `/dev/null` | `FROM_ARGV` |
+| *(none)* | `FROM_STDIN` | `FROM_STDIN` |
+
+What this does **not** affect, stated precisely:
+
+- **Production is unaffected.** `RunTask` passes **no positional at all**, so only the stdin
+  path is ever exercised — and on that path the fake and the real CLI agree exactly (row 3).
+  `ProbeModel` passes an empty positional and leaves stdin at `/dev/null` (row 2), where they
+  also agree. The dual-source merge case is unreachable in this codebase today.
+- **The earlier mutation proof still stands.** Reverting `RunTask` to
+  `args = append(args, input)` still fails the oversized-input test, because `execve` dies
+  with `E2BIG` **before the CLI parses anything** — item 2 above confirms that on the real
+  binary. What was wrong was the stated *mechanism*, not the conclusion: the old comment
+  justified the guard by "that argv value would be used", which rested on the false precedence
+  claim. The guard survives its own justification being wrong.
+
+The fake's **behaviour is deliberately left unchanged** — a single-prompt model is all the
+suite needs, and keeping argv authoritative is what stops its stdin support from masking an
+adapter that regressed to argv. Only the comments were corrected, to state plainly that this
+is a **simplification, not a mirror**.
+
+**Reproducible recipe.** Recorded so re-running at the next `claude` upgrade is copy-paste
+rather than re-invention. This recipe *is* the mitigation for the closure caveat: a one-off
+spike proves 2.1.280 today and cannot notice a future CLI changing the contract.
+
+Premise check — stdin under `-p` with no positional:
+
+```
+printf 'Reply with exactly the word STDIN_OK and nothing else.' | \
+  claude -p --no-session-persistence --setting-sources '' \
+    --disable-slash-commands --output-format stream-json --verbose
+```
+
+Ceiling check — the same oversized payload down each channel:
+
+```
+# argv path: expected to die at execve, costs no tokens
+BIG=$(cat big_prompt.txt); claude -p ... "$BIG"
+# stdin path: expected to succeed and echo both bookend markers
+claude -p ... < big_prompt.txt
+```
+
+Where `big_prompt.txt` is an instruction line, a `HEAD_MARKER_7Q4Z` line, ~145 KB of filler,
+and a final `TAIL_MARKER_9X2W` line; the model is asked to reply with the first and last
+markers only. The argv run costs nothing (it never reaches the model); only the stdin run
+spends tokens.
+
+**Deliberately not added: a build-tagged integration test.** Maintainer decision. An opt-in
+test nobody runs earns nothing over a recorded recipe, while adding a permanent maintenance
+surface and a standing temptation to believe the premise is covered by CI when it is not.
+
+**Commits:**
+
+- `da9eb40` `docs(claudecode): correct the fakeclaude prompt-source claim and re-verify CLI
+  facts` (the `fakeclaude` comment fix plus the four evidence-bound version bumps)
+- `docs(odd): record the Slice 2 real-CLI spike and close the stdin-premise follow-up` —
+  this entry, plus the follow-up-list updates above. Recorded by name rather than SHA
+  because a commit cannot contain its own hash; same convention as the Slice 2 entry.
+
+**Version-drift bookkeeping, partial on purpose.** Four of the six `2.1.268` references were
+re-verified on 2.1.280 and bumped; two were **left at 2.1.268** because bumping them would
+fabricate a verification nobody performed:
+
+| Reference | Claim | Action |
+|---|---|---|
+| `adapters/claudecode/adapter.go` | stdin under `-p` | → **2.1.280** (observed run, items 1–4) |
+| `adapters/claudecode/adapter.go` | `--safe-mode` bundle | → **2.1.280** (`claude --help`) |
+| `AGENTS.md` | `--safe-mode` bundle | → **2.1.280** (`claude --help`) |
+| `adapters/claudecode/adapter_test.go` | `--safe-mode` bundle | → **2.1.280** (`claude --help`) |
+| `adapters/claudecode/adapter.go` | MCP tool calls denied client-side | **stays 2.1.268** |
+| `adapters/claudecode/adapter_test.go` | MCP tool calls denied client-side | **stays 2.1.268** |
+
+The two that stay were reproduced with a **live MCP server driving a real tool call**.
+`claude --help` cannot re-verify a runtime permission decision, and that spike was not re-run,
+so `2.1.268` remains the truthful record of when the behaviour was observed. A clarifying
+sentence saying exactly that was added at both sites; the version numbers were not touched.
+
+One `--help` fact was re-confirmed in passing and matters to an existing guard:
+`--allowedTools, --allowed-tools <tools...>` is **still variadic** on 2.1.280, which is the
+property `TestClaudeAdapter_AllowedTools_NeverSwallowsThePrompt` depends on.
+
+This spike changed comments and documentation only. No behaviour changed, no assertion
+changed, so **no RED is claimed** for it.
 
 ## Next step
 
