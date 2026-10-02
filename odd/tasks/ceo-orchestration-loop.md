@@ -172,7 +172,18 @@ Slice 6 — park/resume
 - [ ] **T16** — Prove crash recovery across a round boundary: restart mid-conversation and
       continue.
 
-Slice 7 — chained approval
+Slice 7 — multi-agent UI (lands BEFORE chained approval; see Progress, 2026-10-02)
+- [ ] **T20** — RED: test proving a non-CEO agent's task is listed and approvable.
+- [ ] **T21** — Aggregate every runtime in the UI instead of `runtimes[0]`
+      (`cmd/company/main.go:67`, `:72`).
+
+Slice 8 — chained approval
+
+Design source: the frozen SDD proposal
+`openspec/changes/agent-delegation-chained-approval/` (proposal + `agent-delegation` and
+`agent-supervisor` delta specs). Read it before T17; reuse its requirements, do not
+re-derive them.
+
 - [ ] **T17** — RED: test proving a peer escalation reaches the human instead of failing the
       delegating task.
 - [ ] **T18** — Remove the hard-fail at `supervisor.go:570-571` and propagate the peer's
@@ -180,11 +191,6 @@ Slice 7 — chained approval
 - [ ] **T19** — Let the CEO send a follow-up to an existing peer task
       (`msg.TaskID = peerTaskID`); `transport/a2a/client.go:118` never sets it today. The
       SDK already supports this.
-
-Slice 8 — multi-agent UI
-- [ ] **T20** — RED: test proving a non-CEO agent's task is listed and approvable.
-- [ ] **T21** — Aggregate every runtime in the UI instead of `runtimes[0]`
-      (`cmd/company/main.go:67`, `:72`).
 
 ## Acceptance criteria
 
@@ -919,3 +925,23 @@ the T3 verdict already schedules. Neither affects the persisted schema.
 Document amendments recorded here — the Slice 1 audit-note correction and this Slice 2
 review record — are passive documentation. They do not reopen review on any
 already-acknowledged candidate.
+
+### 2026-10-02 — slice reorder, SDD retirement, parallel worktrees
+
+- **Slice order swapped: multi-agent UI is now Slice 7, chained approval Slice 8.** The
+  frozen SDD proposal `openspec/changes/agent-delegation-chained-approval/proposal.md`
+  states a non-negotiable ordering: UI aggregation must land before chained approval,
+  because `cmd/company/main.go:67` binds the UI to the CEO's supervisor only, so a peer's
+  escalation would be unreachable by the human. Task IDs (T17–T21) are kept stable so
+  earlier references stay valid.
+- **SDD retired, ODD adopted.** Maintainer decision: `openspec/` is frozen as a historical,
+  read-only record; new work is tracked in `odd/tasks/` plus Engram. The chained-approval
+  proposal is folded into Slice 8 as its design source instead of being executed as an
+  SDD change. The repository-level migration (AGENTS.md, archiving the completed changes)
+  ships separately on `docs/retire-sdd-adopt-odd`, off `master`.
+- **Parallel worktrees, maintainer-approved.** The multi-agent UI slice touches only
+  `cmd/company/` and `ui/`, disjoint from the `core/supervisor/` chain, so it runs in a
+  separate worktree (`../asf-wt-ui`, branch `feat/ceo-orchestration-loop-ui-aggregation`,
+  based on the Slice 2 tip). It does not edit this document; its outcome is folded in here
+  when it lands. Slices 3 → 6 and 8 stay strictly serial: all of them rewrite
+  `core/supervisor/supervisor.go`.
