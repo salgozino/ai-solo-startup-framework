@@ -239,8 +239,14 @@ func TestMultiIntent_ResumedDelegationKeepsItsTarget(t *testing.T) {
 	if call.Role != "engineer" || call.Body != "build X" {
 		t.Errorf("Delegate called with role=%q body=%q; want engineer / build X", call.Role, call.Body)
 	}
-	if got := h.record(t, taskID).Output; got != "peer done" {
-		t.Errorf("the peer's output must become the task output; got %q", got)
+	// Slice 3 replaces peer-output copying with transcript feedback. Approval
+	// resume remains single-shot until Slice 6; the CEO's output is preserved.
+	rec := h.record(t, taskID)
+	if rec.Output != agentOwnOutput {
+		t.Errorf("approval must preserve CEO output; got %q", rec.Output)
+	}
+	if len(rec.Turns) != 3 || rec.Turns[2].Content != "peer done" {
+		t.Errorf("approved delegation result must be persisted in Turns: %+v", rec.Turns)
 	}
 }
 

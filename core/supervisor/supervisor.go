@@ -22,6 +22,10 @@ import (
 // is unset (design D10).
 const defaultDelegateTimeout = 10 * time.Minute
 
+// maxProviderRounds bounds the blocking feedback loop until explicit termination
+// vocabulary and park/resume arrive. A delegation on the last turn fails clearly.
+const maxProviderRounds = 8
+
 // Config holds the parameters needed to construct a Supervisor.
 type Config struct {
 	// Addr is the full A2A address (name/tenant) for this supervisor.
@@ -321,10 +325,10 @@ func (s *Supervisor) executeResume(
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 		return
 	}
-	// Gated on Delegated, not on a non-empty Output — see runIntents' Permit
-	// branch for why an empty peer result must still replace the agent's text.
+	// Peer results belong to the transcript, never to the CEO's final Output.
+	// Approval resume still completes without re-invoking the provider this slice.
 	if outcome.Delegated {
-		rec.Output = outcome.Output
+		rec.Turns = append(rec.Turns, port.ContextMessage{Role: "peer", Content: outcome.Output, At: time.Now()})
 	}
 	log.Info("resume.action.done", "intent", rec.PendingIntentKind)
 
@@ -359,25 +363,48 @@ func (s *Supervisor) executeWithPolicy(
 ) {
 	log := s.log(rec.TaskID)
 
-	log.Info("runtask.start", "input", rec.Input)
-
-	result, err := s.cfg.Provider.RunTask(ctx, rec.TaskID, rec.Input)
-	if err != nil {
-		log.Error("runtask.failed", "error", err)
-		s.markFailed(rec)
-		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
-		return
+	// The first invocation remains byte-identical; only subsequent invocations
+	// receive bounded transcript text. Keep the full history in the record.
+	input := rec.Input
+	if len(rec.Turns) == 0 {
+		rec.Turns = append(rec.Turns, port.ContextMessage{Role: "user", Content: rec.Input, At: time.Now()})
 	}
-
-	log.Info("runtask.done",
-		"output", result.Output,
-		"action_intents_count", len(result.ActionIntents),
-	)
-	rec.Output = result.Output
-
-	rec, halted := s.runIntents(ctx, execCtx, yield, rec, toPendingIntents(result.ActionIntents))
-	if halted {
-		return
+	for round := 0; round < maxProviderRounds; round++ {
+		log.Info("runtask.start", "round", round+1)
+		result, err := s.cfg.Provider.RunTask(ctx, rec.TaskID, input)
+		if err != nil {
+			log.Error("runtask.failed", "error", err)
+			s.markFailed(rec)
+			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
+			return
+		}
+		log.Info("runtask.done", "output", result.Output, "action_intents_count", len(result.ActionIntents))
+		rec.Output = result.Output
+		rec.Turns = append(rec.Turns, port.ContextMessage{Role: "assistant", Content: result.Output, At: time.Now()})
+		before := len(rec.Turns)
+		var halted bool
+		rec, halted = s.runIntents(ctx, execCtx, yield, rec, toPendingIntents(result.ActionIntents))
+		if halted {
+			return
+		}
+		// Only successful delegations append peer turns, including empty results.
+		// The terminal save below persists a final, non-delegating turn once.
+		if len(rec.Turns) == before {
+			break
+		}
+		if err := s.cfg.Store.Save(s.cfg.Addr, rec); err != nil {
+			s.markFailed(rec)
+			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
+			return
+		}
+		s.notify()
+		if round+1 == maxProviderRounds {
+			rec.Output = fmt.Sprintf("supervisor: provider round limit (%d) exhausted after delegation", maxProviderRounds)
+			s.markFailed(rec)
+			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, outputMessage(rec.Output)), nil) //nolint
+			return
+		}
+		input = contextText(assembleBoundedContext(rec.Turns, s.effectiveBudget()))
 	}
 
 	// All intents handled (or none) → COMPLETED. The terminal event carries the
@@ -468,12 +495,9 @@ func (s *Supervisor) runIntents(
 				return rec, true
 			}
 			if outcome.Delegated {
-				// The peer's terminal output becomes the delegating task's output
-				// (spec: "The Peer's Terminal Result Is Copied Into the Delegating Task's Output").
-				// Gated on Delegated, not on a non-empty Output: a COMPLETED peer that
-				// produced nothing must not leave the agent's own text standing in for
-				// the result. Non-delegation actions return a zero outcome and are skipped.
-				rec.Output = outcome.Output
+				// Slice 3 replaces peer-output copying with CEO synthesis: even an
+				// empty peer reply is feedback, but only the CEO writes Output.
+				rec.Turns = append(rec.Turns, port.ContextMessage{Role: "peer", Content: outcome.Output, At: time.Now()})
 			}
 			log.Info("action.done", "kind", intent.Kind)
 		}
@@ -500,8 +524,7 @@ type actionOutcome struct {
 	// every other action kind.
 	Output string
 	// Delegated reports that this outcome came from a delegation, so an empty
-	// Output is the peer's actual empty result and must replace the agent's own
-	// text rather than leaving it in place.
+	// Output is the peer's actual empty result and still triggers feedback.
 	Delegated bool
 }
 

@@ -63,10 +63,10 @@ func newDelegatingSupervisor(
 		delegator = del
 	}
 	t.Helper()
-	prov := &fake.Provider{ReturnRunResult: port.ProviderResult{
-		Output:        agentOwnOutput,
-		ActionIntents: intents,
-	}}
+	prov := &fake.Provider{
+		ReturnRunResults: []port.ProviderResult{{Output: agentOwnOutput, ActionIntents: intents}},
+		ReturnRunResult:  port.ProviderResult{Output: agentOwnOutput},
+	}
 	gw := &fake.Gateway{}
 	store, err := NewStore(t.TempDir())
 	if err != nil {
@@ -183,10 +183,10 @@ func TestExecuteAction_TelegramSendStillRoutesToGateway(t *testing.T) {
 	}
 }
 
-// TestExecuteAction_DelegationCompletesWithPeerOutput — task 6.4.
-// Spec: agent-delegation "A completed peer delegation completes the delegating
-// task with the peer's output".
-func TestExecuteAction_DelegationCompletesWithPeerOutput(t *testing.T) {
+// Replacement behavior (Slice 3): the peer result is transcript context, not
+// the final output. This overturns DelegationCompletesWithPeerOutput and the
+// exactly-one-CLI-invocation decision: only the CEO's final answer is published.
+func TestExecuteAction_DelegationCompletesWithCEOOutput(t *testing.T) {
 	del := &fake.Delegator{Results: map[string]port.DelegationResult{
 		"engineer": {PeerTaskID: "P1", State: string(sdka2a.TaskStateCompleted), Output: "Done: implemented X"},
 	}}
@@ -197,24 +197,17 @@ func TestExecuteAction_DelegationCompletesWithPeerOutput(t *testing.T) {
 	if last.Status.State != sdka2a.TaskStateCompleted {
 		t.Fatalf("expected COMPLETED, got %v", last.Status.State)
 	}
-	if !strings.Contains(rec.Output, "Done: implemented X") {
-		t.Errorf("persisted Output = %q, want it to contain the peer output", rec.Output)
+	if rec.Output != agentOwnOutput || messageText(last.Status.Message) != agentOwnOutput {
+		t.Errorf("record/event must publish CEO output, got %q/%q", rec.Output, messageText(last.Status.Message))
 	}
-	if !strings.Contains(messageText(last.Status.Message), "Done: implemented X") {
-		t.Errorf("COMPLETED event message = %q, want the peer output on the wire", messageText(last.Status.Message))
-	}
-	if h.prov.RunTaskCallCount() != 1 {
-		t.Errorf("delegating CLI must run exactly once; got %d", h.prov.RunTaskCallCount())
+	if h.prov.RunTaskCallCount() != 2 {
+		t.Errorf("delegating CLI must receive peer feedback; calls = %d", h.prov.RunTaskCallCount())
 	}
 }
 
-// TestExecuteAction_CompletedPeerWithEmptyOutputReplacesAgentText — reliability fix.
-// transport/a2a's resultFromTask documents that Output stays empty for a COMPLETED
-// task that produced no output. Gating the copy on a non-empty Output therefore left
-// the delegating agent's OWN provider text in the record, so the task reported
-// COMPLETED while presenting local agent babble as the peer's result — the worst
-// failure mode for a human supervising agents through the monitoring UI.
-func TestExecuteAction_CompletedPeerWithEmptyOutputReplacesAgentText(t *testing.T) {
+// Replacement behavior: even empty peer results trigger feedback and live in
+// Turns; they no longer replace the CEO's answer (Slice 3, T9).
+func TestExecuteAction_CompletedPeerWithEmptyOutputFeedsCEO(t *testing.T) {
 	del := &fake.Delegator{Results: map[string]port.DelegationResult{
 		"engineer": {PeerTaskID: "P1", State: string(sdka2a.TaskStateCompleted)},
 	}}
@@ -225,13 +218,11 @@ func TestExecuteAction_CompletedPeerWithEmptyOutputReplacesAgentText(t *testing.
 	if last.Status.State != sdka2a.TaskStateCompleted {
 		t.Fatalf("expected COMPLETED, got %v", last.Status.State)
 	}
-	if rec.Output == "ceo own text" {
-		t.Errorf("the delegating agent's own text must never be presented as the peer's result; got %q", rec.Output)
+	if rec.Output != agentOwnOutput || h.prov.RunTaskCallCount() != 2 {
+		t.Errorf("empty peer result must trigger CEO synthesis; output=%q calls=%d", rec.Output, h.prov.RunTaskCallCount())
 	}
-	// Core stores the truth: the peer produced nothing. Rendering an absent result
-	// is a UI concern, so no substitute display text is fabricated here.
-	if rec.Output != "" {
-		t.Errorf("an empty peer result must be stored verbatim, not fabricated; got %q", rec.Output)
+	if len(rec.Turns) != 4 || rec.Turns[2].Role != "peer" || rec.Turns[2].Content != "" {
+		t.Errorf("empty peer result must persist verbatim in Turns: %+v", rec.Turns)
 	}
 }
 
