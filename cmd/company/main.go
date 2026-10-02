@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/salgozino/ai-solo-startup-framework/config"
-	"github.com/salgozino/ai-solo-startup-framework/ui"
 )
 
 func main() {
@@ -64,14 +63,7 @@ func runMaterialize(yamlPath string) error {
 	if ceoBind == "" {
 		ceoBind = "127.0.0.1:8080"
 	}
-	ceoHandler := ui.NewUIHandler(runtimes[0].uiAdap)
-
-	// Push a state snapshot to all connected SSE clients whenever the supervisor
-	// or any task changes state. SetOnStateChange must be called after both the
-	// supervisor and ceoHandler are constructed.
-	runtimes[0].sup.SetOnStateChange(func() {
-		ceoHandler.Broadcast(runtimes[0].sup.Status())
-	})
+	ceoHandler := newCompanyUIHandler(runtimes)
 
 	uiMux := http.NewServeMux()
 	ceoHandler.Register(uiMux)
