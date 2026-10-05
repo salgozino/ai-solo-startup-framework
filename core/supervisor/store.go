@@ -52,6 +52,17 @@ type TaskRecord struct {
 	// Zero-value safe: a nil slice means the task has no recorded rounds, which
 	// is exactly how every record written before this field existed reads back.
 	Turns []port.ContextMessage `json:"turns,omitempty"`
+	// AwaitingPeerRole and AwaitingPeerTaskID identify the peer task a parked task
+	// is waiting on (state INPUT_REQUIRED, no PendingIntentKind). They are what a
+	// restarted supervisor needs to re-arm the watcher, and are cleared once the
+	// peer's result is consumed. Zero-value safe: absent means no peer wait.
+	AwaitingPeerRole   string `json:"awaiting_peer_role,omitempty"`
+	AwaitingPeerTaskID string `json:"awaiting_peer_task_id,omitempty"`
+	// FinishRequested records that the turn in flight called finish_task. It only
+	// matters across a park: a turn that finished but halted on an escalation or a
+	// peer wait must not re-invoke the provider after the resume. Cleared once the
+	// turn's intents have all run. Zero-value safe.
+	FinishRequested bool `json:"finish_requested,omitempty"`
 	// Output is the result produced by the provider when the task completes.
 	Output string `json:"output,omitempty"`
 }

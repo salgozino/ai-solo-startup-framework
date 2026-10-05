@@ -124,32 +124,46 @@ func stubPeer(t *testing.T, role, tenant string, state sdka2a.TaskState) *PeerDi
 	return dir
 }
 
-// TestClient_NonTerminalPeerStateIsRejected proves Delegate enforces the
-// port.Delegator contract: a peer answering with a state that is neither
-// terminal nor INPUT_REQUIRED is a protocol violation and must surface as an
-// error discriminable with errors.Is, never as a nil-error DelegationResult.
+// TestClient_DelegateAcceptsRunningPeerAndRejectsOtherStates proves Delegate
+// enforces the port.Delegator contract after park/resume (Slice 6). Overturned:
+// SUBMITTED and WORKING used to be rejected as protocol violations because
+// Delegate blocked until the peer stopped; the replacement is that they are the
+// normal "still running" answer, returned as a result for the caller to park on.
+// A state that is neither running, terminal nor INPUT_REQUIRED is still a
+// protocol violation, discriminable with errors.Is.
 //
-// The same stub also pins the deliberate asymmetry: PeerTaskState is a polling
-// READ, so that identical non-terminal task is a legitimate answer there.
-func TestClient_NonTerminalPeerStateIsRejected(t *testing.T) {
+// PeerTaskState is a polling READ and accepts every state, as before.
+func TestClient_DelegateAcceptsRunningPeerAndRejectsOtherStates(t *testing.T) {
 	for _, state := range []sdka2a.TaskState{sdka2a.TaskStateSubmitted, sdka2a.TaskStateWorking} {
 		t.Run(string(state), func(t *testing.T) {
 			dir := stubPeer(t, "engineer", "acme", state)
 			c := NewClient(dir, "acme", clientTestToken, nil)
 
-			if _, err := c.Delegate(context.Background(), "engineer", "do the work"); !errors.Is(err, ErrPeerNonTerminalState) {
-				t.Errorf("Delegate error = %v, want errors.Is(err, ErrPeerNonTerminalState)", err)
-			}
-
-			got, err := c.PeerTaskState(context.Background(), "engineer", stubPeerTaskID)
+			got, err := c.Delegate(context.Background(), "engineer", "do the work")
 			if err != nil {
-				t.Fatalf("PeerTaskState must accept a non-terminal state, got error: %v", err)
+				t.Fatalf("Delegate must accept a running peer, got error: %v", err)
 			}
-			if got.State != string(state) {
-				t.Errorf("PeerTaskState State = %q, want %q", got.State, state)
+			if got.State != string(state) || got.PeerTaskID != stubPeerTaskID {
+				t.Errorf("Delegate = %+v, want state %q and peer task %q", got, state, stubPeerTaskID)
 			}
 		})
 	}
+
+	t.Run(string(sdka2a.TaskStateAuthRequired), func(t *testing.T) {
+		dir := stubPeer(t, "engineer", "acme", sdka2a.TaskStateAuthRequired)
+		c := NewClient(dir, "acme", clientTestToken, nil)
+
+		if _, err := c.Delegate(context.Background(), "engineer", "do the work"); !errors.Is(err, ErrPeerNonTerminalState) {
+			t.Errorf("Delegate error = %v, want errors.Is(err, ErrPeerNonTerminalState)", err)
+		}
+		got, err := c.PeerTaskState(context.Background(), "engineer", stubPeerTaskID)
+		if err != nil {
+			t.Fatalf("PeerTaskState must accept any state, got error: %v", err)
+		}
+		if got.State != string(sdka2a.TaskStateAuthRequired) {
+			t.Errorf("PeerTaskState State = %q", got.State)
+		}
+	})
 }
 
 // recordingTransport wraps an http.RoundTripper and records every request's
@@ -193,19 +207,42 @@ func authHeaderFor(paths []string, headers []http.Header, suffix string) string 
 	return ""
 }
 
-// blockingProvider's RunTask blocks on ctx until canceled, simulating a peer
-// that never finishes on its own. Used to prove the client's deadline surfaces
-// as a distinguishable timeout rather than a fabricated success.
-type blockingProvider struct {
+// gatedProvider's RunTask blocks until release is closed, simulating a peer that
+// is still working. It ignores ctx on purpose: the peer's execution must outlive
+// the delegation request that created it.
+type gatedProvider struct {
 	*fake.Provider
+	release chan struct{}
 }
 
-func (p *blockingProvider) RunTask(ctx context.Context, _ string, _ string) (port.ProviderResult, error) {
-	<-ctx.Done()
-	return port.ProviderResult{}, ctx.Err()
+func (p *gatedProvider) RunTask(ctx context.Context, taskID, input string) (port.ProviderResult, error) {
+	<-p.release
+	return p.Provider.RunTask(ctx, taskID, input)
 }
 
-var _ port.Provider = (*blockingProvider)(nil)
+var _ port.Provider = (*gatedProvider)(nil)
+
+// settle polls PeerTaskState until the peer task leaves SUBMITTED/WORKING.
+// Delegate returns as soon as the peer task exists (park/resume, Slice 6), so a
+// test that wants the peer's final state must wait for it the way the
+// supervisor's watcher does.
+func settle(t *testing.T, c *Client, role, peerTaskID string) port.DelegationResult {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, err := c.PeerTaskState(context.Background(), role, peerTaskID)
+		if err != nil {
+			t.Fatalf("PeerTaskState: %v", err)
+		}
+		if st := sdka2a.TaskState(got.State); st != sdka2a.TaskStateSubmitted && st != sdka2a.TaskStateWorking {
+			return got
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("peer task %q still %s after 5s", peerTaskID, got.State)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
 
 // TestClient_CardResolvedBeforeSend verifies the A2A client resolves the peer's
 // Agent Card before issuing any /invoke request.
@@ -258,8 +295,8 @@ func TestClient_BearerPresentAndAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Delegate: %v", err)
 	}
-	if result.State != string(sdka2a.TaskStateCompleted) {
-		t.Errorf("State = %q, want %q", result.State, sdka2a.TaskStateCompleted)
+	if got := settle(t, c, "engineer", result.PeerTaskID); got.State != string(sdka2a.TaskStateCompleted) {
+		t.Errorf("State = %q, want %q", got.State, sdka2a.TaskStateCompleted)
 	}
 
 	paths, headers := rec.snapshot()
@@ -338,55 +375,68 @@ func TestClient_WrongTenantIsRejectedByPeer(t *testing.T) {
 	}
 }
 
-// TestClient_BlocksUntilPeerTerminal verifies Delegate blocks until the peer's
-// task reaches a terminal state and returns that state and the peer's task ID.
+// TestClient_PeerOutputCrossesTheWire verifies the peer's output reaches the
+// delegator. Overturned by Slice 6: this was TestClient_BlocksUntilPeerTerminal
+// (Delegate blocked until the peer was terminal). Replacement: Delegate returns
+// once the peer task exists and the terminal state and output are read through
+// PeerTaskState, which is what the supervisor's watcher does.
 //
 // The peer's output must cross the wire: the supervisor's terminal COMPLETED
-// event carries it as a text part in Status.Message (design D9, Phase 5), and
-// Delegate reads it back into DelegationResult.Output.
-// Satisfies: a2a-client "SendMessage Blocks Until the Peer Task Is Terminal".
-func TestClient_BlocksUntilPeerTerminal(t *testing.T) {
+// event carries it as a text part in Status.Message (design D9, Phase 5).
+func TestClient_PeerOutputCrossesTheWire(t *testing.T) {
 	prov := &fake.Provider{ReturnRunResult: port.ProviderResult{Output: "peer done"}}
 	_, dir := newTestPeer(t, "engineer", "acme", prov, nil)
 
 	c := NewClient(dir, "acme", clientTestToken, nil)
 
-	result, err := c.Delegate(context.Background(), "engineer", "do the work")
+	delegated, err := c.Delegate(context.Background(), "engineer", "do the work")
 	if err != nil {
 		t.Fatalf("Delegate: %v", err)
 	}
+	if delegated.PeerTaskID == "" {
+		t.Error("expected a non-empty PeerTaskID")
+	}
+	result := settle(t, c, "engineer", delegated.PeerTaskID)
 	if result.State != string(sdka2a.TaskStateCompleted) {
 		t.Errorf("State = %q, want %q", result.State, sdka2a.TaskStateCompleted)
-	}
-	if result.PeerTaskID == "" {
-		t.Error("expected a non-empty PeerTaskID")
 	}
 	if result.Output != "peer done" {
 		t.Errorf("Output = %q, want %q (peer output must cross the wire)", result.Output, "peer done")
 	}
 }
 
-// TestClient_DeadlineReturnsDistinguishableTimeout verifies that when the
-// caller's context deadline is reached before the peer's task terminates,
-// Delegate returns an error distinguishable via errors.Is(err,
-// context.DeadlineExceeded), never a fabricated success.
-// Satisfies: a2a-client "SendMessage Blocks Until the Peer Task Is Terminal,
-// Bounded by a Deadline" (deadline scenario).
-func TestClient_DeadlineReturnsDistinguishableTimeout(t *testing.T) {
-	prov := &blockingProvider{Provider: &fake.Provider{}}
+// TestClient_DelegateDoesNotWaitForPeer replaces
+// TestClient_DeadlineReturnsDistinguishableTimeout (Slice 6): Delegate no longer
+// blocks on the peer, so a peer that is still working must not hold the call —
+// it returns promptly with a running state and a peer task ID to poll.
+func TestClient_DelegateDoesNotWaitForPeer(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	prov := &gatedProvider{Provider: &fake.Provider{ReturnRunResult: port.ProviderResult{Output: "late"}}, release: release}
 	_, dir := newTestPeer(t, "engineer", "acme", prov, nil)
 
 	c := NewClient(dir, "acme", clientTestToken, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := c.Delegate(ctx, "engineer", "do the work")
-	if err == nil {
-		t.Fatal("expected a timeout error, got nil")
+	delegated, err := c.Delegate(ctx, "engineer", "do the work")
+	if err != nil {
+		t.Fatalf("Delegate must return while the peer is still working, got: %v", err)
 	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("expected errors.Is(err, context.DeadlineExceeded), got %v", err)
+	if st := sdka2a.TaskState(delegated.State); st != sdka2a.TaskStateSubmitted && st != sdka2a.TaskStateWorking {
+		t.Errorf("Delegate State = %q, want a running state", delegated.State)
+	}
+	if delegated.PeerTaskID == "" {
+		t.Error("expected a non-empty PeerTaskID to poll")
+	}
+	// The peer keeps running after the delegation request returned.
+	got, err := c.PeerTaskState(context.Background(), "engineer", delegated.PeerTaskID)
+	if err != nil {
+		t.Fatalf("PeerTaskState: %v", err)
+	}
+	if got.State != string(sdka2a.TaskStateWorking) {
+		t.Errorf("peer state = %q, want WORKING while the provider is gated", got.State)
 	}
 }
 
@@ -409,11 +459,11 @@ func TestClient_PeerTaskStateReportsCurrentStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Delegate: %v", err)
 	}
-	if delegated.State != string(sdka2a.TaskStateInputRequired) {
-		t.Fatalf("Delegate State = %q, want %q (peer should have escalated, not completed)", delegated.State, sdka2a.TaskStateInputRequired)
-	}
 	if delegated.PeerTaskID == "" {
 		t.Fatal("expected a non-empty PeerTaskID for the parked peer task")
+	}
+	if got := settle(t, c, "engineer", delegated.PeerTaskID); got.State != string(sdka2a.TaskStateInputRequired) {
+		t.Fatalf("settled State = %q, want %q (peer should have escalated, not completed)", got.State, sdka2a.TaskStateInputRequired)
 	}
 
 	got, err := c.PeerTaskState(context.Background(), "engineer", delegated.PeerTaskID)
@@ -442,8 +492,8 @@ func TestClient_PeerTaskStateReportsTerminalOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Delegate: %v", err)
 	}
-	if delegated.State != string(sdka2a.TaskStateCompleted) {
-		t.Fatalf("Delegate State = %q, want %q", delegated.State, sdka2a.TaskStateCompleted)
+	if got := settle(t, c, "engineer", delegated.PeerTaskID); got.State != string(sdka2a.TaskStateCompleted) {
+		t.Fatalf("settled State = %q, want %q", got.State, sdka2a.TaskStateCompleted)
 	}
 
 	got, err := c.PeerTaskState(context.Background(), "engineer", delegated.PeerTaskID)
