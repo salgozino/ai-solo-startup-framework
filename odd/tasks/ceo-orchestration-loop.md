@@ -164,12 +164,12 @@ Slice 5 — personas
       that outcomes never arrive. Left alone, they will actively sabotage the loop.
 
 Slice 6 — park/resume
-- [ ] **T14** — RED: test proving a parked CEO task is resumable and approvable while it
+- [x] **T14** — RED: test proving a parked CEO task is resumable and approvable while it
       waits on a peer.
-- [ ] **T15** — Add `port.TaskResumer` + `Supervisor.SetResumer` and the awaiting-peer
+- [x] **T15** — Add `port.TaskResumer` + `Supervisor.SetResumer` and the awaiting-peer
       fields on `TaskRecord`; replace the blocking wait with park + watcher, reusing
       `PeerTaskState`.
-- [ ] **T16** — Prove crash recovery across a round boundary: restart mid-conversation and
+- [x] **T16** — Prove crash recovery across a round boundary: restart mid-conversation and
       continue.
 
 Slice 7 — multi-agent UI (lands BEFORE chained approval; see Progress, 2026-10-02)
@@ -1122,3 +1122,81 @@ authority burned. Advisory findings, all open:
   to the tool name leaves the persona lying. Cheap fix: a test that reads `agents/ceo.md` and
   asserts it names the current cap and control tool.
 - **R3-termination-ambiguity**, **R3-engineer-open-question-tension** (SUGGESTION).
+
+### Slice 6 — complete (T14, T15, T16)
+
+Branch: `feat/ceo-orchestration-loop-pr6-park-resume` (worktree `../asf-wt-park`). Commits:
+`3448606` `feat(supervisor): park delegating tasks and resume them from a peer watcher`,
+and `ccbce34` `fix(supervisor): stop a parked task's watcher on every exit from the park`
+(the review correction).
+
+**Size: `size:exception`, maintainer-approved (2026-10-02).** 12 files, ~1383 changed lines,
+of which ~240 are production code (`watcher.go` 174 new, `supervisor.go`, `client.go`,
+`server.go`, `resumer.go`, `store.go`, `delegator.go`). The rest is tests: `park_test.go`
+and `park_integration_test.go` are new, and `client_test.go`, `integration_test.go` and
+`multi_intent_test.go` were rewritten because the delegation contract changed. A clean
+6a park/resume + 6b restart split was offered and declined, to finish today.
+
+**Design.**
+
+- **Parked state: `INPUT_REQUIRED`.** It is the only non-terminal state a2asrv accepts a
+  later message for, the execution ends so nothing blocks a resume, and crash recovery
+  already re-registers it. A peer wait is told apart from a human escalation by
+  `PendingIntentKind == ""` plus `AwaitingPeerRole`/`AwaitingPeerTaskID` set (new
+  `omitempty` fields, literal pre-change JSON test
+  `TestStore_LoadsRecordWrittenBeforeAwaitingPeer`).
+- **Watcher.** One goroutine per parked task polls `PeerTaskState` every
+  `Config.PeerPollInterval` (default 2s). On a terminal or `INPUT_REQUIRED` peer it resumes
+  the CEO task through `port.TaskResumer`, implemented in `transport/a2a/server.go` over the
+  a2asrv handler. `executeResume` re-reads the peer state and ignores the message text, so a
+  forged message or an early verdict cannot release a running peer. `Cancel` and `Shutdown`
+  stop watchers; `StopWatchers()` waits, for tests. `DelegateTimeout` bounds the parked
+  wait. A restart's `RecoverOpenTasks` re-arms watchers for parked records.
+- **Contract change.** `Client.Delegate` sends `ReturnImmediately`; `SUBMITTED`/`WORKING`
+  are valid, parkable results. Without a resumer, a still-running peer fails loudly
+  instead of parking forever.
+- **Resume unified with the loop.** An approved escalated delegation now runs and re-invokes
+  the provider (closes **R3-resume-publishes-pre-delegation-text**). `FinishRequested` is
+  persisted, so a finishing turn that escalated completes with its finish text after
+  approval and no extra round (closes **R3-finish-lost-on-halt**). The round cap counts
+  assistant turns from the persisted transcript, so it holds across park and restart.
+
+**RED observed (worker-reported):** park got `FAILED`, want `INPUT_REQUIRED`; a premature
+verdict got `COMPLETED`, want parked; round cap `RunTask calls = 1, want 8`; R3 resume
+`RunTask calls = 1, want 2`; `FinishRequested` was not persisted. Over the real a2asrv,
+without a resumer, the three park tests (cancellable, verdict accepted, watcher resumes) got
+`FAILED`. T16's restart tests were written after the code, so no separate RED is claimed.
+
+**Overturned (named in comments):** `TestClient_NonTerminalPeerStateIsRejected` →
+`TestClient_DelegateAcceptsRunningPeerAndRejectsOtherStates`; `TestClient_BlocksUntilPeerTerminal`
+→ `TestClient_PeerOutputCrossesTheWire`; `TestClient_DeadlineReturnsDistinguishableTimeout` →
+`TestClient_DelegateDoesNotWaitForPeer`. `TestMultiIntent_ResumedDelegationKeepsItsTarget`
+expects 4 turns plus the final answer.
+
+**Native review** — lineage `review-c2f06783c77a6b95`, base `e0f9669`, risk `medium`. The
+first review to need a correction in this feature:
+
+- **R3-watcher-orphaned-after-non-watcher-resume** (CRITICAL, introduced, refuter-confirmed).
+  A verdict that consumed the peer result left the watcher armed, so it resent `Resume`
+  forever and could deliver its peer-update as a human verdict on a re-escalated task.
+  Correction plan of 90 lines, against a 200-line budget; actual 65 lines (`ccbce34`). Leaving
+  the park now cancels the watcher, non-blocking and idempotent, and `watchPeer` re-checks
+  the record (`parkedOn`) before each `Resume`. RED for both new tests:
+  `TestPark_VerdictConsumingPeerStopsWatcher` ("watcher resumed a settled task 1 times") and
+  `TestPark_WatcherDoesNotResumeHumanEscalation` ("... a human escalation 1 times").
+  The targeted validator's first run failed on transport (a tool-call parse error, which is
+  not a verdict); the re-offered slot then **approved**. Authority burned.
+
+Advisory findings, open:
+
+- **R3-peer-wait-deadline-reset-on-repark** (WARNING, `watcher.go:107`) — a re-park, like a
+  restart, resets the `DelegateTimeout` clock, so a peer wait is not bounded end to end.
+- **R3-recover-skips-parked-tasks-silently**, **R3-bounded-send-fatal-from-goroutine**
+  (SUGGESTION).
+- From the worker: a task parked on a peer shows in the UI as `INPUT_REQUIRED` with no
+  pending intent, so its approve/reject buttons do nothing until the peer finishes;
+  `ui.TaskRecord` does not carry `AwaitingPeer*`. A `Resume` that errors forever retries
+  every tick until cancel or shutdown.
+
+**Verification (parent-observed):** `go vet`, `gofmt` clean;
+`go test -race -count=5 ./core/supervisor/ ./transport/a2a/` and `go test ./...` all ok.
