@@ -1,5 +1,5 @@
 // Tests for supervisor delegation routing — the synchronous half.
-// Spec: agent-delegation (openspec/changes/agent-delegation-over-a2a), design D6/D10.
+// Spec: agent-delegation (openspec/changes/archive/2026-10-02-agent-delegation-over-a2a), design D6/D10.
 // A Permit-classified delegate_task intent routes to port.Delegator, never to the
 // gateway; the peer's terminal result decides the delegating task's fate; a
 // non-terminal peer fails the task with an explicit not-yet-wired error.

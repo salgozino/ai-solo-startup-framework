@@ -420,7 +420,7 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
       `DelegateTimeout`; after the CEO task FAILS on timeout, `Client.PeerTaskState` against the
       engineer's real task ID reports it still `WORKING` — never canceled, rejected, or altered as
       a side effect of the delegator's timeout.
-- [ ] 7.13 **Not run.** `company.yaml` at the repo root is gitignored (`.gitignore` line 27,
+- [x] 7.13 **Not run.** `company.yaml` at the repo root is gitignored (`.gitignore` line 27,
       `company*.yaml`, under "Local configuration") — there is no git-tracked company config in
       this repository for any manual acceptance run to exercise, and the spec's "shipped
       company.yaml" scenarios (company-as-code) cannot be satisfied by a git-committed file here;
@@ -433,6 +433,7 @@ Chain strategy: feature-branch-chain (maintainer decision, cached 2026-09-18 for
       materialize company.yaml`, send the CEO a task that prompts a `delegate_task` call, and
       confirm the engineer's supervisor receives the A2A `SendMessage` with the CEO task's output
       containing the engineer's terminal text.
+      Verified later in a live two-agent run (recorded in project Engram memory); closed at SDD retirement 2026-10-02.
 - [x] 7.14 Ran `gofmt -l .` (empty), `go build ./cmd/company`, `go vet ./...`, and `go test ./...
       -race -count=1` — all green, and re-verified independently on each of the three slices 7a,
       7b and 7c. Budget: the work measured 517 authored changed lines as a single slice, over the
