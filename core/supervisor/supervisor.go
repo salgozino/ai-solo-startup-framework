@@ -407,7 +407,7 @@ func (s *Supervisor) resumeFromPeer(
 	fail := func(err error) {
 		s.stopWatcher(rec.TaskID)
 		log.Error("resume.peer.failed", "error", err)
-		rec.AwaitingPeerRole, rec.AwaitingPeerTaskID, rec.RemainingIntents = "", "", nil
+		rec.AwaitingPeerRole, rec.AwaitingPeerTaskID, rec.AwaitingPeerApproval, rec.RemainingIntents = "", "", false, nil
 		s.markFailed(rec)
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 	}
@@ -424,6 +424,11 @@ func (s *Supervisor) resumeFromPeer(
 		return
 	}
 	outcome, err := s.outcomeForPeer(role, res)
+	if state := a2a.TaskState(res.State); err != nil && rec.AwaitingPeerApproval && state.Terminal() {
+		// The peer's human decided (reject) or the approved action failed: that is
+		// the peer's turn for the CEO to read and judge, not the CEO's failure.
+		outcome, err = actionOutcome{Delegated: true, Output: fmt.Sprintf("peer task %q ended in state %s without output", res.PeerTaskID, res.State)}, nil
+	}
 	if err != nil {
 		fail(err)
 		return
@@ -435,7 +440,8 @@ func (s *Supervisor) resumeFromPeer(
 		return
 	}
 	if outcome.Parked {
-		log.Info("resume.peer.still_running")
+		log.Info("resume.peer.still_running", "peer_approval", outcome.PeerApproval)
+		rec.AwaitingPeerApproval = outcome.PeerApproval
 		s.repark(execCtx, yield, rec)
 		return
 	}
@@ -447,7 +453,7 @@ func (s *Supervisor) resumeFromPeer(
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, nil), nil) //nolint
 	rec.Turns = append(rec.Turns, port.ContextMessage{Role: "peer", Content: outcome.Output, At: time.Now()})
 	remaining := rec.RemainingIntents
-	rec.AwaitingPeerRole, rec.AwaitingPeerTaskID, rec.RemainingIntents = "", "", nil
+	rec.AwaitingPeerRole, rec.AwaitingPeerTaskID, rec.AwaitingPeerApproval, rec.RemainingIntents = "", "", false, nil
 	rec, halted := s.runIntents(ctx, execCtx, yield, rec, remaining)
 	if halted {
 		return
@@ -688,6 +694,8 @@ type actionOutcome struct {
 	// caller must park the delegating task on PeerRole/PeerTaskID.
 	Parked               bool
 	PeerRole, PeerTaskID string
+	// PeerApproval narrows Parked: the peer escalated and waits on its own human.
+	PeerApproval bool
 }
 
 // executeAction executes a Permit-classified (or human-approved) action intent.
@@ -713,10 +721,8 @@ func (s *Supervisor) executeAction(ctx context.Context, actionKind, body, target
 // maps the peer's observed state onto the delegating task's fate:
 //   - COMPLETED → success, peer output returned in the outcome;
 //   - any other terminal state (FAILED, REJECTED, CANCELED) → error naming the role;
-//   - INPUT_REQUIRED (the peer escalated) → immediate error stating the peer escalated
-//     and chained approval is not yet wired (spec agent-delegation, interim
-//     requirement). Chained approval is delivered by the follow-up change
-//     agent-delegation-chained-approval; nothing here polls or parks;
+//   - INPUT_REQUIRED (the peer escalated) → Parked, awaiting the peer's human approval
+//     (see outcomeForPeer); nothing here polls, the caller parks;
 //   - any other non-terminal state → error naming it as a port.Delegator protocol
 //     violation, because that port requires such a state to arrive as an error, never
 //     as a result. It is a bug in the Delegator, not an escalation, and must not be
@@ -765,9 +771,9 @@ func (s *Supervisor) delegateTimeout() time.Duration {
 //   - any other terminal state (FAILED, REJECTED, CANCELED) → error naming the role;
 //   - SUBMITTED or WORKING (the peer is still running) → Parked: the caller ends its
 //     execution and a watcher waits for the peer instead of blocking here;
-//   - INPUT_REQUIRED (the peer escalated) → immediate error stating the peer escalated
-//     and chained approval is not yet wired (spec agent-delegation, interim
-//     requirement; delivered by the follow-up agent-delegation-chained-approval);
+//   - INPUT_REQUIRED (the peer escalated) → Parked with PeerApproval: chained approval.
+//     The human approves once, on the peer's task; the delegating task keeps waiting
+//     for the peer to become terminal and never fails because of the escalation;
 //   - any other state → error naming it as a port.Delegator protocol violation. It is
 //     a bug in the Delegator, not an escalation, and must not be described as one.
 func (s *Supervisor) outcomeForPeer(role string, res port.DelegationResult) (actionOutcome, error) {
@@ -780,7 +786,7 @@ func (s *Supervisor) outcomeForPeer(role string, res port.DelegationResult) (act
 	case state == a2a.TaskStateSubmitted || state == a2a.TaskStateWorking:
 		return actionOutcome{Parked: true, PeerRole: role, PeerTaskID: res.PeerTaskID}, nil
 	case state == a2a.TaskStateInputRequired:
-		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q: peer escalated (peer task %q is %s) and chained approval is not yet wired; the peer task is left running for its own human verdict", role, res.PeerTaskID, res.State)
+		return actionOutcome{Parked: true, PeerApproval: true, PeerRole: role, PeerTaskID: res.PeerTaskID}, nil
 	default:
 		// Not COMPLETED, not terminal, not running, not the one legal stop state: the
 		// Delegator implementation broke its own contract. Reporting this as an

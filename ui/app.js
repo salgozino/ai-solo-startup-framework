@@ -46,7 +46,10 @@ function renderTasks(tasks) {
   taskList.innerHTML = tasks.slice().reverse().map(function(t) {
     const key = t.verdict_id || t.task_id;
     const label  = displayLabel(t.state);
-    const isInput = t.state === 'TASK_STATE_INPUT_REQUIRED';
+    const isInput = t.state === 'TASK_STATE_INPUT_REQUIRED' && !t.awaiting_peer;
+    const waiting = t.awaiting_peer
+      ? `<div class="task-awaiting">Awaiting ${escHtml(t.awaiting_peer)}${t.awaiting_peer_approval ? "'s human approval" : ''}</div>`
+      : '';
     const actions = isInput
       ? `<div class="task-actions">
            <button class="btn btn-approve" onclick="verdict('${key}','approve')">Approve</button>
@@ -67,6 +70,7 @@ function renderTasks(tasks) {
         <span class="task-state task-state-${label}">${label}</span>
       </div>
       <div class="task-input">${escHtml(t.input || '')}</div>
+      ${waiting}
       ${outputHtml}
       ${actions}
     </div>`;

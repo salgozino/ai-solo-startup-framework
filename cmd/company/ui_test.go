@@ -37,6 +37,13 @@ func (h *verdictRecorder) SendMessage(_ context.Context, req *sdka2a.SendMessage
 
 func uiRuntimes(t *testing.T, names ...string) ([]*agentRuntime, []*verdictRecorder) {
 	t.Helper()
+	return uiRuntimesWith(t, nil, names...)
+}
+
+// uiRuntimesWith seeds extra[name] records into that agent's store next to the
+// default shared-id escalation.
+func uiRuntimesWith(t *testing.T, extra map[string][]supervisor.TaskRecord, names ...string) ([]*agentRuntime, []*verdictRecorder) {
+	t.Helper()
 	cfg := &config.CompanyConfig{Tenant: "acme", RiskPolicy: map[string]config.Policy{}}
 	for _, name := range names {
 		cfg.Agents = append(cfg.Agents, config.AgentConfig{Name: name, Role: name, Provider: "claude-code"})
@@ -60,6 +67,11 @@ func uiRuntimes(t *testing.T, names ...string) ([]*agentRuntime, []*verdictRecor
 		}
 		if err := store.Save(rt.sup.Status().Addr, supervisor.TaskRecord{TaskID: "shared-id", State: string(sdka2a.TaskStateInputRequired), Input: names[i] + " task"}); err != nil {
 			t.Fatal(err)
+		}
+		for _, rec := range extra[names[i]] {
+			if err := store.Save(rt.sup.Status().Addr, rec); err != nil {
+				t.Fatal(err)
+			}
 		}
 		handlers[i] = &verdictRecorder{}
 		rt.uiAdap.handler = handlers[i]
@@ -210,5 +222,58 @@ func TestCompanyUI_EveryRuntimePushesAggregateSSE(t *testing.T) {
 			}
 			break
 		}
+	}
+}
+
+// Slice 8 (T17/T18): a CEO task parked on a peer's human approval is exposed as
+// such, so the UI offers no approve/reject on it; the peer's own escalated task is
+// the one actionable item.
+func TestCompanyUI_AwaitingPeerApprovalIsExposed(t *testing.T) {
+	runtimes, _ := uiRuntimesWith(t, map[string][]supervisor.TaskRecord{"ceo": {{
+		TaskID: "ceo-parked", State: string(sdka2a.TaskStateInputRequired), Input: "go",
+		AwaitingPeerRole: "engineer", AwaitingPeerTaskID: "P1", AwaitingPeerApproval: true,
+	}}}, "ceo", "engineer")
+	h := newCompanyUIHandler(runtimes)
+	defer h.Shutdown()
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/tasks", nil))
+	var payload struct {
+		Tasks []map[string]any `json:"tasks"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	var parked, escalated map[string]any
+	for _, task := range payload.Tasks {
+		switch {
+		case task["task_id"] == "ceo-parked":
+			parked = task
+		case task["agent"] == "engineer":
+			escalated = task
+		}
+	}
+	if parked == nil || parked["awaiting_peer"] != "engineer" || parked["awaiting_peer_approval"] != true {
+		t.Fatalf("parked CEO task = %v, want awaiting_peer=engineer and awaiting_peer_approval=true", parked)
+	}
+	if escalated == nil {
+		t.Fatal("engineer's escalated task is not listed")
+	}
+	if _, ok := escalated["awaiting_peer"]; ok {
+		t.Errorf("a plain escalation must not carry awaiting_peer: %v", escalated)
+	}
+}
+
+// Compat: the pre-Slice-8 UI JSON still decodes, and the new fields stay out of it.
+func TestUITaskRecord_PreChangeJSONCompat(t *testing.T) {
+	var rec ui.TaskRecord
+	if err := json.Unmarshal([]byte(`{"agent":"ceo","task_id":"t","state":"TASK_STATE_INPUT_REQUIRED","input":"x","pending_intent_kind":"k"}`), &rec); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := json.Marshal(rec)
+	if strings.Contains(string(out), "awaiting_peer") {
+		t.Errorf("omitempty must keep awaiting_peer* out of %s", out)
 	}
 }

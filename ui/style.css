@@ -64,6 +64,7 @@ section { margin-bottom: 2rem; }
 .task-state-SUBMITTED         { background: #2a2a2a; color: #aaa; }
 
 .task-input { font-size: 0.8rem; color: #bbb; white-space: pre-wrap; word-break: break-word; }
+.task-awaiting { font-size: 0.8rem; color: #e0a800; }
 
 .task-actions { margin-top: 0.75rem; display: flex; gap: 0.5rem; }
 

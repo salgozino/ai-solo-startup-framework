@@ -421,17 +421,8 @@ func TestExecuteDelegation_ErrorTextNamesTheFailure(t *testing.T) {
 			role: "designer",
 			want: []string{"designer", "unknown role"},
 		},
-		{
-			// The peer task ID is asserted UNESCAPED here. The end-to-end version of
-			// this needle had to spell it `peer task \"P\"` to match slog TextHandler
-			// quoting, coupling a behavioral requirement to the harness's log handler.
-			name: "INPUT_REQUIRED escalation names the role and the peer task",
-			del: &fake.Delegator{Results: map[string]port.DelegationResult{
-				"engineer": {PeerTaskID: "P", State: string(sdka2a.TaskStateInputRequired)},
-			}},
-			role: "engineer",
-			want: []string{"escalated", "chained approval", "not yet wired", "engineer", `peer task "P"`},
-		},
+		// The peer-INPUT_REQUIRED case was overturned by Slice 8 (chained approval):
+		// the replacement is TestChained_ImmediatePeerEscalationParksCEO.
 		{
 			name: "no delegator configured",
 			del:  nil,
