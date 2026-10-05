@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -397,5 +398,47 @@ func TestPark_RestartRearmsWatcherAndContinuesConversation(t *testing.T) {
 		if !strings.Contains(input, want) {
 			t.Errorf("post-restart input lacks earlier-round content %q: %q", want, input)
 		}
+	}
+}
+
+// countResumer counts resumes without re-entering Execute.
+type countResumer struct{ n atomic.Int32 }
+
+func (r *countResumer) Resume(context.Context, port.ResumePoint) error { r.n.Add(1); return nil }
+
+// R3: a verdict that consumes the finished peer's result completes the task
+// without its watcher; the watcher must exit and never resume a settled task.
+func TestPark_VerdictConsumingPeerStopsWatcher(t *testing.T) {
+	h := newParkSupervisor(t, []port.ActionIntent{delegateIntent("engineer", "build X")}, peerDone("peer out"))
+	h.sup.cfg.PeerPollInterval = 100 * time.Millisecond
+	cr := &countResumer{}
+	h.sup.SetResumer(cr)
+	collectStatusEvents(context.Background(), h.sup, newExecCtx("park-r3", "go"))
+
+	collectStatusEvents(context.Background(), h.sup, newResumeExecCtx("park-r3", "approve"))
+	waitForRecord(t, h.sup, "park-r3", isState(sdka2a.TaskStateCompleted))
+	time.Sleep(350 * time.Millisecond)
+	if n := h.sup.watcherCount(); n != 0 {
+		t.Errorf("watchers after non-watcher resume = %d, want 0", n)
+	}
+	if n := cr.n.Load(); n != 0 {
+		t.Errorf("watcher resumed a settled task %d times", n)
+	}
+}
+
+// R3: a task escalated to a human is not parked on its peer; the watcher exits
+// without delivering "peer-update" as if it were the verdict.
+func TestPark_WatcherDoesNotResumeHumanEscalation(t *testing.T) {
+	h := newParkSupervisor(t, nil, peerDone("x"))
+	cr := &countResumer{}
+	h.sup.SetResumer(cr)
+	rec := TaskRecord{TaskID: "park-r3b", State: string(sdka2a.TaskStateInputRequired), AwaitingPeerRole: "engineer",
+		AwaitingPeerTaskID: "P1", PendingIntentKind: "delegate"}
+	_ = h.sup.cfg.Store.Save(h.sup.cfg.Addr, rec)
+	h.sup.armWatcher("park-r3b", "engineer", "P1")
+
+	waitFor(t, func() bool { return h.sup.watcherCount() == 0 })
+	if n := cr.n.Load(); n != 0 {
+		t.Errorf("watcher resumed a human escalation %d times", n)
 	}
 }

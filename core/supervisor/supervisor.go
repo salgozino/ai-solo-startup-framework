@@ -405,6 +405,7 @@ func (s *Supervisor) resumeFromPeer(
 	log := s.log(rec.TaskID)
 	role := rec.AwaitingPeerRole
 	fail := func(err error) {
+		s.stopWatcher(rec.TaskID)
 		log.Error("resume.peer.failed", "error", err)
 		rec.AwaitingPeerRole, rec.AwaitingPeerTaskID, rec.RemainingIntents = "", "", nil
 		s.markFailed(rec)
@@ -439,6 +440,9 @@ func (s *Supervisor) resumeFromPeer(
 		return
 	}
 
+	// The task leaves the parked state here, possibly via a verdict rather than
+	// its watcher; cancel without waiting (the watcher may be the caller).
+	s.stopWatcher(rec.TaskID)
 	log.Info("resume.peer.done", "peer_task_id", rec.AwaitingPeerTaskID)
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, nil), nil) //nolint
 	rec.Turns = append(rec.Turns, port.ContextMessage{Role: "peer", Content: outcome.Output, At: time.Now()})

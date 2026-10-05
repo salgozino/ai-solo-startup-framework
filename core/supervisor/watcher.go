@@ -130,6 +130,11 @@ func (s *Supervisor) watchPeer(ctx context.Context, taskID, role, peerTaskID str
 			}
 			input = resumeInputPeerTimeout
 		}
+		// The task may have left the parked state without this watcher (a verdict
+		// consumed the peer result); never resume it, or a human escalation.
+		if !s.parkedOn(taskID, peerTaskID) {
+			return
+		}
 		// The resumed execution has its own lifecycle (it may run a whole provider
 		// round, or re-park and replace this watcher), so it must not die with this
 		// watcher's ctx; cancellation goes through Cancel, which stops the task.
@@ -141,7 +146,16 @@ func (s *Supervisor) watchPeer(ctx context.Context, taskID, role, peerTaskID str
 	}
 }
 
-// stopWatcher cancels the watcher for taskID, if any.
+// parkedOn reports whether taskID is still parked on peerTaskID rather than
+// escalated to a human, finished or gone.
+func (s *Supervisor) parkedOn(taskID, peerTaskID string) bool {
+	rec, err := s.cfg.Store.Load(s.cfg.Addr, taskID)
+	return err == nil && rec.State == string(a2a.TaskStateInputRequired) &&
+		rec.AwaitingPeerTaskID == peerTaskID && rec.PendingIntentKind == ""
+}
+
+// stopWatcher cancels the watcher for taskID, if any, without waiting for it;
+// idempotent, and safe to call from the watcher itself.
 func (s *Supervisor) stopWatcher(taskID string) {
 	s.watchMu.Lock()
 	defer s.watchMu.Unlock()
