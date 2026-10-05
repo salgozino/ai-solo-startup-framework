@@ -138,14 +138,14 @@ Slice 2 — input delivery
       size guard.
 
 Slice 3 — the second turn
-- [ ] **T7** — RED: test proving a CEO turn that delegates gets a second `RunTask` call
+- [x] **T7** — RED: test proving a CEO turn that delegates gets a second `RunTask` call
       whose input contains the peer's output.
-- [ ] **T8** — Re-invoke the provider after a delegation round with the assembled
+- [x] **T8** — Re-invoke the provider after a delegation round with the assembled
       transcript. Bounded rounds; exhaustion must be an explicit terminal state, not a hang.
       This is where `assembleBoundedContext` / `contextText` / `effectiveBudget` finally get
       production callers — wiring them earlier would change the first turn's input for no
       reason.
-- [ ] **T9** — Stop `rec.Output` from being clobbered by the peer's raw text
+- [x] **T9** — Stop `rec.Output` from being clobbered by the peer's raw text
       (`supervisor.go:476`, `:326-328`). `Output` must end up as the CEO's final answer.
       This deliberately overturns a test-asserted decision; name the replacement.
 
@@ -945,3 +945,58 @@ already-acknowledged candidate.
   based on the Slice 2 tip). It does not edit this document; its outcome is folded in here
   when it lands. Slices 3 → 6 and 8 stay strictly serial: all of them rewrite
   `core/supervisor/supervisor.go`.
+
+### Slice 3 — complete (T7, T8, T9)
+
+Branch: `feat/ceo-orchestration-loop-pr3-second-turn`. Commit: `b131a5e`
+`feat(supervisor): feed delegation results back into a bounded second turn`.
+6 files, 303 changed lines (`core/supervisor/supervisor.go`, new `loop_test.go`,
+`delegation_test.go`, `integration_test.go`, `multi_intent_test.go`,
+`core/port/fake/fake_provider.go` gains sequential results).
+
+**RED observed (worker-reported, verbatim failure summaries):**
+
+- T7 `TestDelegationLoop_FeedsPeerOutputToSecondTurn` — `RunTask calls = 1, want 2`.
+- T8 `TestDelegationLoop_RoundExhaustionIsTerminal` — record/event `COMPLETED`, want `FAILED`;
+  both effective-budget cases observed a single provider call.
+- T9 `TestExecuteAction_DelegationCompletesWithCEOOutput` — Output was the peer's raw
+  `"Done: implemented X"`; the empty-peer case observed `""`, one call, no turns.
+
+**Behaviour.** A turn whose intents produce at least one successful delegation appends a
+`peer` turn per result and re-invokes the provider with the assembled transcript through
+`assembleBoundedContext` / `contextText` / `effectiveBudget` (their first production
+callers). A turn with no delegation ends the loop; its output is the final answer. The
+first turn's input is byte-identical to before. Round cap: `maxProviderRounds = 8`;
+delegating on round 8 ends `FAILED` with `provider round limit (8) exhausted after
+delegation` in both the persisted Output and the terminal event — never a hang. No new
+persisted field; literal pre-change JSON tests still pass.
+
+**Deliberately overturned:** the raw-peer-output and exactly-one-provider-call assertions in
+`delegation_test.go` / `multi_intent_test.go`. Replacement named in the comments: *CEO
+synthesis from transcript feedback*. Three real-A2A rounds (`integration_test.go`) prove
+earlier results persist, including repeated identical requests.
+
+**Verification (parent-observed):** `go vet ./...`, `gofmt -l .` clean,
+`go test -race -count=1 ./...` all packages ok.
+
+**Native review** — lineage `review-57ea62b7aa7da3da`, base pinned to `574f15b` so only this
+slice was reviewed; risk `medium`, lens `review-reliability`. **Approved**, authority
+acknowledged and burned. Two advisory findings:
+
+- **R3-resume-publishes-pre-delegation-text** (WARNING, `supervisor.go:331`) — **open, owned
+  by Slice 6.** An approved escalated delegation records the peer turn but the resume path
+  does not re-invoke the provider, so Output stays the pre-delegation text. Park/resume
+  (T15) unifies the resume path with the loop; T14's RED must cover it.
+- **R3-untested-mid-loop-failures** (SUGGESTION, `supervisor.go:394-398`) — **open.** The
+  Save failure between rounds has no test. Cheap; fold into Slice 4.
+
+Follow-ups handed to Slice 4: MCP `dedupeKey` is token-scoped and repeated delegations across
+rounds are now reachable; `buildAckResult` text is now false.
+
+### SDD retirement — committed
+
+`docs/retire-sdd-adopt-odd` (`../asf-wt-odd`, off `master`), commit `7e4406f`: AGENTS.md
+switched to ODD, `openspec/README.md` freeze note, `config.yaml` retired header, six
+completed changes archived as `openspec/changes/archive/2026-10-02-*` (task 7.13 closed
+with a note), chained-approval proposal kept in place with a superseded-by-ODD banner, and
+the one broken Go-comment path in `core/supervisor/delegation_test.go:2` updated.
