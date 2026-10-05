@@ -30,9 +30,17 @@ func buildToolDescription(kind string) string {
 	desc := fmt.Sprintf(
 		"Calling this tool records an intent for %s for later policy classification and does not execute the action. "+
 			"Pass the full message text to be delivered in the required %q argument; it is used verbatim if the intent is approved. "+
-			"Call once; the outcome is unavailable this turn.",
+			"Call once per request; repeating an identical call within a turn is ignored.",
 		kind, bodyArg,
 	)
+	if kind == port.KindFinishTask {
+		return fmt.Sprintf(
+			"Ends the task. Pass your final answer to the user in the required %q argument; it becomes the task's result. "+
+				"Call it only when no further work or delegation results are needed. The task ends after this turn, "+
+				"even if you also delegated in the same turn. If you do not call it, a turn that delegates is continued with "+
+				"the delegation results, and a turn that does not delegate ends with your reply.",
+			bodyArg)
+	}
 	if kind == port.KindDelegateTask {
 		desc += fmt.Sprintf(
 			" The required %q argument identifies the delegation's target role (e.g. \"engineer\"); it must be a role declared in company.yaml, never a specific agent's configured name.",
@@ -107,10 +115,19 @@ func dedupeKey(token, kind string, payload map[string]any) string {
 // isError is always false (errors trigger model retry; we want acknowledgment).
 // Design Decision C text format and StructuredContent layout.
 func buildAckResult(receipt, kind string, duplicate bool) *gomcp.CallToolResult {
-	msg := fmt.Sprintf(
-		"Recorded intent %s as %s. Pending classification; outcome unavailable this turn. Do not call again. Report as requested, not completed.",
-		kind, receipt,
-	)
+	var msg string
+	switch kind {
+	case port.KindFinishTask:
+		msg = fmt.Sprintf("Recorded %s as %s. The task ends after this turn; your answer is the final result.", kind, receipt)
+	case port.KindDelegateTask:
+		msg = fmt.Sprintf(
+			"Recorded intent %s as %s. Pending classification. If permitted, the peer's result arrives in your next turn's transcript; do not call again for the same request this turn. Until then, report it as requested, not completed.",
+			kind, receipt)
+	default:
+		msg = fmt.Sprintf(
+			"Recorded intent %s as %s. Pending classification; this action does not return a result to you. Do not call again for the same request. Report it as requested, not completed.",
+			kind, receipt)
+	}
 	return &gomcp.CallToolResult{
 		Content: []gomcp.Content{
 			&gomcp.TextContent{Text: msg},
@@ -139,8 +156,20 @@ func newReceipt() string {
 //  2. Checks dedupe (returns existing receipt if this is a repeat call).
 //  3. Records the ActionIntent in the invocation sink.
 //  4. Returns the acknowledge-without-execute result.
+//
+// Invariant: every *action* tool is policy-classified; supervisor control tools are a
+// fixed, named set (today only finish_task). Control tools are registered here but sit
+// outside risk_policy: no company.yaml declaration is needed, and the supervisor strips
+// them from the intents before classification, so they never reach the policy engine, a
+// gateway or the delegator. A policy key that collides with a control tool name is ignored.
 func registerTools(srv *gomcp.Server, tenant string, policies map[string]config.Policy, registry *Registry) {
+	kinds := []string{port.KindFinishTask}
 	for kind := range policies {
+		if kind != port.KindFinishTask {
+			kinds = append(kinds, kind)
+		}
+	}
+	for _, kind := range kinds {
 		kind := kind // capture loop variable
 
 		gomcp.AddTool(srv,
