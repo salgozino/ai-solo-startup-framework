@@ -173,8 +173,8 @@ Slice 6 — park/resume
       continue.
 
 Slice 7 — multi-agent UI (lands BEFORE chained approval; see Progress, 2026-10-02)
-- [ ] **T20** — RED: test proving a non-CEO agent's task is listed and approvable.
-- [ ] **T21** — Aggregate every runtime in the UI instead of `runtimes[0]`
+- [x] **T20** — RED: test proving a non-CEO agent's task is listed and approvable.
+- [x] **T21** — Aggregate every runtime in the UI instead of `runtimes[0]`
       (`cmd/company/main.go:67`, `:72`).
 
 Slice 8 — chained approval
@@ -1000,3 +1000,43 @@ switched to ODD, `openspec/README.md` freeze note, `config.yaml` retired header,
 completed changes archived as `openspec/changes/archive/2026-10-02-*` (task 7.13 closed
 with a note), chained-approval proposal kept in place with a superseded-by-ODD banner, and
 the one broken Go-comment path in `core/supervisor/delegation_test.go:2` updated.
+
+### Slice 7 (multi-agent UI) — complete (T20, T21)
+
+Branch: `feat/ceo-orchestration-loop-ui-aggregation` (worktree `../asf-wt-ui`, based on the
+Slice 2 tip `f4322d6`, in parallel with Slices 3-4). Commit: `a1c6332`
+`feat(ui): aggregate tasks and verdicts across every agent runtime`. 5 files, 319 changed
+lines (`cmd/company/company_ui.go` new, `cmd/company/ui_test.go` new, `main.go`, `ui/app.js`,
+`ui/handler.go`).
+
+**RED observed (worker-reported):** `TestCompanyUI_NonCEOTaskListedAndVerdictRouted` —
+"listed 1 tasks, want CEO and engineer"; `TestCompanyUI_SingleAgentKeepsRawVerdictIDAndCEOSubmission`
+— "single-agent verdict ID = \"\""; `TestCompanyUI_EveryRuntimePushesAggregateSSE` —
+"incomplete SSE snapshot".
+
+**Design.** The UI lists every runtime's tasks with the owning agent. Multi-agent verdict IDs
+are `base64url(agent) + "." + base64url(taskID)`; the delimiter is outside the base64url
+alphabet, so colliding task IDs across agents never cross. A bare or unknown ID in a
+multi-agent company is refused without dispatch. Single-agent companies keep raw task IDs.
+Every runtime's state change broadcasts the aggregate snapshot. Task submission stays
+CEO-only. No existing assertion overturned.
+
+**Verification (parent-observed):** `go vet ./...`, `gofmt -l .` clean,
+`go test -race -count=1 ./...` all packages ok in the worktree.
+
+**Native review** — lineage `review-b188508b6a044dd9`, base pinned to `f4322d6`; risk
+`medium`, lens `review-reliability`. **Approved**, authority acknowledged and burned.
+Advisory findings, all open:
+
+- **R3-aggregate-fail-closed** (WARNING, `company_ui.go:32-36`) — one runtime's store error
+  blanks the whole list and blocks `PostVerdict` for every agent. Degrade per runtime.
+- **R3-sse-payload-shape** (WARNING, `company_ui.go:72`) — the broadcast shape changed from
+  `Status()` to `{supervisor, tasks}`; matches what `app.js` consumes, but no test pins
+  the JSON keys.
+- **R3-silent-broadcast-drop** (SUGGESTION, `:68-71`) — a ListTasks error drops the push
+  silently; log it.
+- **R3-sse-test-attribution** (SUGGESTION, `ui_test.go:183-212`) — the SSE test does not
+  prove which runtime triggered which snapshot.
+
+**Integration into the chain.** This branch is a sibling of pr3/pr4, not a descendant. It is
+merged into the chain right before Slice 8, which is the first slice that needs it.
