@@ -16,6 +16,9 @@ const taskStateInputRequired = "TASK_STATE_INPUT_REQUIRED"
 // TaskRecord is the minimal view the UI handler needs of a persisted task.
 // It maps to supervisor.TaskRecord without importing the supervisor package.
 type TaskRecord struct {
+	Agent string `json:"agent,omitempty"`
+	// VerdictID is an opaque routing key; TaskID remains the agent-local ID.
+	VerdictID         string `json:"verdict_id,omitempty"`
 	TaskID            string `json:"task_id"`
 	State             string `json:"state"`
 	Input             string `json:"input"`
