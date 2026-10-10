@@ -382,10 +382,20 @@ func (s *Supervisor) executeWithPolicy(
 		rec.Output = result.Output
 		rec.Turns = append(rec.Turns, port.ContextMessage{Role: "assistant", Content: result.Output, At: time.Now()})
 		before := len(rec.Turns)
+		// finish_task is a control tool: split it off before classification so it can
+		// never reach the policy engine, a gateway or the delegator.
+		actions, finish, finished := splitFinishTask(result.ActionIntents)
+		if finished && finish != "" {
+			rec.Output = finish
+		}
 		var halted bool
-		rec, halted = s.runIntents(ctx, execCtx, yield, rec, toPendingIntents(result.ActionIntents))
+		rec, halted = s.runIntents(ctx, execCtx, yield, rec, toPendingIntents(actions))
 		if halted {
 			return
+		}
+		// An explicit finish ends the loop after this turn, delegation or not.
+		if finished {
+			break
 		}
 		// Only successful delegations append peer turns, including empty results.
 		// The terminal save below persists a final, non-delegating turn once.
@@ -663,6 +673,23 @@ func toPendingIntents(intents []port.ActionIntent) []PendingIntent {
 		})
 	}
 	return out
+}
+
+// splitFinishTask separates the finish_task control intent from the action intents.
+// It returns the actions in their original order, the first finish_task answer text, and
+// whether any finish_task was present.
+func splitFinishTask(intents []port.ActionIntent) (actions []port.ActionIntent, answer string, finished bool) {
+	for _, intent := range intents {
+		if intent.Kind != port.KindFinishTask {
+			actions = append(actions, intent)
+			continue
+		}
+		if !finished {
+			answer = extractBody(intent)
+		}
+		finished = true
+	}
+	return actions, answer, finished
 }
 
 // remainingAfter returns a copy of the intents queued after index i, or nil when
