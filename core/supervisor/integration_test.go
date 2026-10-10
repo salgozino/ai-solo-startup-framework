@@ -129,6 +129,7 @@ type delegationCompany struct {
 	delegator   *transa2a.Client
 	ceoSrv      *transa2a.Server
 	engineerSup *supervisor.Supervisor
+	engineerSrv *transa2a.Server
 	ceoSup      *supervisor.Supervisor
 	ceoStore    *supervisor.Store
 }
@@ -140,6 +141,13 @@ type delegationCompany struct {
 // uses the supervisor's own 10-minute default.
 func startDelegationCompany(t *testing.T, tenant string, ceoProv, engineerProv port.Provider, delegateTimeout time.Duration) *delegationCompany {
 	t.Helper()
+	return startDelegationCompanyWith(t, tenant, ceoProv, engineerProv, delegateTimeout, map[string]config.Policy{})
+}
+
+// startDelegationCompanyWith is startDelegationCompany with the engineer's own
+// risk policy, so a test can make the peer escalate.
+func startDelegationCompanyWith(t *testing.T, tenant string, ceoProv, engineerProv port.Provider, delegateTimeout time.Duration, engineerPolicy map[string]config.Policy) *delegationCompany {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("integration: skipping in -short mode")
 	}
@@ -149,7 +157,7 @@ func startDelegationCompany(t *testing.T, tenant string, ceoProv, engineerProv p
 		t.Fatalf("NewPeerDirectory: %v", err)
 	}
 
-	engineerSup, engineerSrv := startDelegatingSupervisor(t, "engineer", tenant, engineerProv, nil, 0, map[string]config.Policy{})
+	engineerSup, engineerSrv := startDelegatingSupervisor(t, "engineer", tenant, engineerProv, nil, 0, engineerPolicy)
 	if err := dir.Bind("engineer", engineerSrv.BaseURL()); err != nil {
 		t.Fatalf("dir.Bind(engineer): %v", err)
 	}
@@ -167,7 +175,7 @@ func startDelegationCompany(t *testing.T, tenant string, ceoProv, engineerProv p
 		t.Fatalf("dir.Bind(ceo): %v", err)
 	}
 
-	return &delegationCompany{delegator: delegator, ceoSrv: ceoSrv, engineerSup: engineerSup, ceoSup: ceoSup, ceoStore: ceoStore}
+	return &delegationCompany{delegator: delegator, ceoSrv: ceoSrv, engineerSup: engineerSup, engineerSrv: engineerSrv, ceoSup: ceoSup, ceoStore: ceoStore}
 }
 
 // delegateTaskIntentTo builds a delegate_task ActionIntent with the {target,

@@ -12,6 +12,7 @@ import (
 
 	"github.com/salgozino/ai-solo-startup-framework/core/port"
 	"github.com/salgozino/ai-solo-startup-framework/core/port/fake"
+	"github.com/salgozino/ai-solo-startup-framework/core/supervisor"
 	transa2a "github.com/salgozino/ai-solo-startup-framework/transport/a2a"
 )
 
@@ -203,5 +204,88 @@ func TestPark_RestartRearmsWatcherOverRealWire(t *testing.T) {
 		if !strings.Contains(input, want) {
 			t.Errorf("restarted CEO input lacks earlier-round content %q: %q", want, input)
 		}
+	}
+}
+
+// T17/T18 (Slice 8) acceptance, over the real wire: the human's task is delegated to
+// the engineer, whose risky action escalates. The CEO stays parked on the peer; ONE
+// approval, posted on the engineer's task, completes the engineer and the CEO
+// resumes by itself into round two and ends with finish_task. Nothing is ever posted
+// to the CEO's task.
+func TestChained_PeerApprovalResumesCEOWithoutHumanActionOnCEOTask(t *testing.T) {
+	tenant := "acme"
+	engineerProv := &fake.Provider{ReturnRunResult: port.ProviderResult{
+		Output:        "engineer shipped it",
+		ActionIntents: []port.ActionIntent{{Kind: "telegram_send", Payload: map[string]any{"body": "release notes"}}},
+	}}
+	ceoProv := &fake.Provider{ReturnRunResults: []port.ProviderResult{
+		{Output: "delegating", ActionIntents: []port.ActionIntent{delegateTaskIntentTo("engineer", "ship X")}},
+		{Output: "ignored", ActionIntents: []port.ActionIntent{{Kind: port.KindFinishTask, Payload: map[string]any{"body": "all done: engineer shipped it"}}}},
+	}}
+	co := startDelegationCompanyWith(t, tenant, ceoProv, engineerProv, 0, map[string]config.Policy{
+		"telegram_send": {Risk: "risky", AllowedRoles: []string{"engineer"}},
+	})
+
+	task := sendCEOTaskBounded(t, co.ceoSrv, tenant, "ship X")
+	if task.Status.State != sdka2a.TaskStateInputRequired {
+		t.Fatalf("CEO task state = %v, want parked", task.Status.State)
+	}
+
+	// The CEO's record says whose approval it waits for, and which peer task to approve.
+	rec := waitUntil(t, func() (supervisor.TaskRecord, bool) {
+		r, err := co.ceoStore.Load(co.ceoSup.Addr(), string(task.ID))
+		return r, err == nil && r.AwaitingPeerApproval
+	})
+	if rec.AwaitingPeerRole != "engineer" || rec.AwaitingPeerTaskID == "" {
+		t.Fatalf("CEO record = %+v, want awaiting the engineer's approval", rec)
+	}
+	peerID := sdka2a.TaskID(rec.AwaitingPeerTaskID)
+	if got := getTask(t, co.engineerSrv, tenant, peerID).Status.State; got != sdka2a.TaskStateInputRequired {
+		t.Fatalf("engineer task = %v, want INPUT_REQUIRED", got)
+	}
+
+	// Parked, not failed and not in a new round, while the human has not decided.
+	time.Sleep(100 * time.Millisecond)
+	if got := getTask(t, co.ceoSrv, tenant, task.ID).Status.State; got != sdka2a.TaskStateInputRequired {
+		t.Fatalf("CEO state while the peer awaits approval = %v, want INPUT_REQUIRED", got)
+	}
+	if got := ceoProv.RunTaskCallCount(); got != 1 {
+		t.Fatalf("CEO RunTask calls = %d while the peer awaits approval, want 1", got)
+	}
+
+	// The single human action: approve the engineer's task (what the UI verdict does).
+	msg := sdka2a.NewMessage(sdka2a.MessageRoleUser, sdka2a.NewTextPart("approve"))
+	msg.TaskID = peerID
+	if _, err := co.engineerSrv.Handler().SendMessage(context.Background(), &sdka2a.SendMessageRequest{Tenant: tenant, Message: msg}); err != nil {
+		t.Fatalf("approve engineer task: %v", err)
+	}
+
+	final := awaitCEOTask(t, co.ceoSrv, tenant, task.ID)
+	if final.Status.State != sdka2a.TaskStateCompleted {
+		t.Fatalf("CEO task = %v, want COMPLETED", final.Status.State)
+	}
+	if got := textOf(final.Status.Message); got != "all done: engineer shipped it" {
+		t.Errorf("CEO output = %q, want the finish_task answer", got)
+	}
+	if got := ceoProv.RunTaskCallCount(); got != 2 {
+		t.Errorf("CEO RunTask calls = %d, want 2", got)
+	}
+	if in := ceoProv.RunCalls[1].Input; !strings.Contains(in, "engineer shipped it") {
+		t.Errorf("round two must carry the engineer's output; input = %q", in)
+	}
+}
+
+// waitUntil polls fn until it reports ok, failing the test after 5s.
+func waitUntil[T any](t *testing.T, fn func() (T, bool)) T {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if v, ok := fn(); ok {
+			return v
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("condition not reached within 5s")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

@@ -49,6 +49,7 @@ func (s *Supervisor) parkOnPeer(
 ) TaskRecord {
 	rec.AwaitingPeerRole = outcome.PeerRole
 	rec.AwaitingPeerTaskID = outcome.PeerTaskID
+	rec.AwaitingPeerApproval = outcome.PeerApproval
 	rec.RemainingIntents = remaining
 	s.repark(execCtx, yield, rec)
 	return rec
@@ -92,12 +93,14 @@ func (s *Supervisor) armWatcher(taskID, role, peerTaskID string) {
 	}()
 }
 
-// watchPeer polls the peer until it stops advancing (terminal, or INPUT_REQUIRED,
-// which the resumed execution then fails exactly like the blocking path did —
-// chained approval is Slice 8), then resumes the task through the resumer. A failed
-// poll or a failed resume is retried on the next tick; ctx ends the watch. If the
-// peer is still running when DelegateTimeout elapses the task is resumed with a
-// timeout notice and fails (a restart re-arms the watcher with a fresh clock).
+// watchPeer polls the peer and resumes the task through the resumer when the peer
+// turns terminal, or when its escalation state differs from what the record says
+// (peer escalated, or its human approved and it works again): that resume only
+// refreshes the record and re-parks, it never starts a round. An INPUT_REQUIRED
+// peer waits on its own human, so nothing times out while it does. A failed poll or
+// a failed resume is retried on the next tick; ctx ends the watch. If the peer is
+// still running when DelegateTimeout elapses the task is resumed with a timeout
+// notice and fails (a re-park or restart re-arms the watcher with a fresh clock).
 func (s *Supervisor) watchPeer(ctx context.Context, taskID, role, peerTaskID string) {
 	interval := s.cfg.PeerPollInterval
 	if interval <= 0 {
@@ -124,16 +127,18 @@ func (s *Supervisor) watchPeer(ctx context.Context, taskID, role, peerTaskID str
 		}
 		state := a2a.TaskState(res.State)
 		input := resumeInputPeerUpdate
-		if !state.Terminal() && state != a2a.TaskStateInputRequired {
-			if time.Now().Before(deadline) {
+		// The task may have left the parked state without this watcher (a verdict
+		// consumed the peer result); never resume it, or a human escalation.
+		rec, parked := s.parkedRecord(taskID, peerTaskID)
+		if !parked {
+			return
+		}
+		escalated := state == a2a.TaskStateInputRequired
+		if !state.Terminal() && escalated == rec.AwaitingPeerApproval {
+			if escalated || time.Now().Before(deadline) {
 				continue
 			}
 			input = resumeInputPeerTimeout
-		}
-		// The task may have left the parked state without this watcher (a verdict
-		// consumed the peer result); never resume it, or a human escalation.
-		if !s.parkedOn(taskID, peerTaskID) {
-			return
 		}
 		// The resumed execution has its own lifecycle (it may run a whole provider
 		// round, or re-park and replace this watcher), so it must not die with this
@@ -146,11 +151,11 @@ func (s *Supervisor) watchPeer(ctx context.Context, taskID, role, peerTaskID str
 	}
 }
 
-// parkedOn reports whether taskID is still parked on peerTaskID rather than
-// escalated to a human, finished or gone.
-func (s *Supervisor) parkedOn(taskID, peerTaskID string) bool {
+// parkedRecord returns taskID's record and whether it is still parked on
+// peerTaskID rather than escalated to a human, finished or gone.
+func (s *Supervisor) parkedRecord(taskID, peerTaskID string) (TaskRecord, bool) {
 	rec, err := s.cfg.Store.Load(s.cfg.Addr, taskID)
-	return err == nil && rec.State == string(a2a.TaskStateInputRequired) &&
+	return rec, err == nil && rec.State == string(a2a.TaskStateInputRequired) &&
 		rec.AwaitingPeerTaskID == peerTaskID && rec.PendingIntentKind == ""
 }
 

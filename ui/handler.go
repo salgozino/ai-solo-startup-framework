@@ -24,6 +24,12 @@ type TaskRecord struct {
 	Input             string `json:"input"`
 	PendingIntentKind string `json:"pending_intent_kind,omitempty"`
 	Output            string `json:"output,omitempty"`
+	// AwaitingPeer is the role this task is parked on; such a task is not a human
+	// escalation, so the UI offers no verdict control for it.
+	AwaitingPeer string `json:"awaiting_peer,omitempty"`
+	// AwaitingPeerApproval: that peer escalated and waits on its own human, whose
+	// approval is the one actionable item (on the peer's task).
+	AwaitingPeerApproval bool `json:"awaiting_peer_approval,omitempty"`
 }
 
 // SupervisorStatus is the minimal view of the supervisor's observable state.

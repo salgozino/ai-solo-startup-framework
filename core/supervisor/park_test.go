@@ -223,18 +223,8 @@ func TestPark_RoundCapSurvivesResume(t *testing.T) {
 	}
 }
 
-// T15: a peer that escalates while parked fails the task exactly as the blocking
-// path did; chained approval is Slice 8.
-func TestPark_PeerInputRequiredFailsTask(t *testing.T) {
-	h := newParkSupervisor(t, []port.ActionIntent{delegateIntent("engineer", "build X")},
-		peerWorking(), port.DelegationResult{PeerTaskID: "P1", State: string(sdka2a.TaskStateInputRequired)})
-	collectStatusEvents(context.Background(), h.sup, newExecCtx("park-6", "go"))
-
-	rec := waitForRecord(t, h.sup, "park-6", isState(sdka2a.TaskStateFailed))
-	if rec.Output != agentOwnOutput {
-		t.Errorf("a failed peer wait must fabricate no output; got %q", rec.Output)
-	}
-}
+// T15's TestPark_PeerInputRequiredFailsTask was overturned by Slice 8: the
+// replacement is TestChained_PeerEscalationKeepsCEOParkedUntilPeerTerminal.
 
 // design D10, preserved across park/resume: DelegateTimeout bounds the peer wait.
 // A peer that never finishes fails the parked task, naming nothing it did not do:

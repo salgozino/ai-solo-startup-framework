@@ -510,3 +510,56 @@ func TestClient_PeerTaskStateReportsTerminalOutput(t *testing.T) {
 		t.Errorf("PeerTaskState Output = %q, want %q (peer output must cross the wire)", got.Output, "peer output")
 	}
 }
+
+// T19: a follow-up reaches the SAME peer task (msg.TaskID), not a new one. The peer
+// is parked in INPUT_REQUIRED so the task is resumable; the follow-up text is not an
+// approval, so the peer's resume path rejects it. The proof is the same task ID
+// moving to REJECTED. NOTE: that is also why the supervisor does not route
+// delegate_task follow-ups here yet: to an INPUT_REQUIRED peer a message IS the
+// verdict, so "approve" would let the CEO approve its own peer's escalation.
+func TestClient_FollowUpReachesTheSamePeerTask(t *testing.T) {
+	prov := &fake.Provider{ReturnRunResult: port.ProviderResult{ActionIntents: []port.ActionIntent{{Kind: "telegram_send"}}}}
+	policyCfg := map[string]config.Policy{"telegram_send": {Risk: "risky", AllowedRoles: []string{"engineer"}}}
+	_, dir := newTestPeer(t, "engineer", "acme", prov, policyCfg)
+	c := NewClient(dir, "acme", clientTestToken, nil)
+
+	first, err := c.Delegate(context.Background(), "engineer", "escalate")
+	if err != nil {
+		t.Fatalf("Delegate: %v", err)
+	}
+	settle(t, c, "engineer", first.PeerTaskID)
+
+	got, err := c.FollowUp(context.Background(), "engineer", first.PeerTaskID, "not an approval")
+	if err != nil {
+		t.Fatalf("FollowUp: %v", err)
+	}
+	if got.PeerTaskID != first.PeerTaskID {
+		t.Fatalf("follow-up PeerTaskID = %q, want the existing %q", got.PeerTaskID, first.PeerTaskID)
+	}
+	if end := settle(t, c, "engineer", first.PeerTaskID); end.State != string(sdka2a.TaskStateRejected) {
+		t.Errorf("peer task state after follow-up = %q, want %q (the follow-up must land on the original task)", end.State, sdka2a.TaskStateRejected)
+	}
+}
+
+func TestClient_FollowUpWithoutPeerTaskIsRefused(t *testing.T) {
+	c := NewClient(nil, "acme", clientTestToken, nil)
+	if _, err := c.FollowUp(context.Background(), "engineer", "", "x"); err == nil {
+		t.Error("a follow-up without a peer task ID must be refused, not sent as a new task")
+	}
+}
+
+// The SDK refuses messages to a terminal task, so a follow-up can only ever reach a
+// non-terminal peer task.
+func TestClient_FollowUpToTerminalPeerTaskFails(t *testing.T) {
+	prov := &fake.Provider{ReturnRunResult: port.ProviderResult{Output: "done"}}
+	_, dir := newTestPeer(t, "engineer", "acme", prov, nil)
+	c := NewClient(dir, "acme", clientTestToken, nil)
+	first, err := c.Delegate(context.Background(), "engineer", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	settle(t, c, "engineer", first.PeerTaskID)
+	if _, err := c.FollowUp(context.Background(), "engineer", first.PeerTaskID, "more"); err == nil {
+		t.Error("follow-up to a COMPLETED peer task must fail")
+	}
+}

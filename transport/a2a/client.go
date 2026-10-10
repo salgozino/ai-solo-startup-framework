@@ -105,8 +105,24 @@ func (c *Client) resolvePeer(ctx context.Context, role string) (*a2aclient.Clien
 	return peer, nil
 }
 
+var _ port.FollowUpDelegator = (*Client)(nil)
+
 // Delegate implements port.Delegator.
 func (c *Client) Delegate(ctx context.Context, role, body string) (port.DelegationResult, error) {
+	return c.send(ctx, role, "", body)
+}
+
+// FollowUp implements port.FollowUpDelegator: the message joins the peer's existing
+// task (msg.TaskID) instead of opening a new one.
+func (c *Client) FollowUp(ctx context.Context, role, peerTaskID, body string) (port.DelegationResult, error) {
+	if peerTaskID == "" {
+		return port.DelegationResult{}, fmt.Errorf("transport/a2a: client: follow-up to role %q needs a peer task ID", role)
+	}
+	return c.send(ctx, role, peerTaskID, body)
+}
+
+// send delivers body to role, onto peerTaskID when it is non-empty.
+func (c *Client) send(ctx context.Context, role, peerTaskID, body string) (port.DelegationResult, error) {
 	peer, err := c.resolvePeer(ctx, role)
 	if err != nil {
 		return port.DelegationResult{}, err
@@ -117,6 +133,7 @@ func (c *Client) Delegate(ctx context.Context, role, body string) (port.Delegati
 	ctx = a2aclient.AttachSessionID(ctx, clientSessionID)
 
 	msg := sdka2a.NewMessage(sdka2a.MessageRoleUser, sdka2a.NewTextPart(body))
+	msg.TaskID = sdka2a.TaskID(peerTaskID)
 	// ReturnImmediately: the delegating task parks instead of holding an execution
 	// open for as long as the peer works (park/resume, Slice 6), so this call must
 	// return as soon as the peer task exists. The peer's own execution is detached

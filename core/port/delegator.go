@@ -38,3 +38,16 @@ type Delegator interface {
 	// re-establish that wait after a process restart.
 	PeerTaskState(ctx context.Context, role, peerTaskID string) (DelegationResult, error)
 }
+
+// PeerTaskArg is the ActionIntent payload key naming an existing peer task that a
+// delegate_task intent continues instead of opening a new one. Plain string, so the
+// payload stays gob-safe.
+const PeerTaskArg = "peer_task_id"
+
+// FollowUpDelegator is a Delegator that can also continue an existing peer task.
+type FollowUpDelegator interface {
+	Delegator
+	// FollowUp sends body onto peerTaskID, the peer's task from an earlier
+	// Delegate, and returns the task's state as of that moment, like Delegate.
+	FollowUp(ctx context.Context, role, peerTaskID, body string) (DelegationResult, error)
+}

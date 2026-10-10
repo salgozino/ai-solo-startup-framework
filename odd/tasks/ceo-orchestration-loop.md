@@ -184,11 +184,11 @@ Design source: the frozen SDD proposal
 `agent-supervisor` delta specs). Read it before T17; reuse its requirements, do not
 re-derive them.
 
-- [ ] **T17** — RED: test proving a peer escalation reaches the human instead of failing the
+- [x] **T17** — RED: test proving a peer escalation reaches the human instead of failing the
       delegating task.
-- [ ] **T18** — Remove the hard-fail at `supervisor.go:570-571` and propagate the peer's
+- [x] **T18** — Remove the hard-fail at `supervisor.go:570-571` and propagate the peer's
       `INPUT_REQUIRED` upward.
-- [ ] **T19** — Let the CEO send a follow-up to an existing peer task
+- [~] **T19** — Let the CEO send a follow-up to an existing peer task
       (`msg.TaskID = peerTaskID`); `transport/a2a/client.go:118` never sets it today. The
       SDK already supports this.
 
@@ -1200,3 +1200,77 @@ Advisory findings, open:
 
 **Verification (parent-observed):** `go vet`, `gofmt` clean;
 `go test -race -count=5 ./core/supervisor/ ./transport/a2a/` and `go test ./...` all ok.
+
+### Slice 8 — complete (T17, T18; T19 transport only)
+
+Branch: `feat/ceo-orchestration-loop-pr8-chained-approval`. Commit: `e646d21`
+`feat(supervisor): resume the CEO after its peer's own human approval`. 16 files, 523
+changed lines.
+
+**Behaviour.** A peer whose own task escalates to `INPUT_REQUIRED` no longer fails the
+delegating task: the hard-fail in `outcomeForPeer` is gone. The CEO stays parked with the
+new `TaskRecord.AwaitingPeerApproval` (`omitempty`, literal pre-change JSON test). The
+watcher never times out a peer that is waiting on its human. It resumes the CEO into a new
+round only when the peer turns terminal; a change in the peer's escalation state only
+refreshes the flag and re-parks. A peer rejected or failed after a flagged wait becomes a
+peer turn the CEO judges. Restart recovery reads the persisted flag
+(`TestChained_RestartKeepsWaitingThenResumes`). The UI exposes `AwaitingPeer`/
+`AwaitingPeerApproval`, hides the inert approve/reject buttons on a parked CEO task, and
+shows "Awaiting engineer's human approval" (closes the Slice 6 UI follow-up).
+
+**Acceptance, real wire:** `TestChained_PeerApprovalResumesCEOWithoutHumanActionOnCEOTask`.
+The engineer's `telegram_send` escalates and the CEO parks after one provider call. One
+`approve` on the engineer's task completes it, and the CEO resumes into round two and ends
+via `finish_task`. No message is ever posted to the CEO's task.
+
+**RED observed (worker-reported):** the five `chained_test.go` tests had the CEO task
+`FAILED` (`state = FAILED, want a parked INPUT_REQUIRED`); the UI test reported
+`want awaiting_peer=engineer and awaiting_peer_approval=true`. The integration test was
+written after the code, so no RED is claimed for it.
+
+**Overturned (named in comments):** `TestPark_PeerInputRequiredFailsTask` →
+`TestChained_PeerEscalationKeepsCEOParkedUntilPeerTerminal`; the "not yet wired" case in
+`TestExecuteDelegation_ErrorTextNamesTheFailure` → `TestChained_ImmediatePeerEscalationParksCEO`.
+
+**Divergences from the frozen spec** (`openspec/changes/agent-delegation-chained-approval/`),
+the landed park/resume design wins:
+
+- No `AwaitingPeerDeadline`; `DelegateTimeout` bounds an un-escalated wait instead.
+- No `executeResume` precedence branch; `resumeFromPeer` handles the resume.
+- No `ErrAwaitingPeer` 409. A verdict on a parked CEO task is accepted but harmless:
+  `resumeFromPeer` re-reads the peer and ignores the message text, and the UI no longer
+  offers the buttons.
+- A terminal non-`COMPLETED` peer still fails the CEO unless it was flagged as escalated.
+
+**T19 — `[~]` partial, maintainer decision (2026-10-02).** Shipped: `port.PeerTaskArg =
+"peer_task_id"`, `port.FollowUpDelegator`, and `Client.FollowUp`, which sets `msg.TaskID`
+and refuses an empty ID. Tested: a follow-up lands on the same peer task, and a follow-up to
+a terminal task fails. **Not wired to the CEO, deliberately:** the only live follow-up target
+is a peer in `INPUT_REQUIRED`, and a2a consumes that message as the peer's verdict. A CEO
+follow-up could approve its own peer's escalation and bypass the human. Wiring it needs a
+guard that refuses follow-ups to an escalated peer, supervisor routing, and an optional
+`peer_task_id` argument on the `delegate_task` MCP tool. Tracked as a follow-up.
+
+**Native review** — lineage `review-81a2babc6dfbded4`, base `d24a572`. **Approved**,
+authority burned. Advisory findings, open:
+
+- **R3-approved-action-failure-nondeterministic** (WARNING, `supervisor.go:427-431`).
+- **R3-watcher-per-tick-store-load-exit** (WARNING, `watcher.go:132-133`): a transient
+  store `Load` error exits the watcher, stranding the parked task until a restart.
+- **R3-followup-acts-as-verdict** (SUGGESTION): the same hazard as the T19 deferral, now
+  documented at the client.
+- **R3-peer-failure-detail-dropped**, **R3-timing-dependent-flag-test** (SUGGESTION).
+
+**Verification (parent-observed):** build, `go vet`, `gofmt` clean;
+`go test -race -count=3 ./core/supervisor/ ./transport/a2a/ ./cmd/...` and
+`go test -count=1 ./...` all ok.
+
+### Feature close — 2026-10-02
+
+Every acceptance criterion is proven by a test: three or more delegation rounds with
+earlier rounds re-injected (`integration_test.go`), a parked CEO task that is approvable and
+cancellable (`park_*`), a peer escalation that reaches the human (`chained_test.go`),
+restart mid-conversation (`TestChained_RestartKeepsWaitingThenResumes` and the T16 tests),
+round exhaustion `FAILED` (`loop_test.go`), and pre-change JSON compatibility. Open
+follow-ups are the T19 wiring and the advisory findings listed per slice above. None is a
+blocker.

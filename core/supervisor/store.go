@@ -58,6 +58,10 @@ type TaskRecord struct {
 	// peer's result is consumed. Zero-value safe: absent means no peer wait.
 	AwaitingPeerRole   string `json:"awaiting_peer_role,omitempty"`
 	AwaitingPeerTaskID string `json:"awaiting_peer_task_id,omitempty"`
+	// AwaitingPeerApproval narrows the peer wait: the peer itself escalated and is
+	// waiting for its own human's verdict (chained approval). The human approves on
+	// the peer's task; this task resumes by itself once the peer is terminal.
+	AwaitingPeerApproval bool `json:"awaiting_peer_approval,omitempty"`
 	// FinishRequested records that the turn in flight called finish_task. It only
 	// matters across a park: a turn that finished but halted on an escalation or a
 	// peer wait must not re-invoke the provider after the resume. Cleared once the
