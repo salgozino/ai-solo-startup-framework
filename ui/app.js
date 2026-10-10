@@ -44,28 +44,33 @@ function renderTasks(tasks) {
   });
   // Reverse so newest tasks appear first.
   taskList.innerHTML = tasks.slice().reverse().map(function(t) {
+    const key = t.verdict_id || t.task_id;
     const label  = displayLabel(t.state);
-    const isInput = t.state === 'TASK_STATE_INPUT_REQUIRED';
+    const isInput = t.state === 'TASK_STATE_INPUT_REQUIRED' && !t.awaiting_peer;
+    const waiting = t.awaiting_peer
+      ? `<div class="task-awaiting">Awaiting ${escHtml(t.awaiting_peer)}${t.awaiting_peer_approval ? "'s human approval" : ''}</div>`
+      : '';
     const actions = isInput
       ? `<div class="task-actions">
-           <button class="btn btn-approve" onclick="verdict('${t.task_id}','approve')">Approve</button>
-           <button class="btn btn-reject"  onclick="verdict('${t.task_id}','reject')">Reject</button>
+           <button class="btn btn-approve" onclick="verdict('${key}','approve')">Approve</button>
+           <button class="btn btn-reject"  onclick="verdict('${key}','reject')">Reject</button>
          </div>`
       : '';
     const outputHtml = t.output
-      ? `<div class="task-output" id="output-${t.task_id}">
-           <div class="task-output-header" onclick="toggleOutput('${t.task_id}')">
+      ? `<div class="task-output" id="output-${key}">
+           <div class="task-output-header" onclick="toggleOutput('${key}')">
              <span class="task-output-toggle">▶</span> Agent output
            </div>
            <div class="task-output-body"><pre>${escHtml(t.output)}</pre></div>
          </div>`
       : '';
-    return `<div class="task-card" id="task-${t.task_id}">
+    return `<div class="task-card" id="task-${key}">
       <div class="task-header">
-        <span class="task-id">${t.task_id}</span>
+        <span class="task-id">${escHtml(t.agent ? t.agent + ' · ' : '')}${escHtml(t.task_id)}</span>
         <span class="task-state task-state-${label}">${label}</span>
       </div>
       <div class="task-input">${escHtml(t.input || '')}</div>
+      ${waiting}
       ${outputHtml}
       ${actions}
     </div>`;
@@ -111,7 +116,8 @@ function fetchTasks() {
 }
 
 function verdict(taskID, action) {
-  var btn = document.querySelectorAll('#task-' + taskID + ' .btn');
+  var card = document.getElementById('task-' + taskID);
+  var btn = card ? card.querySelectorAll('.btn') : [];
   btn.forEach(function(b) { b.disabled = true; });
   fetch('/api/' + action, {
     method: 'POST',

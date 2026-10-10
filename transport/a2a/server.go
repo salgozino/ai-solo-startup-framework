@@ -23,6 +23,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 
 	"github.com/salgozino/ai-solo-startup-framework/core/address"
+	"github.com/salgozino/ai-solo-startup-framework/core/port"
 	"github.com/salgozino/ai-solo-startup-framework/core/supervisor"
 )
 
@@ -105,6 +106,24 @@ func (a authInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext
 	return ctx, nil, nil
 }
 
+// handlerResumer implements port.TaskResumer over the supervisor's own a2asrv
+// handler. The call is in-process (no ServiceParams), which authInterceptor
+// treats as a trusted caller, the same path the UI's PostVerdict uses.
+type handlerResumer struct {
+	handler a2asrv.RequestHandler
+	tenant  string
+}
+
+var _ port.TaskResumer = handlerResumer{}
+
+// Resume implements port.TaskResumer.
+func (r handlerResumer) Resume(ctx context.Context, rp port.ResumePoint) error {
+	msg := sdka2a.NewMessage(sdka2a.MessageRoleUser, sdka2a.NewTextPart(rp.Input))
+	msg.TaskID = sdka2a.TaskID(rp.TaskID)
+	_, err := r.handler.SendMessage(ctx, &sdka2a.SendMessageRequest{Tenant: r.tenant, Message: msg})
+	return err
+}
+
 // New creates a Server for the given supervisor, authenticating all inbound
 // requests against authToken. Returns an error if authToken is empty.
 func New(sup *supervisor.Supervisor, authToken string) (*Server, error) {
@@ -135,6 +154,11 @@ func New(sup *supervisor.Supervisor, authToken string) (*Server, error) {
 		a2asrv.WithCallInterceptors(authInterceptor{token: authToken}, tenantInterceptor{tenant: sup.Addr().Tenant()}),
 		a2asrv.WithTaskStore(store),
 	)
+
+	// A task parked on a peer is woken by delivering a message that carries its
+	// TaskID through this same handler, exactly like a human verdict would be.
+	// Registered before recovery, which re-arms the watchers of parked tasks.
+	sup.SetResumer(handlerResumer{handler: handler, tenant: sup.Addr().Tenant()})
 
 	mux := http.NewServeMux()
 	mux.Handle("/invoke", a2asrv.NewJSONRPCHandler(handler))

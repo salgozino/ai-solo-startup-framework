@@ -16,11 +16,20 @@ const taskStateInputRequired = "TASK_STATE_INPUT_REQUIRED"
 // TaskRecord is the minimal view the UI handler needs of a persisted task.
 // It maps to supervisor.TaskRecord without importing the supervisor package.
 type TaskRecord struct {
+	Agent string `json:"agent,omitempty"`
+	// VerdictID is an opaque routing key; TaskID remains the agent-local ID.
+	VerdictID         string `json:"verdict_id,omitempty"`
 	TaskID            string `json:"task_id"`
 	State             string `json:"state"`
 	Input             string `json:"input"`
 	PendingIntentKind string `json:"pending_intent_kind,omitempty"`
 	Output            string `json:"output,omitempty"`
+	// AwaitingPeer is the role this task is parked on; such a task is not a human
+	// escalation, so the UI offers no verdict control for it.
+	AwaitingPeer string `json:"awaiting_peer,omitempty"`
+	// AwaitingPeerApproval: that peer escalated and waits on its own human, whose
+	// approval is the one actionable item (on the peer's task).
+	AwaitingPeerApproval bool `json:"awaiting_peer_approval,omitempty"`
 }
 
 // SupervisorStatus is the minimal view of the supervisor's observable state.

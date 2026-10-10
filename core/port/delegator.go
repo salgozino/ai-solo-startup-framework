@@ -25,9 +25,11 @@ type DelegationResult struct {
 // Delegator sends work to a role-addressed peer agent over A2A.
 // Implementations live in transport/a2a; core/ never imports an A2A client.
 type Delegator interface {
-	// Delegate sends body to the peer fulfilling role and blocks until that peer's
-	// task stops advancing — either a terminal TaskState, or INPUT_REQUIRED (the peer
-	// escalated and awaits its own human verdict). Any other non-terminal state is a
+	// Delegate sends body to the peer fulfilling role and returns as soon as the
+	// peer task exists; it does NOT wait for the peer to finish. The result carries
+	// the peer's state as of that moment: SUBMITTED or WORKING (still running — the
+	// caller parks and polls PeerTaskState), a terminal TaskState, or INPUT_REQUIRED
+	// (the peer escalated and awaits its own human verdict). Any other state is a
 	// protocol violation and MUST be returned as an error, never as a result.
 	Delegate(ctx context.Context, role, body string) (DelegationResult, error)
 
@@ -35,4 +37,17 @@ type Delegator interface {
 	// previously returned by Delegate. Used both to await a parked peer and to
 	// re-establish that wait after a process restart.
 	PeerTaskState(ctx context.Context, role, peerTaskID string) (DelegationResult, error)
+}
+
+// PeerTaskArg is the ActionIntent payload key naming an existing peer task that a
+// delegate_task intent continues instead of opening a new one. Plain string, so the
+// payload stays gob-safe.
+const PeerTaskArg = "peer_task_id"
+
+// FollowUpDelegator is a Delegator that can also continue an existing peer task.
+type FollowUpDelegator interface {
+	Delegator
+	// FollowUp sends body onto peerTaskID, the peer's task from an earlier
+	// Delegate, and returns the task's state as of that moment, like Delegate.
+	FollowUp(ctx context.Context, role, peerTaskID, body string) (DelegationResult, error)
 }

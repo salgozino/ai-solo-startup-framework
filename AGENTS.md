@@ -45,9 +45,20 @@ The provider adapters drive external agent CLIs as subprocesses and parse their 
   unrecognized top-level key such as `mcpServers` invalidates the whole config and the server
   is silently never registered. The adapter emits `{"mcp": {"framework": {"type": "remote",
   "url": ..., "enabled": true, "headers": {"Authorization": "Bearer <token>"}}}}`.
+  Input size limit: the opencode adapter passes the task input as a positional **argv**
+  argument, so a task whose input grows past the Linux per-argument ceiling
+  (`MAX_ARG_STRLEN`, 131072 bytes) fails at `execve` with `E2BIG`. opencode hits this
+  sooner than claude because the system prompt is concatenated into that same argv string.
+  This is unsupported by decision, not by oversight: there is no preflight size check and
+  no stdin fallback. Use the claude adapter for any agent whose input can grow (a
+  multi-round transcript, a long document).
 - **claude**: the adapter requires `--mcp-config`, `--strict-mcp-config`, and
   `--output-format stream-json`. It never requests `--json-schema`. Its `--mcp-config` file
   uses the Claude-shaped `mcpServers` envelope, which is unrelated to opencode's schema above.
+  Input delivery: the task input is written to the child's **stdin**, never argv — `claude -p`
+  reads the prompt from stdin when no positional prompt argument is given. stdin imposes no
+  per-argument ceiling at all, while argv caps a single argument at 131072 bytes, so a growing
+  input (a multi-round transcript) stays deliverable here but not on argv (see opencode above).
 
 Both adapters receive MCP configuration ephemerally per invocation — claude through a `0600`
 temp file removed on exit, opencode through the subprocess-scoped `OPENCODE_CONFIG_CONTENT`
@@ -56,9 +67,10 @@ environment variable. Neither adapter reads or writes a persisted user config.
 ## claude adapter isolation flags (decision item)
 
 The claude adapter deliberately does **not** pass `--safe-mode`. Per `claude --help`
-(verified against the installed 2.1.268 CLI), `--safe-mode` disables "CLAUDE.md, skills,
-plugins, hooks, MCP servers, custom commands and agents, output styles, workflows, custom
-themes, keybindings" as one bundle — MCP servers are explicitly included, so combining
+(re-verified against the installed 2.1.280 CLI), `--safe-mode` disables "CLAUDE.md, skills,
+installed plugins, hooks, MCP servers, custom commands and agents, output styles, workflows,
+custom themes, keybindings, and more" as one bundle — MCP servers are still explicitly
+included on 2.1.280, so the decision still holds for its original reason: combining
 `--safe-mode` with `--mcp-config`/`--strict-mcp-config` made the MCP endpoint permanently
 unreachable and every MCP-wired `RunTask` invocation fail.
 

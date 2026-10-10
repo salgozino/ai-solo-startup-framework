@@ -116,6 +116,9 @@ func (a *supervisorUIAdapter) ListTasks() ([]ui.TaskRecord, error) {
 			Input:             r.Input,
 			PendingIntentKind: r.PendingIntentKind,
 			Output:            r.Output,
+
+			AwaitingPeer:         r.AwaitingPeerRole,
+			AwaitingPeerApproval: r.AwaitingPeerApproval,
 		}
 	}
 	return out, nil

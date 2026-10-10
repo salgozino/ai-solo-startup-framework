@@ -7,6 +7,7 @@ import (
 	"iter"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	a2a "github.com/a2aproject/a2a-go/v2/a2a"
@@ -21,6 +22,11 @@ import (
 // defaultDelegateTimeout bounds a blocking Delegate call when Config.DelegateTimeout
 // is unset (design D10).
 const defaultDelegateTimeout = 10 * time.Minute
+
+// maxProviderRounds bounds the feedback loop. Rounds are counted from the persisted
+// transcript (assistant turns), so the cap holds across park/resume boundaries and
+// restarts. A delegation on the last round fails clearly.
+const maxProviderRounds = 8
 
 // Config holds the parameters needed to construct a Supervisor.
 type Config struct {
@@ -43,9 +49,10 @@ type Config struct {
 	// Optional: a supervisor whose role is never granted delegate_task may leave it
 	// nil, in which case a delegate_task intent fails explicitly instead of panicking.
 	Delegator port.Delegator
-	// DelegateTimeout bounds one blocking Delegate call (design D10). Zero means
-	// defaultDelegateTimeout. On expiry the delegating task FAILS naming the peer
-	// role and this duration; the peer's own task is never canceled.
+	// DelegateTimeout bounds the Delegate call and, once the task is parked, the
+	// wait for the peer (design D10). Zero means defaultDelegateTimeout. On expiry
+	// the delegating task FAILS naming the peer role and this duration; the peer's
+	// own task is never canceled.
 	DelegateTimeout time.Duration
 	// Role is the agent role declared in company.yaml (e.g. "ceo", "engineer").
 	// Used for policy capability checks.
@@ -61,6 +68,9 @@ type Config struct {
 	// root to push SSE events to connected UI clients.
 	// Must be nil-safe to call from any goroutine; the notify() method guards it.
 	OnStateChange func()
+	// PeerPollInterval is how often a parked task's watcher polls its peer. Zero
+	// means defaultPeerPollInterval. Tests shorten it.
+	PeerPollInterval time.Duration
 }
 
 // Status is the observable state of a supervisor at a point in time.
@@ -74,8 +84,14 @@ type Status struct {
 // in transport/a2a. The supervisor is created in STARTING state and transitions to
 // IDLE once the endpoint is registered (via MarkReady).
 type Supervisor struct {
-	cfg Config
-	fsm *fsm
+	cfg     Config
+	fsm     *fsm
+	resumer port.TaskResumer
+
+	// watchers holds one peer watcher per parked task; see watcher.go.
+	watchMu  sync.Mutex
+	watchers map[string]*watcher
+	watchWG  sync.WaitGroup
 }
 
 // New creates a Supervisor in STARTING state.
@@ -95,6 +111,8 @@ func New(cfg Config) (*Supervisor, error) {
 	s := &Supervisor{
 		cfg: cfg,
 		fsm: newFSM(),
+
+		watchers: make(map[string]*watcher),
 	}
 	return s, nil
 }
@@ -175,11 +193,23 @@ func (s *Supervisor) RecoverOpenTasks(
 		}
 	}
 
+	// Re-arm the peer wait of every parked task: the watcher died with the old
+	// process, but its peer task ID is on the record. Registered first so a resume
+	// is recognised by a2asrv before any watcher can fire.
+	if s.resumer != nil {
+		for _, rec := range inputRequiredTasks {
+			if rec.AwaitingPeerTaskID != "" {
+				s.armWatcher(rec.TaskID, rec.AwaitingPeerRole, rec.AwaitingPeerTaskID)
+			}
+		}
+	}
+
 	return nil
 }
 
 // Shutdown starts draining the supervisor's queue. Does not wait for completion.
 func (s *Supervisor) Shutdown() {
+	s.cancelWatchers()
 	s.fsm.drain()
 	s.notify()
 }
@@ -279,6 +309,13 @@ func (s *Supervisor) executeResume(
 		return
 	}
 
+	// A task parked on a peer (not on a human verdict) resumes only when that peer
+	// has actually stopped advancing; a premature message leaves it parked.
+	if rec.AwaitingPeerTaskID != "" {
+		s.resumeFromPeer(ctx, execCtx, yield, rec, approvalInput)
+		return
+	}
+
 	// Parse the pending intent from the stored record.
 	if rec.PendingIntentKind == "" {
 		// No pending intent — this is a normal task resumption (not an escalation resume).
@@ -321,10 +358,17 @@ func (s *Supervisor) executeResume(
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 		return
 	}
-	// Gated on Delegated, not on a non-empty Output — see runIntents' Permit
-	// branch for why an empty peer result must still replace the agent's text.
+	if outcome.Parked {
+		// The approved delegation's peer is still running: park on it, carrying the
+		// rest of the turn, instead of blocking this execution.
+		remaining := rec.RemainingIntents
+		rec.PendingIntentKind, rec.PendingIntentBody, rec.PendingIntentTarget = "", "", ""
+		s.parkOnPeer(execCtx, yield, rec, outcome, remaining)
+		return
+	}
+	// Peer results belong to the transcript, never to the CEO's final Output.
 	if outcome.Delegated {
-		rec.Output = outcome.Output
+		rec.Turns = append(rec.Turns, port.ContextMessage{Role: "peer", Content: outcome.Output, At: time.Now()})
 	}
 	log.Info("resume.action.done", "intent", rec.PendingIntentKind)
 
@@ -342,42 +386,173 @@ func (s *Supervisor) executeResume(
 		return
 	}
 
-	log.Info("resume.completed")
-	rec.State = string(a2a.TaskStateCompleted)
-	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
-	s.notify()
-	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, outputMessage(rec.Output)), nil) //nolint
+	// Re-enter the same loop a normal round uses (R3-resume-publishes-pre-delegation-text,
+	// R3-finish-lost-on-halt): a turn that delegated runs another provider round, a
+	// turn that finished completes, anything else completes with its own output.
+	s.runRounds(ctx, execCtx, yield, rec, true)
 }
 
-// executeWithPolicy runs the provider via RunTask, classifies action intents, and routes
-// HardDeny → REJECTED, Escalate → INPUT_REQUIRED, Permit → gateway send.
+// resumeFromPeer continues a task parked on a peer. It reads the peer's state
+// rather than trusting the message that woke it: the watcher and a human verdict
+// both land here, and only a peer that stopped advancing releases the task.
+func (s *Supervisor) resumeFromPeer(
+	ctx context.Context,
+	execCtx *a2asrv.ExecutorContext,
+	yield func(a2a.Event, error) bool,
+	rec TaskRecord,
+	input string,
+) {
+	log := s.log(rec.TaskID)
+	role := rec.AwaitingPeerRole
+	fail := func(err error) {
+		s.stopWatcher(rec.TaskID)
+		log.Error("resume.peer.failed", "error", err)
+		rec.AwaitingPeerRole, rec.AwaitingPeerTaskID, rec.AwaitingPeerApproval, rec.RemainingIntents = "", "", false, nil
+		s.markFailed(rec)
+		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
+	}
+	if s.cfg.Delegator == nil {
+		fail(fmt.Errorf("supervisor: task awaits peer role %q but no delegator is configured", role))
+		return
+	}
+	res, err := s.cfg.Delegator.PeerTaskState(ctx, role, rec.AwaitingPeerTaskID)
+	if err != nil {
+		// A failed read says nothing about the peer: stay parked and let the
+		// watcher try again.
+		log.Warn("resume.peer.read_failed", "error", err)
+		s.repark(execCtx, yield, rec)
+		return
+	}
+	outcome, err := s.outcomeForPeer(role, res)
+	if state := a2a.TaskState(res.State); err != nil && rec.AwaitingPeerApproval && state.Terminal() {
+		// The peer's human decided (reject) or the approved action failed: that is
+		// the peer's turn for the CEO to read and judge, not the CEO's failure.
+		outcome, err = actionOutcome{Delegated: true, Output: fmt.Sprintf("peer task %q ended in state %s without output", res.PeerTaskID, res.State)}, nil
+	}
+	if err != nil {
+		fail(err)
+		return
+	}
+	if outcome.Parked && input == resumeInputPeerTimeout {
+		// DelegateTimeout (design D10) bounds the peer wait; the peer's task is
+		// left running, never canceled.
+		fail(fmt.Errorf("supervisor: delegation to role %q timed out after %s; peer task %q left running", role, s.delegateTimeout(), rec.AwaitingPeerTaskID))
+		return
+	}
+	if outcome.Parked {
+		log.Info("resume.peer.still_running", "peer_approval", outcome.PeerApproval)
+		rec.AwaitingPeerApproval = outcome.PeerApproval
+		s.repark(execCtx, yield, rec)
+		return
+	}
+
+	// The task leaves the parked state here, possibly via a verdict rather than
+	// its watcher; cancel without waiting (the watcher may be the caller).
+	s.stopWatcher(rec.TaskID)
+	log.Info("resume.peer.done", "peer_task_id", rec.AwaitingPeerTaskID)
+	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, nil), nil) //nolint
+	rec.Turns = append(rec.Turns, port.ContextMessage{Role: "peer", Content: outcome.Output, At: time.Now()})
+	remaining := rec.RemainingIntents
+	rec.AwaitingPeerRole, rec.AwaitingPeerTaskID, rec.AwaitingPeerApproval, rec.RemainingIntents = "", "", false, nil
+	rec, halted := s.runIntents(ctx, execCtx, yield, rec, remaining)
+	if halted {
+		return
+	}
+	s.runRounds(ctx, execCtx, yield, rec, true)
+}
+
+// executeWithPolicy starts a task's provider loop from its first round.
 func (s *Supervisor) executeWithPolicy(
 	ctx context.Context,
 	execCtx *a2asrv.ExecutorContext,
 	yield func(a2a.Event, error) bool,
 	rec TaskRecord,
 ) {
+	if len(rec.Turns) == 0 {
+		rec.Turns = append(rec.Turns, port.ContextMessage{Role: "user", Content: rec.Input, At: time.Now()})
+	}
+	s.runRounds(ctx, execCtx, yield, rec, false)
+}
+
+// runRounds is the provider loop. It runs RunTask, classifies the turn's action
+// intents (HardDeny → REJECTED, Escalate → INPUT_REQUIRED, Permit → gateway or
+// delegation, a peer still running → parked), and feeds delegation results back
+// into the next round until the model stops delegating, calls finish_task, or the
+// round cap is hit.
+//
+// midTurn is true when the caller resumed a parked task whose current turn's
+// intents have already run: the loop then skips straight to the end-of-turn
+// decision instead of calling the provider again. That is what lets a resumed
+// task share the loop with a fresh one.
+func (s *Supervisor) runRounds(
+	ctx context.Context,
+	execCtx *a2asrv.ExecutorContext,
+	yield func(a2a.Event, error) bool,
+	rec TaskRecord,
+	midTurn bool,
+) {
 	log := s.log(rec.TaskID)
 
-	log.Info("runtask.start", "input", rec.Input)
+	for {
+		if !midTurn {
+			// The first invocation stays byte-identical to the original input; every
+			// later one receives the bounded transcript. The full history stays on
+			// the record.
+			input := rec.Input
+			if len(rec.Turns) > 1 {
+				input = contextText(assembleBoundedContext(rec.Turns, s.effectiveBudget()))
+			}
+			log.Info("runtask.start", "round", assistantTurns(rec.Turns)+1)
+			result, err := s.cfg.Provider.RunTask(ctx, rec.TaskID, input)
+			if err != nil {
+				log.Error("runtask.failed", "error", err)
+				s.markFailed(rec)
+				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
+				return
+			}
+			log.Info("runtask.done", "output", result.Output, "action_intents_count", len(result.ActionIntents))
+			rec.Output = result.Output
+			rec.Turns = append(rec.Turns, port.ContextMessage{Role: "assistant", Content: result.Output, At: time.Now()})
+			// finish_task is a control tool: split it off before classification so it can
+			// never reach the policy engine, a gateway or the delegator. The signal is
+			// persisted because the turn may park (escalation, peer wait) before it ends.
+			actions, finish, finished := splitFinishTask(result.ActionIntents)
+			if finished && finish != "" {
+				rec.Output = finish
+			}
+			rec.FinishRequested = finished
+			var halted bool
+			rec, halted = s.runIntents(ctx, execCtx, yield, rec, toPendingIntents(actions))
+			if halted {
+				return
+			}
+		}
+		midTurn = false
 
-	result, err := s.cfg.Provider.RunTask(ctx, rec.TaskID, rec.Input)
-	if err != nil {
-		log.Error("runtask.failed", "error", err)
-		s.markFailed(rec)
-		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
-		return
-	}
-
-	log.Info("runtask.done",
-		"output", result.Output,
-		"action_intents_count", len(result.ActionIntents),
-	)
-	rec.Output = result.Output
-
-	rec, halted := s.runIntents(ctx, execCtx, yield, rec, toPendingIntents(result.ActionIntents))
-	if halted {
-		return
+		// An explicit finish ends the loop after this turn, delegation or not.
+		finished := rec.FinishRequested
+		rec.FinishRequested = false
+		if finished {
+			break
+		}
+		// Only a turn that took in a peer result continues; the last turn is then a
+		// peer turn because the assistant turn is always appended before its intents.
+		// The terminal save below persists a final, non-delegating turn once.
+		if n := len(rec.Turns); n == 0 || rec.Turns[n-1].Role != "peer" {
+			break
+		}
+		if err := s.cfg.Store.Save(s.cfg.Addr, rec); err != nil {
+			s.markFailed(rec)
+			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
+			return
+		}
+		s.notify()
+		if assistantTurns(rec.Turns) >= maxProviderRounds {
+			rec.Output = fmt.Sprintf("supervisor: provider round limit (%d) exhausted after delegation", maxProviderRounds)
+			s.markFailed(rec)
+			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, outputMessage(rec.Output)), nil) //nolint
+			return
+		}
 	}
 
 	// All intents handled (or none) → COMPLETED. The terminal event carries the
@@ -387,6 +562,17 @@ func (s *Supervisor) executeWithPolicy(
 	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
 	s.notify()
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, outputMessage(rec.Output)), nil) //nolint
+}
+
+// assistantTurns counts the provider rounds already spent on a transcript.
+func assistantTurns(turns []port.ContextMessage) int {
+	n := 0
+	for _, t := range turns {
+		if t.Role == "assistant" {
+			n++
+		}
+	}
+	return n
 }
 
 // runIntents classifies and executes intents in the order the provider emitted
@@ -467,13 +653,15 @@ func (s *Supervisor) runIntents(
 				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
 				return rec, true
 			}
+			if outcome.Parked {
+				// The peer is still running: end this execution parked, carrying the
+				// intents queued behind the delegation so they run after its result.
+				return s.parkOnPeer(execCtx, yield, rec, outcome, remainingAfter(intents, i)), true
+			}
 			if outcome.Delegated {
-				// The peer's terminal output becomes the delegating task's output
-				// (spec: "The Peer's Terminal Result Is Copied Into the Delegating Task's Output").
-				// Gated on Delegated, not on a non-empty Output: a COMPLETED peer that
-				// produced nothing must not leave the agent's own text standing in for
-				// the result. Non-delegation actions return a zero outcome and are skipped.
-				rec.Output = outcome.Output
+				// Slice 3 replaces peer-output copying with CEO synthesis: even an
+				// empty peer reply is feedback, but only the CEO writes Output.
+				rec.Turns = append(rec.Turns, port.ContextMessage{Role: "peer", Content: outcome.Output, At: time.Now()})
 			}
 			log.Info("action.done", "kind", intent.Kind)
 		}
@@ -500,9 +688,14 @@ type actionOutcome struct {
 	// every other action kind.
 	Output string
 	// Delegated reports that this outcome came from a delegation, so an empty
-	// Output is the peer's actual empty result and must replace the agent's own
-	// text rather than leaving it in place.
+	// Output is the peer's actual empty result and still triggers feedback.
 	Delegated bool
+	// Parked reports that the peer accepted the task but is still running. The
+	// caller must park the delegating task on PeerRole/PeerTaskID.
+	Parked               bool
+	PeerRole, PeerTaskID string
+	// PeerApproval narrows Parked: the peer escalated and waits on its own human.
+	PeerApproval bool
 }
 
 // executeAction executes a Permit-classified (or human-approved) action intent.
@@ -528,10 +721,8 @@ func (s *Supervisor) executeAction(ctx context.Context, actionKind, body, target
 // maps the peer's observed state onto the delegating task's fate:
 //   - COMPLETED → success, peer output returned in the outcome;
 //   - any other terminal state (FAILED, REJECTED, CANCELED) → error naming the role;
-//   - INPUT_REQUIRED (the peer escalated) → immediate error stating the peer escalated
-//     and chained approval is not yet wired (spec agent-delegation, interim
-//     requirement). Chained approval is delivered by the follow-up change
-//     agent-delegation-chained-approval; nothing here polls or parks;
+//   - INPUT_REQUIRED (the peer escalated) → Parked, awaiting the peer's human approval
+//     (see outcomeForPeer); nothing here polls, the caller parks;
 //   - any other non-terminal state → error naming it as a port.Delegator protocol
 //     violation, because that port requires such a state to arrive as an error, never
 //     as a result. It is a bug in the Delegator, not an escalation, and must not be
@@ -546,10 +737,7 @@ func (s *Supervisor) executeDelegation(ctx context.Context, role, body string) (
 	if role == "" {
 		return actionOutcome{}, fmt.Errorf("supervisor: delegate_task intent has no target role")
 	}
-	timeout := s.cfg.DelegateTimeout
-	if timeout <= 0 {
-		timeout = defaultDelegateTimeout
-	}
+	timeout := s.delegateTimeout()
 	dctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -561,16 +749,46 @@ func (s *Supervisor) executeDelegation(ctx context.Context, role, body string) (
 		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q failed: %w", role, err)
 	}
 
+	outcome, err := s.outcomeForPeer(role, res)
+	if err == nil && outcome.Parked && s.resumer == nil {
+		// Parking without a resumer would leave the task asleep forever.
+		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q: peer task %q is still running but no resumer is configured to wake this task", role, res.PeerTaskID)
+	}
+	return outcome, err
+}
+
+// delegateTimeout is Config.DelegateTimeout, or its default when unset.
+func (s *Supervisor) delegateTimeout() time.Duration {
+	if s.cfg.DelegateTimeout > 0 {
+		return s.cfg.DelegateTimeout
+	}
+	return defaultDelegateTimeout
+}
+
+// outcomeForPeer maps a peer's observed state onto the delegating task's fate. It
+// serves both the initial Delegate result and every later PeerTaskState read:
+//   - COMPLETED → success, peer output returned in the outcome;
+//   - any other terminal state (FAILED, REJECTED, CANCELED) → error naming the role;
+//   - SUBMITTED or WORKING (the peer is still running) → Parked: the caller ends its
+//     execution and a watcher waits for the peer instead of blocking here;
+//   - INPUT_REQUIRED (the peer escalated) → Parked with PeerApproval: chained approval.
+//     The human approves once, on the peer's task; the delegating task keeps waiting
+//     for the peer to become terminal and never fails because of the escalation;
+//   - any other state → error naming it as a port.Delegator protocol violation. It is
+//     a bug in the Delegator, not an escalation, and must not be described as one.
+func (s *Supervisor) outcomeForPeer(role string, res port.DelegationResult) (actionOutcome, error) {
 	state := a2a.TaskState(res.State)
 	switch {
 	case state == a2a.TaskStateCompleted:
 		return actionOutcome{Output: res.Output, Delegated: true}, nil
 	case state.Terminal():
 		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q failed: peer task %q ended in state %s", role, res.PeerTaskID, res.State)
+	case state == a2a.TaskStateSubmitted || state == a2a.TaskStateWorking:
+		return actionOutcome{Parked: true, PeerRole: role, PeerTaskID: res.PeerTaskID}, nil
 	case state == a2a.TaskStateInputRequired:
-		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q: peer escalated (peer task %q is %s) and chained approval is not yet wired; the peer task is left running for its own human verdict", role, res.PeerTaskID, res.State)
+		return actionOutcome{Parked: true, PeerApproval: true, PeerRole: role, PeerTaskID: res.PeerTaskID}, nil
 	default:
-		// Not COMPLETED, not terminal, not the one legal non-terminal state: the
+		// Not COMPLETED, not terminal, not running, not the one legal stop state: the
 		// Delegator implementation broke its own contract. Reporting this as an
 		// escalation would invent a human verdict that no peer is waiting for.
 		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q: peer returned unrecognized state %q; port.Delegator requires any non-terminal state other than %s to be returned as an error, never as a result", role, res.State, a2a.TaskStateInputRequired)
@@ -580,6 +798,7 @@ func (s *Supervisor) executeDelegation(ctx context.Context, role, body string) (
 // Cancel implements a2asrv.AgentExecutor.Cancel.
 func (s *Supervisor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
+		s.stopWatcher(string(execCtx.TaskID))
 		_ = s.cfg.Store.Delete(s.cfg.Addr, string(execCtx.TaskID))
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCanceled, nil), nil) //nolint
 	}
@@ -640,6 +859,23 @@ func toPendingIntents(intents []port.ActionIntent) []PendingIntent {
 		})
 	}
 	return out
+}
+
+// splitFinishTask separates the finish_task control intent from the action intents.
+// It returns the actions in their original order, the first finish_task answer text, and
+// whether any finish_task was present.
+func splitFinishTask(intents []port.ActionIntent) (actions []port.ActionIntent, answer string, finished bool) {
+	for _, intent := range intents {
+		if intent.Kind != port.KindFinishTask {
+			actions = append(actions, intent)
+			continue
+		}
+		if !finished {
+			answer = extractBody(intent)
+		}
+		finished = true
+	}
+	return actions, answer, finished
 }
 
 // remainingAfter returns a copy of the intents queued after index i, or nil when

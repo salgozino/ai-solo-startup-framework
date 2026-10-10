@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/salgozino/ai-solo-startup-framework/core/address"
+	"github.com/salgozino/ai-solo-startup-framework/core/port"
 )
 
 // TaskRecord is the unit persisted to disk for crash/restart recovery.
@@ -41,6 +42,31 @@ type TaskRecord struct {
 	// resume path runs them in order once the pending intent is approved.
 	// Zero-value safe: a nil slice means the turn had nothing left to run.
 	RemainingIntents []PendingIntent `json:"remaining_intents,omitempty"`
+	// Turns is the conversation transcript accumulated across the task's
+	// delegation rounds, oldest first. It is the per-task memory that lets a
+	// later round see what the earlier ones produced instead of restarting from
+	// the original input.
+	//
+	// Nothing writes to this field yet: this slice lands the persistence schema
+	// only, so the on-disk layout is settled before the loop that fills it.
+	// Zero-value safe: a nil slice means the task has no recorded rounds, which
+	// is exactly how every record written before this field existed reads back.
+	Turns []port.ContextMessage `json:"turns,omitempty"`
+	// AwaitingPeerRole and AwaitingPeerTaskID identify the peer task a parked task
+	// is waiting on (state INPUT_REQUIRED, no PendingIntentKind). They are what a
+	// restarted supervisor needs to re-arm the watcher, and are cleared once the
+	// peer's result is consumed. Zero-value safe: absent means no peer wait.
+	AwaitingPeerRole   string `json:"awaiting_peer_role,omitempty"`
+	AwaitingPeerTaskID string `json:"awaiting_peer_task_id,omitempty"`
+	// AwaitingPeerApproval narrows the peer wait: the peer itself escalated and is
+	// waiting for its own human's verdict (chained approval). The human approves on
+	// the peer's task; this task resumes by itself once the peer is terminal.
+	AwaitingPeerApproval bool `json:"awaiting_peer_approval,omitempty"`
+	// FinishRequested records that the turn in flight called finish_task. It only
+	// matters across a park: a turn that finished but halted on an escalation or a
+	// peer wait must not re-invoke the provider after the resume. Cleared once the
+	// turn's intents have all run. Zero-value safe.
+	FinishRequested bool `json:"finish_requested,omitempty"`
 	// Output is the result produced by the provider when the task completes.
 	Output string `json:"output,omitempty"`
 }
