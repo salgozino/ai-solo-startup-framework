@@ -24,9 +24,10 @@ import (
 
 // multiIntentHarness bundles the collaborators of a multi-intent supervisor test.
 type multiIntentHarness struct {
-	sup *Supervisor
-	gw  *fake.Gateway
-	del *fake.Delegator
+	sup  *Supervisor
+	prov *fake.Provider
+	gw   *fake.Gateway
+	del  *fake.Delegator
 }
 
 // newMultiIntentSupervisor builds a "ceo" supervisor whose provider emits intents
@@ -39,10 +40,14 @@ func newMultiIntentSupervisor(
 	policyCfg map[string]config.Policy,
 ) *multiIntentHarness {
 	t.Helper()
-	prov := &fake.Provider{ReturnRunResult: port.ProviderResult{
-		Output:        agentOwnOutput,
-		ActionIntents: intents,
-	}}
+	// The turn's intents are emitted once. Overturned by Slice 6 (park/resume): an
+	// approved turn that delegated now re-enters the provider loop, so a provider
+	// that replays the same intents forever would re-escalate them forever. The
+	// replacement is a provider that answers plainly on every later round.
+	prov := &fake.Provider{
+		ReturnRunResults: []port.ProviderResult{{Output: agentOwnOutput, ActionIntents: intents}},
+		ReturnRunResult:  port.ProviderResult{Output: agentOwnOutput},
+	}
 	gw := &fake.Gateway{}
 	del := &fake.Delegator{Results: map[string]port.DelegationResult{
 		"engineer": {PeerTaskID: "P1", State: string(sdka2a.TaskStateCompleted), Output: "peer done"},
@@ -66,7 +71,7 @@ func newMultiIntentSupervisor(
 		t.Fatalf("New: %v", err)
 	}
 	sup.MarkReady()
-	return &multiIntentHarness{sup: sup, gw: gw, del: del}
+	return &multiIntentHarness{sup: sup, prov: prov, gw: gw, del: del}
 }
 
 // record returns the persisted record for taskID.
@@ -239,13 +244,14 @@ func TestMultiIntent_ResumedDelegationKeepsItsTarget(t *testing.T) {
 	if call.Role != "engineer" || call.Body != "build X" {
 		t.Errorf("Delegate called with role=%q body=%q; want engineer / build X", call.Role, call.Body)
 	}
-	// Slice 3 replaces peer-output copying with transcript feedback. Approval
-	// resume remains single-shot until Slice 6; the CEO's output is preserved.
+	// Overturned by Slice 6: approval resume was single-shot (3 turns, pre-delegation
+	// Output). Replacement: the resume re-enters the provider loop, so the peer turn
+	// is followed by the CEO's final-round assistant turn (R3-resume-publishes-pre-delegation-text).
 	rec := h.record(t, taskID)
 	if rec.Output != agentOwnOutput {
-		t.Errorf("approval must preserve CEO output; got %q", rec.Output)
+		t.Errorf("approval must publish the CEO's final answer; got %q", rec.Output)
 	}
-	if len(rec.Turns) != 3 || rec.Turns[2].Content != "peer done" {
+	if len(rec.Turns) != 4 || rec.Turns[2].Content != "peer done" || rec.Turns[3].Role != "assistant" {
 		t.Errorf("approved delegation result must be persisted in Turns: %+v", rec.Turns)
 	}
 }

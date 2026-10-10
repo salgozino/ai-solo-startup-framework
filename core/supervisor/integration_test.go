@@ -69,14 +69,30 @@ func startDelegatingSupervisor(
 ) (*supervisor.Supervisor, *transa2a.Server) {
 	t.Helper()
 
-	addr, err := address.New(role, tenant)
-	if err != nil {
-		t.Fatalf("address.New(%q,%q): %v", role, tenant, err)
-	}
-
 	store, err := supervisor.NewStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
+	}
+	return startDelegatingSupervisorOn(t, store, role, tenant, prov, delegator, delegateTimeout, policyCfg)
+}
+
+// startDelegatingSupervisorOn is startDelegatingSupervisor over a caller-supplied
+// store, so a test can start a second supervisor on a first one's persisted tasks
+// (a simulated restart).
+func startDelegatingSupervisorOn(
+	t *testing.T,
+	store *supervisor.Store,
+	role, tenant string,
+	prov port.Provider,
+	delegator port.Delegator,
+	delegateTimeout time.Duration,
+	policyCfg map[string]config.Policy,
+) (*supervisor.Supervisor, *transa2a.Server) {
+	t.Helper()
+
+	addr, err := address.New(role, tenant)
+	if err != nil {
+		t.Fatalf("address.New(%q,%q): %v", role, tenant, err)
 	}
 
 	sup, err := supervisor.New(supervisor.Config{
@@ -89,6 +105,8 @@ func startDelegatingSupervisor(
 		DelegateTimeout: delegateTimeout,
 		Role:            role,
 		PolicyConfig:    policyCfg,
+		// Park/resume: poll a running peer quickly so tests settle in milliseconds.
+		PeerPollInterval: 10 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("supervisor.New: %v", err)
@@ -111,6 +129,8 @@ type delegationCompany struct {
 	delegator   *transa2a.Client
 	ceoSrv      *transa2a.Server
 	engineerSup *supervisor.Supervisor
+	ceoSup      *supervisor.Supervisor
+	ceoStore    *supervisor.Store
 }
 
 // startDelegationCompany wires ceoProv and engineerProv into a real CEO/engineer
@@ -138,12 +158,16 @@ func startDelegationCompany(t *testing.T, tenant string, ceoProv, engineerProv p
 	policyCfg := map[string]config.Policy{
 		port.KindDelegateTask: {Risk: "safe", AllowedRoles: []string{"ceo"}},
 	}
-	_, ceoSrv := startDelegatingSupervisor(t, "ceo", tenant, ceoProv, delegator, delegateTimeout, policyCfg)
+	ceoStore, err := supervisor.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ceoSup, ceoSrv := startDelegatingSupervisorOn(t, ceoStore, "ceo", tenant, ceoProv, delegator, delegateTimeout, policyCfg)
 	if err := dir.Bind("ceo", ceoSrv.BaseURL()); err != nil {
 		t.Fatalf("dir.Bind(ceo): %v", err)
 	}
 
-	return &delegationCompany{delegator: delegator, ceoSrv: ceoSrv, engineerSup: engineerSup}
+	return &delegationCompany{delegator: delegator, ceoSrv: ceoSrv, engineerSup: engineerSup, ceoSup: ceoSup, ceoStore: ceoStore}
 }
 
 // delegateTaskIntentTo builds a delegate_task ActionIntent with the {target,
@@ -220,7 +244,7 @@ func TestIntegration_CEODelegatesToEngineerOverRealWire(t *testing.T) {
 	}
 	co := startDelegationCompany(t, tenant, ceoProv, engineerProv, 0)
 
-	task := sendCEOTask(t, co.ceoSrv, tenant, "please delegate")
+	task := sendCEOTaskToEnd(t, co.ceoSrv, tenant, "please delegate")
 
 	if task.Status.State != sdka2a.TaskStateCompleted {
 		t.Fatalf("CEO task state = %v, want COMPLETED", task.Status.State)
@@ -253,7 +277,7 @@ func TestIntegration_DelegatingCLIReceivesPeerFeedback(t *testing.T) {
 	}
 	co := startDelegationCompany(t, tenant, ceoProv, engineerProv, 0)
 
-	task := sendCEOTask(t, co.ceoSrv, tenant, "please delegate")
+	task := sendCEOTaskToEnd(t, co.ceoSrv, tenant, "please delegate")
 	if task.Status.State != sdka2a.TaskStateCompleted {
 		t.Fatalf("CEO task state = %v, want COMPLETED", task.Status.State)
 	}
@@ -302,7 +326,10 @@ func TestIntegration_DelegationTimeoutLeavesPeerRunning(t *testing.T) {
 	const delegateTimeout = 100 * time.Millisecond
 	co := startDelegationCompany(t, tenant, ceoProv, engineerProv, delegateTimeout)
 
-	task := sendCEOTask(t, co.ceoSrv, tenant, "please delegate")
+	// Park/resume: the CEO parks while the peer works, and the watcher fails the
+	// task when the wait outlasts DelegateTimeout (design D10, now bounding the
+	// peer wait instead of a blocking call).
+	task := sendCEOTaskToEnd(t, co.ceoSrv, tenant, "please delegate")
 
 	if task.Status.State != sdka2a.TaskStateFailed {
 		t.Fatalf("CEO task state = %v, want FAILED (timeout)", task.Status.State)
