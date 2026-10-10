@@ -150,16 +150,16 @@ Slice 3 — the second turn
       This deliberately overturns a test-asserted decision; name the replacement.
 
 Slice 4 — termination vocabulary
-- [ ] **T10** — RED: test proving the model can end the loop explicitly, and that a missing
+- [x] **T10** — RED: test proving the model can end the loop explicitly, and that a missing
       signal hits the round cap instead of looping forever.
-- [ ] **T11** — Introduce the "continue / done" signal. Decide and record: a non-policy MCP
+- [x] **T11** — Introduce the "continue / done" signal. Decide and record: a non-policy MCP
       tool (breaks the "every tool is a policy-classified action" invariant) versus a
       `risk: safe` policy kind (pollutes `risk_policy` with non-actions).
-- [ ] **T12** — Rewrite `buildAckResult` (`transport/mcp/tools.go:109-125`). Its current
+- [x] **T12** — Rewrite `buildAckResult` (`transport/mcp/tools.go:109-125`). Its current
       text becomes false the moment T8 lands.
 
 Slice 5 — personas
-- [ ] **T13** — Rewrite `agents/ceo.md` (`:24-36`, `:48-59`) and `agents/engineer.md`
+- [x] **T13** — Rewrite `agents/ceo.md` (`:24-36`, `:48-59`) and `agents/engineer.md`
       (`:30-39`, `:50-53`). They currently instruct the model that memory is impossible and
       that outcomes never arrive. Left alone, they will actively sabotage the loop.
 
@@ -1040,3 +1040,85 @@ Advisory findings, all open:
 
 **Integration into the chain.** This branch is a sibling of pr3/pr4, not a descendant. It is
 merged into the chain right before Slice 8, which is the first slice that needs it.
+
+### Slice 4 — complete (T10, T11, T12)
+
+Branch: `feat/ceo-orchestration-loop-pr4-termination`. Commit: `63be350`
+`feat(mcp): add finish_task control tool and truthful action acks`. ~335 changed lines
+(`core/port/control.go` new, `core/supervisor/supervisor.go`, `transport/mcp/tools.go`,
+`transport/mcp/server_test.go`, new `core/supervisor/finish_test.go`,
+new `transport/mcp/finish_test.go`).
+
+**T11 decision (maintainer, 2026-10-02): a supervisor control tool outside `risk_policy`.**
+The rejected alternative was a `risk: safe` policy kind: it keeps the invariant but forces
+every `company.yaml` to declare a non-action, and forgetting it makes explicit termination
+impossible. The invariant is narrowed, and the narrowing is stated at tool registration:
+every *action* tool is policy-classified; supervisor control tools are a fixed, named set
+(today only `finish_task`). A policy key named `finish_task` is ignored; the control tool wins.
+
+**How it travels.** The MCP handler records `ActionIntent{Kind: "finish_task", body}` in the
+per-invocation sink, the same path as action intents. `splitFinishTask` removes it before
+`toPendingIntents`/`runIntents`, so it never reaches `Classify`, a gateway or the delegator.
+A turn that calls it ends the loop after that turn, even if it also delegated, and the
+`finish_task` text becomes `Output`. An empty body keeps the turn's own text. Only the first
+call per turn counts. There is no new `ProviderResult` field, so the gob constraint is
+untouched.
+
+**RED observed (worker-reported):** `TestFinishTask_EndsLoopAfterDelegatingTurn` and
+`TestFinishTask_AloneCompletesWithItsText` — state `REJECTED` (hard-denied by policy), want
+`COMPLETED`. In mcp, tools = `[telegram_send]`, missing `finish_task`; the delegation ack
+lacked "next turn". T10b, the round cap, already existed from Slice 3
+(`TestDelegationLoop_RoundExhaustionIsTerminal`), so no RED was claimed for it.
+
+**T12.** `buildAckResult` no longer says "outcome unavailable this turn". A delegation's
+result arrives in the next turn's transcript; other actions may be escalated to a human; the
+`finish_task` ack says the task ends after this turn.
+
+**Dedupe follow-up: no bug.** Both adapters call `Registry.Mint` inside `RunTask`, so the
+token, and with it the dedupe map, is fresh per provider invocation. A cross-round repeat
+passes; `TestDedupe_IdenticalCallInLaterInvocationIsNotSwallowed` proves it.
+**R3-untested-mid-loop-failures: closed** by `TestDelegationLoop_SaveFailureBetweenRoundsFails`
+(characterization: it passed on first run).
+
+**Overturned:** `TestServer_ToolRegistryMirrorsPolicy` expected exactly one tool; it now
+expects policy tools plus `finish_task`. `TestServer_ToolDescription_DiscloseContract` now
+looks up its tool by name. The replacement is named in both test comments.
+
+**Verification (parent-observed):** `go vet ./...` and `gofmt -l .` clean;
+`go test -race -count=1 ./...` all ok.
+
+**Native review** — lineage `review-bd2047eca815ce8f`, base `4119682`, risk `medium`, lens
+reliability. **Approved**, authority burned. Advisory findings:
+
+- **R3-finish-lost-on-halt** (WARNING, `supervisor.go:392`) — **handed to Slice 6.** A turn
+  that both finishes and escalates does not persist the finish signal, so an approval resume
+  cannot honour it.
+- **R3-empty-finish-body-untested**, **R3-save-failure-test-weak-oracle** (the record stays
+  `WORKING` when `markFailed`'s own `Save` also fails), **R3-shadow-test-missing-name-check**
+  — all SUGGESTION, open.
+
+### Slice 5 — complete (T13)
+
+Branch: `feat/ceo-orchestration-loop-pr5-personas` (worktree `../asf-wt-personas`, written in
+parallel with Slice 4 and rebased onto `63be350`). Commit: `4d29556`
+`docs(agents): teach the CEO and engineer the multi-round loop`. 2 files, 111 changed lines.
+Passive Markdown, so no RED is claimed; a grep finds no "exactly one turn", "no later" or
+"permanently" claims left in `agents/`.
+
+- `agents/ceo.md`: "How a task runs: rounds" covers the transcript as in-task memory (none
+  across tasks), the 8-round cap, `FAILED` when delegating on round 8, and that a turn
+  without delegation ends the task. A Workflow section covers plan → delegate one scoped
+  step → judge the peer result next turn → `finish_task`, plus "never loop on the same
+  failing request". Role, tone, `telegram_send` and the Judgment sections are unchanged.
+- `agents/engineer.md`: "One task, one answer". The reply is what the CEO reads next round:
+  what was done, what was not, blockers and open questions. Its own actions "may be
+  escalated to a human"; nothing is promised about chained approval.
+
+**Native review** — lineage `review-4be1627d96933c6e`, base `63be350`. **Approved**,
+authority burned. Advisory findings, all open:
+
+- **R3-round-contract-unproved**, **R3-finish-task-tool-unproved** (WARNING) — nothing ties
+  the prose (cap 8, `finish_task`) to the code, so a later change to `maxProviderRounds` or
+  to the tool name leaves the persona lying. Cheap fix: a test that reads `agents/ceo.md` and
+  asserts it names the current cap and control tool.
+- **R3-termination-ambiguity**, **R3-engineer-open-question-tension** (SUGGESTION).
