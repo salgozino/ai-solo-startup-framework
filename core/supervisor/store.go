@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/salgozino/ai-solo-startup-framework/core/address"
+	"github.com/salgozino/ai-solo-startup-framework/core/port"
 )
 
 // TaskRecord is the unit persisted to disk for crash/restart recovery.
@@ -41,6 +42,16 @@ type TaskRecord struct {
 	// resume path runs them in order once the pending intent is approved.
 	// Zero-value safe: a nil slice means the turn had nothing left to run.
 	RemainingIntents []PendingIntent `json:"remaining_intents,omitempty"`
+	// Turns is the conversation transcript accumulated across the task's
+	// delegation rounds, oldest first. It is the per-task memory that lets a
+	// later round see what the earlier ones produced instead of restarting from
+	// the original input.
+	//
+	// Nothing writes to this field yet: this slice lands the persistence schema
+	// only, so the on-disk layout is settled before the loop that fills it.
+	// Zero-value safe: a nil slice means the task has no recorded rounds, which
+	// is exactly how every record written before this field existed reads back.
+	Turns []port.ContextMessage `json:"turns,omitempty"`
 	// Output is the result produced by the provider when the task completes.
 	Output string `json:"output,omitempty"`
 }

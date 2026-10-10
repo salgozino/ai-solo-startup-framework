@@ -118,11 +118,11 @@ Out of scope: policy engine semantics, the Telegram gateway, adding new gateways
 ## Tasks
 
 Slice 1 — transcript persistence
-- [ ] **T1** — RED: test that a `TaskRecord` round-trips a non-empty turn list and that
+- [x] **T1** — RED: test that a `TaskRecord` round-trips a non-empty turn list and that
       literal pre-change JSON still loads with the new field as zero value.
-- [ ] **T2** — Add `Turns []port.ContextMessage` to `TaskRecord` (`omitempty`, zero-value
+- [x] **T2** — Add `Turns []port.ContextMessage` to `TaskRecord` (`omitempty`, zero-value
       safe), following the `RemainingIntents` precedent.
-- [ ] **T3** — Measure `Store.Save` cost with a realistic transcript and record the number
+- [x] **T3** — Measure `Store.Save` cost with a realistic transcript and record the number
       here. If it is bad, decide now whether the transcript moves to a sibling per-task
       file, before any other slice depends on the layout.
 
@@ -223,6 +223,37 @@ Chain strategy: **feature-branch-chain**, matching the convention this repo alre
 
 Slice 6 is the largest and may need splitting once its RED is written.
 
+### Slice 1 PR size: `size:exception`, maintainer-approved
+
+Slice 1 closes well over the ~400-line heuristic. A cohesive split existed and was offered
+— PR 1a "add the field" (`store.go` + `store_test.go`) and PR 1b "measure the cost and
+decide the layout" (`store_bench_test.go` + the T3 verdict), each comfortably under budget.
+The maintainer explicitly chose one PR instead, so this slice ships under `size:exception`.
+
+Recorded because the heuristic exists to protect reviewers, and an exception is only
+legitimate when it is deliberate and visible:
+
+| Part | Lines | Review load |
+|---|---|---|
+| `core/supervisor/store.go` | 11 | production, one additive field |
+| `core/supervisor/store_test.go` | 203 | tests |
+| `core/supervisor/store_bench_test.go` | 153 | benchmark |
+| `odd/tasks/ceo-orchestration-loop.md` | see below | progress log, read as context |
+
+367 lines are Go, and only 11 of those are production code: one additive, `omitempty`,
+zero-value-safe struct field. The rest of the diff is this progress log.
+
+This note deliberately carries **no frozen total**, and that is the fix for native-review
+finding `R3-size-accounting-stale`. The first version stated 539 changed lines with 172 in
+this document — numbers that were already wrong when committed, because writing the note
+grew the very document it was counting. Any total stated here is stale the moment the next
+progress entry lands. The Go counts above are stable and are the actual review load; the
+document's own line count is self-referential and is left to `git diff --stat` to answer at
+read time.
+
+This exception applies to Slice 1 only. Later slices carry real production weight and are
+expected to split rather than repeat it.
+
 ## Route
 
 Delegated direct. The writer trigger fires on every slice: each one touches 2+ non-trivial
@@ -252,8 +283,191 @@ Runner: `go test ./...`.
   turn yet, wiring them would only change the first turn's input for no benefit. That work
   moved to T8, where it is actually needed. Slice 1 stays pure persistence plus the
   `Store.Save` cost measurement that decides the transcript's storage layout.
-- No source file has been modified for this feature yet.
+
+### Slice 1 — complete (T1, T2, T3)
+
+Branch: `feat/ceo-orchestration-loop-pr1-transcript-persistence`. Commits:
+
+- `4bdc9bb` `feat(supervisor): persist per-task turn transcript on TaskRecord` (T1 + T2)
+- `b5f33c3` `test(supervisor): benchmark Store.Save cost with a realistic transcript` (T3)
+
+**T1 — RED observed.** `go test ./core/supervisor/ -run 'TestStore_RoundTripsTurns|TestStore_LoadsRecordWrittenBeforeTurns'`,
+verbatim:
+
+```
+# github.com/salgozino/ai-solo-startup-framework/core/supervisor [.../core/supervisor.test]
+core/supervisor/store_test.go:236:3: unknown field Turns in struct literal of type TaskRecord
+core/supervisor/store_test.go:250:13: got.Turns undefined (type TaskRecord has no field or method Turns)
+core/supervisor/store_test.go:250:31: rec.Turns undefined (type TaskRecord has no field or method Turns)
+core/supervisor/store_test.go:251:53: got.Turns undefined (type TaskRecord has no field or method Turns)
+core/supervisor/store_test.go:251:69: rec.Turns undefined (type TaskRecord has no field or method Turns)
+core/supervisor/store_test.go:253:27: rec.Turns undefined (type TaskRecord has no field or method Turns)
+core/supervisor/store_test.go:254:12: got.Turns undefined (type TaskRecord has no field or method Turns)
+core/supervisor/store_test.go:310:9: got.Turns undefined (type TaskRecord has no field or method Turns)
+core/supervisor/store_test.go:311:43: got.Turns undefined (type TaskRecord has no field or method Turns)
+FAIL	github.com/salgozino/ai-solo-startup-framework/core/supervisor [build failed]
+```
+
+A second, self-inflicted RED is worth recording because it nearly produced a lying test: the
+backward-compat test first seeded task id `task-preturns` and asserted on the bare substring
+`turns`, which the task id itself contains. The assertion failed against correct code. Fixed
+in the test (quoted JSON key `"turns"`, task id `task-legacy-schema`), not in `store.go`. No
+existing test's assertions were modified.
+
+**T2.** `Turns []port.ContextMessage` with `json:"turns,omitempty"` on `TaskRecord`
+(`core/supervisor/store.go`). `core/port` was NOT modified: `port.ContextMessage` already
+round-trips through `encoding/json` unchanged (exported fields, `time.Time` carries its own
+marshaller). Schema only — nothing writes the field this slice, by design.
+
+**T3 — measured.** `go test -bench . -benchmem -benchtime=3s -count=3 -run '^$' ./core/supervisor/`,
+AMD Ryzen 7 PRO 6850U, linux/amd64, go1.27.0. Median of 3, 20 tasks in the agent file, each
+record carrying 10 turns x 4 KiB:
+
+| store | on-disk file | ns/op (no transcript) | ns/op (transcript) | B/op (no transcript) | B/op (transcript) |
+|---|---|---|---|---|---|
+| 20 tasks | 1.97 KiB → 814 KiB | 134,897 | 6,100,565 | 18,015 | 5,624,102 |
+| 100 tasks | 9.86 KiB → 4.0 MiB | 225,991 | 25,648,803 | 73,781 | 26,813,881 |
+| 500 tasks | 49.3 KiB → 19.9 MiB | 658,464 | 142,288,310 | 339,425 | 150,783,013 |
+
+At the realistic 20-task point the transcript costs **45x more time** (6.10 ms vs 0.135 ms)
+and **312x more allocation** (5.4 MiB vs 18 KiB) per save. Cost is linear in file bytes
+(5x the tasks → 4.2x then 5.5x the time), confirming the predicted O(N tasks x M turn bytes).
+Allocation tracks ~7x the file size — the unmarshal-plus-marshal working set. Across the 8
+`Store.Save` call sites in `supervisor.go` (`:247, :288, :303, :347, :387, :430, :450, :609`)
+that is ~49 ms and ~43 MiB of garbage per task at 20 tasks, ~1.14 s and ~1.15 GiB at 500.
+One 500-task sample hit 492 ms on a GC pause; the median is reported.
+
+**T3 verdict — keep `Turns` on `TaskRecord`. It does not need to move before later slices,
+because no later slice can depend on the layout.**
+
+The task framing assumed the on-disk layout is a shared contract. Verified: it is not.
+`TaskRecord` is JSON-encoded in exactly two places, both private to `store.go`
+(`:116` unmarshal, `:124` marshal). Every consumer reads the Go struct via `Store.Load`/
+`LoadAll` — `supervisor.go`, and `ui/handler.go` through its own deliberately decoupled
+`ui.TaskRecord`, converted field-by-field at `cmd/company/wire.go:113`. Splitting the
+transcript into a sibling per-task file later is therefore a pure `Store` internal refactor
+with a zero-line blast radius outside `core/supervisor/store.go`. Slices 3-8 couple to the
+**field**, never to where the bytes live. Paying for that refactor now would buy no optionality.
+
+At the realistic operating point the cost is also genuinely noise: ~49 ms of `Save` per task
+against a `RunTask` that spawns an LLM CLI subprocess measured in seconds to minutes — well
+under 1% of one round.
+
+This is not an unconditional "it is fine". Two unbounded multipliers make it a real future
+problem, just not a Slice 1 one:
+
+- `Store.Delete` has exactly ONE production caller, `Cancel` (`supervisor.go:583`). Completed
+  tasks are never pruned, so N grows for the life of the process, and the default store base
+  is `os.TempDir()` (`wire.go:288`), which nothing prunes between runs either.
+- Slice 3 pushes on both axes at once: re-invocation raises saves-per-task above 8, and the
+  transcript grows per round so each save costs more within a single task. This benchmark
+  held turns fixed at 10; the real loop will not.
+
+Named trigger instead of vibes: revisit in **Slice 3**, when turns are actually written, and
+reach for the cheaper lever first — pruning terminal tasks (the missing `Store.Delete` caller)
+keeps N small and keeps the shared-array layout viable indefinitely. The sibling-file split
+is the second lever, available at any time at zero consumer cost.
+
+**Verification, observed:**
+
+- `gofmt -l .` — no output (clean)
+- `go build ./cmd/company` — OK
+- `go vet ./...` — OK
+- `go test ./...` — all 12 packages `ok`
+- `go test -race ./core/supervisor/` — `ok` 1.294s
+- `go test -bench . -benchmem ./core/supervisor/` — numbers above
+
+### Slice 1 — native review
+
+Lineage `review-787c47fe13b36fa2`, one lens (`review-reliability`), risk `medium`,
+4 files / 384 lines. Result: **approved**, authority acknowledged and burned. No blocker,
+no correction opened. Four advisory findings, all non-blocking and recorded here as
+follow-ups rather than as reasons to re-review this candidate:
+
+- **R3-toolchain-floor** (SUGGESTION) — `b.Loop()` and range-over-integer need a recent Go
+  language version, which the reviewer could not see from the patch. **Closed by evidence**:
+  `go.mod` declares `go 1.25.0`; `b.Loop()` landed in 1.24 and range-over-integer in 1.22,
+  and CI resolves its toolchain with `go-version-file: go.mod`. No action needed.
+- **R3-single-record-store** (SUGGESTION) — both new tests use a store holding exactly one
+  record, so nothing proves that saving one task preserves a *different* task's transcript
+  in the same per-agent file. Given that `Store.Save` rewrites the whole array, this is the
+  most likely silent-clobber failure mode. Real gap; cheap to close at unit level.
+  **Closed** by `TestStore_SavePreservesOtherRecordTurns` (`core/supervisor/store_test.go`):
+  two tasks with distinct transcripts, one saved, the neighbour asserted intact by whole-value
+  comparison plus a `LoadAll` count so a dropped or duplicated record also fails.
+- **R3-roundtrip-field-subset** (SUGGESTION) — the round-trip test compares `Role`,
+  `Content` and `At` individually instead of the decoded message as a whole, so a future
+  field on `port.ContextMessage` could fail to persist and leave the test green.
+  **Closed**: `TestStore_RoundTripsTurns` now compares each decoded message as a whole value
+  via `reflect.DeepEqual`, so a new field is covered automatically. `reflect.DeepEqual` is
+  correct here only because the fixtures are fixed UTC instants — `time.Time` carries a
+  monotonic reading and a `*Location` that do not survive JSON — and that property is now
+  stated in the test.
+
+**Teeth proven by mutation, not by assertion.** Both tests are coverage, not bug fixes, and
+both passed the moment they were written: `Store.Save` was already correct. No RED was
+fabricated. Each was instead proven non-vacuous by temporarily breaking the behaviour it
+claims to protect, and both mutations were reverted (`git diff core/supervisor/store.go` and
+`git diff core/port/provider.go` both empty).
+
+Mutation A — `Save` nils every *other* record's `Turns` before writing the array:
+
+```
+=== RUN   TestStore_SavePreservesOtherRecordTurns
+    store_test.go:330: neighbour Turns: got [], want [{Role:assistant Content:neighbour round one At:2026-09-23 10:00:00 +0000 UTC} {Role:peer Content:neighbour round two At:2026-09-23 10:00:30 +0000 UTC} {Role:assistant Content:neighbour round three At:2026-09-23 10:01:00 +0000 UTC}]
+--- FAIL: TestStore_SavePreservesOtherRecordTurns (0.00s)
+```
+
+Under that mutation every *other* `TestStore_*` test — including both Slice 1 tests as
+originally written — still passed. That is the finding's whole point, now demonstrated
+rather than argued.
+
+Mutation B — a future field added to `port.ContextMessage` that fails to persist
+(`Tokens int \`json:"-"\``, set in the fixture):
+
+```
+=== RUN   TestStore_RoundTripsTurns
+    store_test.go:265: Turns[0]: got {Role:assistant Content:delegating the draft to the engineer At:2026-09-23 10:00:00 +0000 UTC Tokens:0}, want {Role:assistant Content:delegating the draft to the engineer At:2026-09-23 10:00:00 +0000 UTC Tokens:7}
+    store_test.go:265: Turns[1]: got {Role:peer Content:draft ready: three phases At:2026-09-23 10:01:30 +0000 UTC Tokens:0}, want {Role:peer Content:draft ready: three phases At:2026-09-23 10:01:30 +0000 UTC Tokens:11}
+--- FAIL: TestStore_RoundTripsTurns (0.00s)
+```
+
+`Role`, `Content` and `At` all match in that output, so the previous field-subset comparison
+would have stayed green while `Tokens` silently vanished.
+- **R3-bench-quadratic-seed** (WARNING) — the benchmark seed loop calls `Save` once per
+  task, and `Save` rewrites the whole array, so setup is quadratic in file bytes: the
+  500-task transcript sweep writes on the order of gigabytes before the timer starts, once
+  per sub-benchmark per `-count`. It makes `go test -bench .` slow and temp-dir dependent.
+  Seeding the array in one write would fix it without changing what is measured.
 
 ## Next step
 
-Slice 1, T1 (RED) on `feat/ceo-orchestration-loop-pr1-transcript-persistence`.
+Slice 2, T4 (RED): input larger than the argv ceiling delivered intact. T6 remains blocked
+on re-running the `opencode` stdin spike.
+
+Slice 1's review findings are settled. Two native reviews ran on this slice:
+
+- `review-787c47fe13b36fa2` — approved. R3-toolchain-floor closed by evidence;
+  R3-single-record-store and R3-roundtrip-field-subset folded into this slice and closed
+  above with mutation proof.
+- `review-00c2c7d549dd7761` — approved on the amended candidate, no blocker. It confirmed
+  the two folded-in tests and raised three advisory findings:
+  - **R3-size-accounting-stale** (SUGGESTION) — **closed**: the size-exception note stated
+    539 changed lines with 172 in this document, while the real diff was 561 with 194.
+    Writing the audit note grew the document it audited. Fixed by removing the frozen
+    total; see the size-exception section above.
+  - **R3-bench-replace-path-only** (SUGGESTION) — **open**. The timed benchmark record
+    reuses a `TaskID` the seed already wrote, so every measured `Save` exercises only the
+    in-place replace path. The append path — a new task growing an already large array —
+    is unmeasured, and the T3 verdict extrapolates from replace-only. Worth closing when
+    the Slice 3 benchmark revisit happens, since it may shift the cost curve the verdict
+    rests on.
+  - **R3-bench-quadratic-seed** (WARNING) — **open**. The seed loop calls `Save` per task,
+    so setup is quadratic in file bytes; the 500-task sweep writes gigabytes before the
+    timer starts. Costs `go test -bench .` time only, not correctness.
+
+Both open findings live in the benchmark file and pair naturally with the Slice 3 revisit
+the T3 verdict already schedules. Neither affects the persisted schema.
+
+This document amendment is passive documentation correcting an audit note; it does not
+reopen review on the already-acknowledged candidate.
