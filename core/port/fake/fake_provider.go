@@ -46,6 +46,7 @@ type Provider struct {
 	ReturnErr          error                     // returned by SendTask
 	CompleteErr        error                     // error returned by Complete (not CompleteError)
 	CompleteErrErr     error                     // error returned by CompleteError
+	ReturnRunResults   []port.ProviderResult     // successive turns; then ReturnRunResult
 	ReturnRunResult    port.ProviderResult       // returned by RunTask
 	ReturnRunErr       error                     // error returned by RunTask
 	ReturnCapabilities port.ProviderCapabilities // returned by Capabilities
@@ -95,6 +96,9 @@ func (f *Provider) RunTask(_ context.Context, taskID string, input string) (port
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.RunCalls = append(f.RunCalls, RunTaskCall{TaskID: taskID, Input: input})
+	if i := len(f.RunCalls) - 1; i < len(f.ReturnRunResults) {
+		return f.ReturnRunResults[i], f.ReturnRunErr
+	}
 	return f.ReturnRunResult, f.ReturnRunErr
 }
 
@@ -124,6 +128,7 @@ func (f *Provider) Reset() {
 	f.ReturnErr = nil
 	f.CompleteErr = nil
 	f.CompleteErrErr = nil
+	f.ReturnRunResults = nil
 	f.ReturnRunResult = port.ProviderResult{}
 	f.ReturnRunErr = nil
 	f.ReturnCapabilities = port.ProviderCapabilities{}

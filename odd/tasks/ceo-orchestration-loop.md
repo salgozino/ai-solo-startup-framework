@@ -138,14 +138,14 @@ Slice 2 — input delivery
       size guard.
 
 Slice 3 — the second turn
-- [ ] **T7** — RED: test proving a CEO turn that delegates gets a second `RunTask` call
+- [x] **T7** — RED: test proving a CEO turn that delegates gets a second `RunTask` call
       whose input contains the peer's output.
-- [ ] **T8** — Re-invoke the provider after a delegation round with the assembled
+- [x] **T8** — Re-invoke the provider after a delegation round with the assembled
       transcript. Bounded rounds; exhaustion must be an explicit terminal state, not a hang.
       This is where `assembleBoundedContext` / `contextText` / `effectiveBudget` finally get
       production callers — wiring them earlier would change the first turn's input for no
       reason.
-- [ ] **T9** — Stop `rec.Output` from being clobbered by the peer's raw text
+- [x] **T9** — Stop `rec.Output` from being clobbered by the peer's raw text
       (`supervisor.go:476`, `:326-328`). `Output` must end up as the CEO's final answer.
       This deliberately overturns a test-asserted decision; name the replacement.
 
@@ -172,7 +172,18 @@ Slice 6 — park/resume
 - [ ] **T16** — Prove crash recovery across a round boundary: restart mid-conversation and
       continue.
 
-Slice 7 — chained approval
+Slice 7 — multi-agent UI (lands BEFORE chained approval; see Progress, 2026-10-02)
+- [ ] **T20** — RED: test proving a non-CEO agent's task is listed and approvable.
+- [ ] **T21** — Aggregate every runtime in the UI instead of `runtimes[0]`
+      (`cmd/company/main.go:67`, `:72`).
+
+Slice 8 — chained approval
+
+Design source: the frozen SDD proposal
+`openspec/changes/agent-delegation-chained-approval/` (proposal + `agent-delegation` and
+`agent-supervisor` delta specs). Read it before T17; reuse its requirements, do not
+re-derive them.
+
 - [ ] **T17** — RED: test proving a peer escalation reaches the human instead of failing the
       delegating task.
 - [ ] **T18** — Remove the hard-fail at `supervisor.go:570-571` and propagate the peer's
@@ -180,11 +191,6 @@ Slice 7 — chained approval
 - [ ] **T19** — Let the CEO send a follow-up to an existing peer task
       (`msg.TaskID = peerTaskID`); `transport/a2a/client.go:118` never sets it today. The
       SDK already supports this.
-
-Slice 8 — multi-agent UI
-- [ ] **T20** — RED: test proving a non-CEO agent's task is listed and approvable.
-- [ ] **T21** — Aggregate every runtime in the UI instead of `runtimes[0]`
-      (`cmd/company/main.go:67`, `:72`).
 
 ## Acceptance criteria
 
@@ -919,3 +925,78 @@ the T3 verdict already schedules. Neither affects the persisted schema.
 Document amendments recorded here — the Slice 1 audit-note correction and this Slice 2
 review record — are passive documentation. They do not reopen review on any
 already-acknowledged candidate.
+
+### 2026-10-02 — slice reorder, SDD retirement, parallel worktrees
+
+- **Slice order swapped: multi-agent UI is now Slice 7, chained approval Slice 8.** The
+  frozen SDD proposal `openspec/changes/agent-delegation-chained-approval/proposal.md`
+  states a non-negotiable ordering: UI aggregation must land before chained approval,
+  because `cmd/company/main.go:67` binds the UI to the CEO's supervisor only, so a peer's
+  escalation would be unreachable by the human. Task IDs (T17–T21) are kept stable so
+  earlier references stay valid.
+- **SDD retired, ODD adopted.** Maintainer decision: `openspec/` is frozen as a historical,
+  read-only record; new work is tracked in `odd/tasks/` plus Engram. The chained-approval
+  proposal is folded into Slice 8 as its design source instead of being executed as an
+  SDD change. The repository-level migration (AGENTS.md, archiving the completed changes)
+  ships separately on `docs/retire-sdd-adopt-odd`, off `master`.
+- **Parallel worktrees, maintainer-approved.** The multi-agent UI slice touches only
+  `cmd/company/` and `ui/`, disjoint from the `core/supervisor/` chain, so it runs in a
+  separate worktree (`../asf-wt-ui`, branch `feat/ceo-orchestration-loop-ui-aggregation`,
+  based on the Slice 2 tip). It does not edit this document; its outcome is folded in here
+  when it lands. Slices 3 → 6 and 8 stay strictly serial: all of them rewrite
+  `core/supervisor/supervisor.go`.
+
+### Slice 3 — complete (T7, T8, T9)
+
+Branch: `feat/ceo-orchestration-loop-pr3-second-turn`. Commit: `b131a5e`
+`feat(supervisor): feed delegation results back into a bounded second turn`.
+6 files, 303 changed lines (`core/supervisor/supervisor.go`, new `loop_test.go`,
+`delegation_test.go`, `integration_test.go`, `multi_intent_test.go`,
+`core/port/fake/fake_provider.go` gains sequential results).
+
+**RED observed (worker-reported, verbatim failure summaries):**
+
+- T7 `TestDelegationLoop_FeedsPeerOutputToSecondTurn` — `RunTask calls = 1, want 2`.
+- T8 `TestDelegationLoop_RoundExhaustionIsTerminal` — record/event `COMPLETED`, want `FAILED`;
+  both effective-budget cases observed a single provider call.
+- T9 `TestExecuteAction_DelegationCompletesWithCEOOutput` — Output was the peer's raw
+  `"Done: implemented X"`; the empty-peer case observed `""`, one call, no turns.
+
+**Behaviour.** A turn whose intents produce at least one successful delegation appends a
+`peer` turn per result and re-invokes the provider with the assembled transcript through
+`assembleBoundedContext` / `contextText` / `effectiveBudget` (their first production
+callers). A turn with no delegation ends the loop; its output is the final answer. The
+first turn's input is byte-identical to before. Round cap: `maxProviderRounds = 8`;
+delegating on round 8 ends `FAILED` with `provider round limit (8) exhausted after
+delegation` in both the persisted Output and the terminal event — never a hang. No new
+persisted field; literal pre-change JSON tests still pass.
+
+**Deliberately overturned:** the raw-peer-output and exactly-one-provider-call assertions in
+`delegation_test.go` / `multi_intent_test.go`. Replacement named in the comments: *CEO
+synthesis from transcript feedback*. Three real-A2A rounds (`integration_test.go`) prove
+earlier results persist, including repeated identical requests.
+
+**Verification (parent-observed):** `go vet ./...`, `gofmt -l .` clean,
+`go test -race -count=1 ./...` all packages ok.
+
+**Native review** — lineage `review-57ea62b7aa7da3da`, base pinned to `574f15b` so only this
+slice was reviewed; risk `medium`, lens `review-reliability`. **Approved**, authority
+acknowledged and burned. Two advisory findings:
+
+- **R3-resume-publishes-pre-delegation-text** (WARNING, `supervisor.go:331`) — **open, owned
+  by Slice 6.** An approved escalated delegation records the peer turn but the resume path
+  does not re-invoke the provider, so Output stays the pre-delegation text. Park/resume
+  (T15) unifies the resume path with the loop; T14's RED must cover it.
+- **R3-untested-mid-loop-failures** (SUGGESTION, `supervisor.go:394-398`) — **open.** The
+  Save failure between rounds has no test. Cheap; fold into Slice 4.
+
+Follow-ups handed to Slice 4: MCP `dedupeKey` is token-scoped and repeated delegations across
+rounds are now reachable; `buildAckResult` text is now false.
+
+### SDD retirement — committed
+
+`docs/retire-sdd-adopt-odd` (`../asf-wt-odd`, off `master`), commit `7e4406f`: AGENTS.md
+switched to ODD, `openspec/README.md` freeze note, `config.yaml` retired header, six
+completed changes archived as `openspec/changes/archive/2026-10-02-*` (task 7.13 closed
+with a note), chained-approval proposal kept in place with a superseded-by-ODD banner, and
+the one broken Go-comment path in `core/supervisor/delegation_test.go:2` updated.
