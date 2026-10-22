@@ -25,8 +25,8 @@ Branch: `feat/ui-task-tree` (from master, independent of the pi PR #103).
 
 ## Tasks
 
-- T1 [S2,S4] supervisor: record delegations on the parent record + tests — gentle-ai-worker — commit: pending
-- T2 [S3] ui + company_ui: expose delegations, render nested tree + tests — gentle-ai-worker — commit: pending
+- T1 [S2,S4] supervisor: record delegations on the parent record + tests — gentle-ai-worker — commit: 1eac713 (done)
+- T2 [S3] ui + company_ui: expose delegations, render nested tree + tests — gentle-ai-worker — commit: f0b37ff (done)
 
 ## Log
 
