@@ -165,7 +165,7 @@ export COMPANY_UI_ADDR="0.0.0.0:9090"
 Open **`http://127.0.0.1:8080`** — this is the primary way to interact with your company. The UI lets you:
 
 - Send tasks to the CEO agent
-- Monitor task state in real time
+- Monitor task state in real time; tasks an agent delegates to other agents appear nested under the delegating task
 - Approve or reject risky actions (e.g. sending a Telegram message)
 
 **What happens when you send a task:**

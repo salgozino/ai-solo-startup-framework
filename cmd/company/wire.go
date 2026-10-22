@@ -121,6 +121,10 @@ func (a *supervisorUIAdapter) ListTasks() ([]ui.TaskRecord, error) {
 	}
 	out := make([]ui.TaskRecord, len(recs))
 	for i, r := range recs {
+		var delegations []ui.Delegation
+		for _, d := range r.Delegations {
+			delegations = append(delegations, ui.Delegation{Role: d.Role, TaskID: d.TaskID})
+		}
 		out[i] = ui.TaskRecord{
 			TaskID:            r.TaskID,
 			State:             r.State,
@@ -130,6 +134,7 @@ func (a *supervisorUIAdapter) ListTasks() ([]ui.TaskRecord, error) {
 
 			AwaitingPeer:         r.AwaitingPeerRole,
 			AwaitingPeerApproval: r.AwaitingPeerApproval,
+			Delegations:          delegations,
 		}
 	}
 	return out, nil

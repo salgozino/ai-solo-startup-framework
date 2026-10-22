@@ -30,6 +30,15 @@ type TaskRecord struct {
 	// AwaitingPeerApproval: that peer escalated and waits on its own human, whose
 	// approval is the one actionable item (on the peer's task).
 	AwaitingPeerApproval bool `json:"awaiting_peer_approval,omitempty"`
+	// Delegations are the peer tasks this task created, in delegation order. The
+	// UI nests each one under this task instead of listing it as independent.
+	Delegations []Delegation `json:"delegations,omitempty"`
+}
+
+// Delegation links a task to one peer task it delegated.
+type Delegation struct {
+	Role   string `json:"role"`
+	TaskID string `json:"task_id"`
 }
 
 // SupervisorStatus is the minimal view of the supervisor's observable state.
