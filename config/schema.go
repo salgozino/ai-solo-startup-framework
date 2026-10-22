@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -33,13 +34,31 @@ type CompanyConfig struct {
 //
 // SystemPrompt holds the resolved absolute path to the agent's persona file
 // after Load() validates and resolves it. Empty string means no system prompt.
+//
+// Provider defaults to DefaultProvider when omitted. Extensions is the pi-only
+// allowlist of extensions loaded on top of the adapter's isolated invocation:
+// each entry is an absolute path after Load() or a "builtin:<name>" reference.
 type AgentConfig struct {
-	Name         string `yaml:"name"`
-	Role         string `yaml:"role"`
-	Provider     string `yaml:"provider"`
-	Model        string `yaml:"model,omitempty"`
-	SystemPrompt string `yaml:"system_prompt,omitempty"` // abs path after Load()
+	Name         string   `yaml:"name"`
+	Role         string   `yaml:"role"`
+	Provider     string   `yaml:"provider"`
+	Model        string   `yaml:"model,omitempty"`
+	SystemPrompt string   `yaml:"system_prompt,omitempty"` // abs path after Load()
+	Extensions   []string `yaml:"extensions,omitempty"`    // abs paths or builtin:<name> after Load()
 }
+
+// DefaultProvider is the provider an agent gets when its entry omits provider.
+const DefaultProvider = "pi"
+
+// builtinExtensionPrefix marks a pi built-in extension reference (e.g. builtin:mcp),
+// passed to pi verbatim rather than resolved as a filesystem path.
+const builtinExtensionPrefix = "builtin:"
+
+// packageSourcePrefixes are pi package sources. pi's -e flag silently ignores them
+// (verified on pi 1.2.0: `-e npm:pi-claude-bridge` loads nothing and reports nothing),
+// so they are rejected at load time instead of producing an agent that quietly lacks
+// the extension it declared.
+var packageSourcePrefixes = []string{"npm:", "git:", "git+", "http://", "https://", "ssh://"}
 
 // GatewayConfig holds the company-level gateway declarations.
 type GatewayConfig struct {
@@ -65,6 +84,10 @@ type Policy struct {
 //   - tenant is empty
 //   - any agent entry contains unknown fields (including a gateways field)
 //   - gateways.telegram.token_env or recipient_env is not an env-var reference
+//   - an agent's extensions is set for a non-pi provider, names a package source
+//     (npm:, git:, ...), or names a path that does not exist
+//
+// An agent that omits provider gets DefaultProvider (pi).
 func Load(path string) (*CompanyConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -111,7 +134,7 @@ func Load(path string) (*CompanyConfig, error) {
 		// Reject any other unknown field.
 		for k := range a {
 			switch k {
-			case "name", "role", "provider", "model", "system_prompt":
+			case "name", "role", "provider", "model", "system_prompt", "extensions":
 				// valid fields
 			default:
 				return nil, fmt.Errorf("config: agent[%d] (%q): unknown field %q", i, name, k)
@@ -120,6 +143,9 @@ func Load(path string) (*CompanyConfig, error) {
 
 		role, _ := a["role"].(string)
 		provider, _ := a["provider"].(string)
+		if provider == "" {
+			provider = DefaultProvider
+		}
 		model, _ := a["model"].(string)
 		rawPrompt, _ := a["system_prompt"].(string)
 
@@ -139,12 +165,18 @@ func Load(path string) (*CompanyConfig, error) {
 			systemPrompt = abs
 		}
 
+		extensions, err := resolveExtensions(a["extensions"], provider, basedir)
+		if err != nil {
+			return nil, fmt.Errorf("config: agent[%d] (%q): %w", i, name, err)
+		}
+
 		agents = append(agents, AgentConfig{
 			Name:         name,
 			Role:         role,
 			Provider:     provider,
 			Model:        model,
 			SystemPrompt: systemPrompt,
+			Extensions:   extensions,
 		})
 	}
 
@@ -180,4 +212,52 @@ func requireEnvRef(field, value string) error {
 		return fmt.Errorf("config: %s appears to be an inline secret value rather than an environment variable name; use the env var name (e.g. TELEGRAM_BOT_TOKEN), not the secret value itself", field)
 	}
 	return nil
+}
+
+// resolveExtensions validates an agent's raw extensions value and returns the entries
+// pi receives as -e arguments: builtin references verbatim, filesystem paths resolved
+// against basedir to absolute paths that must exist. A nil raw value yields nil.
+func resolveExtensions(raw any, provider, basedir string) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	if provider != DefaultProvider {
+		return nil, fmt.Errorf("extensions: only supported for provider %q, got %q", DefaultProvider, provider)
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("extensions: must be a list of strings")
+	}
+	resolved := make([]string, 0, len(items))
+	for j, item := range items {
+		entry, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("extensions[%d]: must be a list of strings", j)
+		}
+		if entry == "" {
+			return nil, fmt.Errorf("extensions[%d]: must not be empty", j)
+		}
+		if strings.HasPrefix(entry, builtinExtensionPrefix) {
+			resolved = append(resolved, entry)
+			continue
+		}
+		for _, prefix := range packageSourcePrefixes {
+			if strings.HasPrefix(entry, prefix) {
+				return nil, fmt.Errorf("extensions[%d]: %q: package sources are not supported; pi only loads a file or directory path (or builtin:<name>) through -e, so point to the installed extension's path instead", j, entry)
+			}
+		}
+		path := entry
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(basedir, path)
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return nil, fmt.Errorf("extensions[%d]: resolve path: %w", j, err)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return nil, fmt.Errorf("extensions[%d]: file not found: %s", j, abs)
+		}
+		resolved = append(resolved, abs)
+	}
+	return resolved, nil
 }
