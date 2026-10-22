@@ -69,3 +69,8 @@ PR1 config (9174d48) → PR2 adapters/pi (615e5db, ~1270 lines, mostly tests + f
   stopReason detection → fix T7 delegated. D2 (child inherits full env, bash tool can read
   ASF_MCP_TOKEN — same pattern as siblings, token is task-scoped) and D3 (stderr/stdout in errors)
   deferred as follow-ups; D4 test gaps partly covered by T7; D5 informational.
+- L6 (native review): lineage review-12b2012a9c4f418e → correction_required R4-deadline-descendants
+  (CRITICAL) → fixed in 2d21c2a (process-group kill + WaitDelay + pipe-close backstop) → recovered
+  (scope_changed, run by user) to review-ca2bcc3704839575 → approved, acknowledged, authority burned.
+  Advisory, non-blocking follow-ups: R3-raw-newlines and R4-raw-line-boundaries
+  (adapter.go:382-385), R3-version-probe-wait (adapter.go:480-485). Plus verify D2/D3.
