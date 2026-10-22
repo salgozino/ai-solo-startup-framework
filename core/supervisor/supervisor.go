@@ -352,6 +352,7 @@ func (s *Supervisor) executeResume(
 	// The target role is persisted alongside the kind and body, so an approved
 	// delegate_task can still reach its peer after the park.
 	outcome, err := s.executeAction(ctx, rec.PendingIntentKind, rec.PendingIntentBody, rec.PendingIntentTarget, token)
+	rec.recordDelegation(outcome)
 	if err != nil {
 		log.Error("resume.action.failed", "intent", rec.PendingIntentKind, "error", err)
 		s.markFailed(rec)
@@ -646,6 +647,7 @@ func (s *Supervisor) runIntents(
 		case policy.Permit:
 			log.Info("action.execute", "kind", intent.Kind)
 			outcome, err := s.executeAction(ctx, intent.Kind, intent.Body, intent.Target, classResult.ApprovalToken)
+			rec.recordDelegation(outcome)
 			if err != nil {
 				log.Error("action.failed", "kind", intent.Kind, "error", err)
 				rec.RemainingIntents = nil
@@ -692,7 +694,10 @@ type actionOutcome struct {
 	Delegated bool
 	// Parked reports that the peer accepted the task but is still running. The
 	// caller must park the delegating task on PeerRole/PeerTaskID.
-	Parked               bool
+	Parked bool
+	// PeerRole and PeerTaskID identify the peer task a delegation produced, set
+	// whenever one exists (completed, running, escalated or failed), also when
+	// the outcome is not Parked.
 	PeerRole, PeerTaskID string
 	// PeerApproval narrows Parked: the peer escalated and waits on its own human.
 	PeerApproval bool
@@ -780,9 +785,11 @@ func (s *Supervisor) outcomeForPeer(role string, res port.DelegationResult) (act
 	state := a2a.TaskState(res.State)
 	switch {
 	case state == a2a.TaskStateCompleted:
-		return actionOutcome{Output: res.Output, Delegated: true}, nil
+		return actionOutcome{Output: res.Output, Delegated: true, PeerRole: role, PeerTaskID: res.PeerTaskID}, nil
 	case state.Terminal():
-		return actionOutcome{}, fmt.Errorf("supervisor: delegation to role %q failed: peer task %q ended in state %s", role, res.PeerTaskID, res.State)
+		// The peer task exists even though it failed: the outcome still names it so
+		// the caller can record the delegation.
+		return actionOutcome{PeerRole: role, PeerTaskID: res.PeerTaskID}, fmt.Errorf("supervisor: delegation to role %q failed: peer task %q ended in state %s", role, res.PeerTaskID, res.State)
 	case state == a2a.TaskStateSubmitted || state == a2a.TaskStateWorking:
 		return actionOutcome{Parked: true, PeerRole: role, PeerTaskID: res.PeerTaskID}, nil
 	case state == a2a.TaskStateInputRequired:
