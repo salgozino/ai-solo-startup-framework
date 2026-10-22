@@ -1,0 +1,483 @@
+// Package pi provides the pi coding agent adapter — a concrete implementation of
+// port.Provider. It spawns an ephemeral pi CLI process per invocation via os/exec with an
+// argv slice (never sh -c), using "-p --mode json" for non-interactive JSONL output. The
+// task input is delivered on stdin. It enforces ctx deadlines and parses output into
+// framework types before returning. Raw process output never crosses the port boundary.
+//
+// Import policy: imported only by cmd/company (the composition root). core/ must never
+// import this package.
+package pi
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+
+	"github.com/salgozino/ai-solo-startup-framework/core/address"
+	"github.com/salgozino/ai-solo-startup-framework/core/port"
+)
+
+// TruncationMarker is prepended to output when it is truncated by the size cap.
+const TruncationMarker = "[output truncated]"
+
+// defaultOutputLimit is the maximum bytes read from a pi process before truncation.
+const defaultOutputLimit int64 = 1 << 20 // 1 MiB
+
+// defaultTokenGrace extends the invocation deadline before it is used as the MCP
+// token expiry, so the token remains valid for the brief window between process
+// exit and the adapter draining it.
+const defaultTokenGrace = 30 * time.Second
+
+// defaultMintTimeout: token lifetime with no ctx deadline. Drain releases the entry
+// regardless, so this only avoids mid-task 401s from an arbitrary ceiling.
+const defaultMintTimeout = 24 * time.Hour
+
+// mcpToolsAllowlist is the --tools value used when MCP is wired. pi loads user-level MCP
+// servers (e.g. ~/.pi/agent/mcp.json) even under -ne; restricting the tool set to the
+// built-in file/shell tools plus the framework server keeps ambient servers from running
+// actions outside the risk policy.
+const mcpToolsAllowlist = "read,bash,edit,write,mcp__framework__*"
+
+// extensionSource is the ephemeral pi extension registering the framework MCP server. It
+// is static: the URL and bearer token reach it only through the subprocess env vars
+// ASF_MCP_URL / ASF_MCP_TOKEN, so the file never contains the token.
+const extensionSource = `export default function (pi: any) {
+  pi.registerMcpServer("framework", {
+    url: process.env.ASF_MCP_URL,
+    headers: { Authorization: "Bearer " + process.env.ASF_MCP_TOKEN },
+    exposure: "direct",
+  });
+}
+`
+
+// Drainer is satisfied by a live MCP invocation handle: after the subprocess exits,
+// Drain releases the invocation and returns any action intents the MCP server's sink
+// recorded for it. Idempotent — a second Drain call returns nil without panicking.
+//
+// Deliberately identical in shape to (but a distinct type from) opencode.Drainer: each
+// adapter package defines its own copy to stay decoupled from transport/mcp and from each
+// other.
+type Drainer interface {
+	Drain() []port.ActionIntent
+	// Contacted reports whether the agent CLI ever reached the MCP server with this
+	// invocation's bearer token. An empty sink alone cannot distinguish "the agent chose
+	// not to call a tool" from "the agent never reached the MCP server at all".
+	Contacted() bool
+}
+
+// TokenMinter mints a per-invocation MCP bearer token bound to {tenant, agent, taskID}.
+type TokenMinter interface {
+	Mint(tenant, agent, taskID string, exp time.Time) (string, Drainer)
+}
+
+// Options configures the adapter. Zero value is valid (uses defaults, no MCP wiring).
+type Options struct {
+	// OutputLimit caps the number of bytes read from the child process stdout.
+	// When zero, defaultOutputLimit is used.
+	OutputLimit int64
+	// MCPRegistry mints per-invocation MCP bearer tokens. Nil disables MCP wiring
+	// entirely: no extension file, no ASF_MCP_* env, and ActionIntents is always empty.
+	MCPRegistry TokenMinter
+	// MCPServerAddr is the loopback address of the running MCP server (e.g. "127.0.0.1:54321").
+	// Required when MCPRegistry is non-nil.
+	MCPServerAddr string
+	// Tenant is passed to MCPRegistry.Mint and must match the MCP server's configured tenant.
+	Tenant string
+	// AgentName identifies this adapter's agent to MCPRegistry.Mint.
+	AgentName string
+	// PolicyActionKinds is returned by Capabilities().ActionKinds.
+	PolicyActionKinds []string
+	// ContextBudget is returned by Capabilities().ContextBudget.
+	ContextBudget int
+	TokenLifetime time.Duration // overrides defaultMintTimeout when non-zero (test-only knob)
+	// MCPHealthCheck reports the MCP server's health when non-nil (production: the running
+	// transport/mcp Server's Err() method value). RunTask consults it before spawning the
+	// subprocess whenever MCPRegistry is configured: a non-nil result aborts the invocation
+	// instead of running an agent whose tool calls could never reach a live server, which
+	// would otherwise look like "the agent made no tool calls".
+	MCPHealthCheck func() error
+}
+
+// Adapter implements port.Provider by running an ephemeral pi CLI process per task.
+// It is stateless: each RunTask call creates a fresh exec.Cmd with no shared state.
+type Adapter struct {
+	piBin             string
+	limit             int64
+	model             string
+	systemPromptPath  string
+	extensions        []string
+	mcpRegistry       TokenMinter
+	mcpServerAddr     string
+	tenant            string
+	mcpAgentName      string
+	policyActionKinds []string
+	contextBudget     int
+	tokenLifetime     time.Duration
+	mcpHealthCheck    func() error
+}
+
+// New returns an Adapter that invokes piBin as the pi CLI.
+// model is optional; when non-empty it is passed as --model <model>.
+// systemPromptPath is optional; when non-empty it is passed as --append-system-prompt
+// <path> (pi reads the file contents itself when given a path).
+// extensions are passed as -e <entry>, in order; each is an absolute path or
+// builtin:<name>, already validated by config.
+// The isolation flags are always included unconditionally.
+func New(piBin string, opts Options, model string, systemPromptPath string, extensions []string) *Adapter {
+	limit := opts.OutputLimit
+	if limit <= 0 {
+		limit = defaultOutputLimit
+	}
+	lifetime := opts.TokenLifetime
+	if lifetime <= 0 {
+		lifetime = defaultMintTimeout
+	}
+	return &Adapter{
+		piBin:             piBin,
+		limit:             limit,
+		model:             model,
+		systemPromptPath:  systemPromptPath,
+		extensions:        extensions,
+		mcpRegistry:       opts.MCPRegistry,
+		mcpServerAddr:     opts.MCPServerAddr,
+		tenant:            opts.Tenant,
+		mcpAgentName:      opts.AgentName,
+		policyActionKinds: opts.PolicyActionKinds,
+		contextBudget:     opts.ContextBudget,
+		tokenLifetime:     lifetime,
+		mcpHealthCheck:    opts.MCPHealthCheck,
+	}
+}
+
+// RunTask implements port.Provider.RunTask.
+// It spawns a fresh pi process in print/JSON mode with every discovery and persistence
+// feature disabled, writes input to the child's stdin, reads stdout up to the size cap,
+// and returns a parsed ProviderResult. Non-zero exit → error. ctx deadline kills the child.
+//
+// pi exits 0 even when the model call fails; the failure only shows up as a final
+// assistant message with stopReason "error" or "aborted", which RunTask maps to an error.
+//
+// When mcpRegistry is configured, RunTask mints a per-invocation MCP bearer token and
+// delivers it to pi only through ASF_MCP_URL / ASF_MCP_TOKEN on the subprocess env (never
+// os.Setenv), read by a static 0600 temp extension that is removed on every return path.
+// The token is never on argv nor in the extension file.
+func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (port.ProviderResult, error) {
+	// argv-as-slice: nothing from the task is interpolated into a shell string.
+	args := []string{
+		"-p", "--mode", "json", "--no-session", "-ne",
+		"--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve", "--offline",
+	}
+	if a.model != "" {
+		args = append(args, "--model", a.model)
+	}
+	if a.systemPromptPath != "" {
+		args = append(args, "--append-system-prompt", a.systemPromptPath)
+	}
+	for _, ext := range a.extensions {
+		args = append(args, "-e", ext)
+	}
+
+	var handle Drainer
+	var mcpEnv []string
+	if a.mcpRegistry != nil {
+		// Consult the MCP server's health before ever spawning the subprocess; see
+		// Options.MCPHealthCheck.
+		if a.mcpHealthCheck != nil {
+			if healthErr := a.mcpHealthCheck(); healthErr != nil {
+				return port.ProviderResult{}, fmt.Errorf("pi: mcp server unavailable, refusing to run task without a working MCP endpoint: %w", healthErr)
+			}
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			deadline = time.Now().Add(a.tokenLifetime)
+		}
+		token, h := a.mcpRegistry.Mint(a.tenant, a.mcpAgentName, taskID, deadline.Add(defaultTokenGrace))
+		handle = h
+		defer h.Drain() // release on every return path; idempotent
+
+		extPath, err := writeExtensionFile()
+		if err != nil {
+			return port.ProviderResult{}, fmt.Errorf("pi: mcp extension: %w", err)
+		}
+		defer os.Remove(extPath)
+
+		args = append(args, "-e", "builtin:mcp", "-e", extPath, "--tools", mcpToolsAllowlist)
+		mcpEnv = []string{"ASF_MCP_URL=http://" + a.mcpServerAddr, "ASF_MCP_TOKEN=" + token}
+	}
+
+	cmd := exec.CommandContext(ctx, a.piBin, args...) //nolint:gosec // argv slice, no shell
+	cmd.Stdin = strings.NewReader(input)
+	if mcpEnv != nil {
+		// Subprocess-scoped only — never os.Setenv.
+		cmd.Env = append(os.Environ(), mcpEnv...)
+	}
+
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return port.ProviderResult{}, fmt.Errorf("pi: stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return port.ProviderResult{}, fmt.Errorf("pi: start: %w", err)
+	}
+
+	// Read up to limit bytes, then drain the rest so the child never blocks on a full pipe.
+	// Reads until EOF (process exit) — never waits on a terminal event line.
+	var buf bytes.Buffer
+	n, readErr := io.Copy(&buf, io.LimitReader(stdout, a.limit))
+	io.Copy(io.Discard, stdout) //nolint:errcheck // drain only; error irrelevant
+
+	waitErr := cmd.Wait()
+
+	if ctx.Err() != nil {
+		return port.ProviderResult{}, fmt.Errorf("pi: deadline exceeded: %w", ctx.Err())
+	}
+	if waitErr != nil {
+		return port.ProviderResult{}, fmt.Errorf("pi: %w\nstderr: %s\nstdout: %s", waitErr, stderrBuf.String(), buf.String())
+	}
+	if readErr != nil {
+		return port.ProviderResult{}, fmt.Errorf("pi: read output: %w", readErr)
+	}
+
+	var output string
+	if n >= a.limit {
+		// Output was capped mid-stream — the raw bytes may not be valid JSONL.
+		output = parseOutput(buf.Bytes(), n, a.limit)
+	} else {
+		text, failure, recognised := parseStream(buf.Bytes())
+		if failure != "" {
+			return port.ProviderResult{}, fmt.Errorf("pi: model call failed: %s\nstderr: %s", failure, stderrBuf.String())
+		}
+		output = text
+		if !recognised {
+			// Gated on `recognised`, not on an empty extraction: a well-formed stream with
+			// no assistant text must stay empty rather than dump the raw JSONL envelope.
+			if raw := strings.TrimRight(buf.String(), "\n"); raw != "" {
+				output = raw
+			}
+		}
+	}
+
+	result := port.ProviderResult{Output: output}
+	if handle != nil {
+		// Sink is authoritative: ActionIntents come only from the MCP server's sink,
+		// never from parsing tool calls out of the stream above.
+		result.ActionIntents = handle.Drain()
+
+		// An empty sink is ambiguous on its own; the registry knows whether the minted
+		// token was ever presented.
+		if len(result.ActionIntents) == 0 && !handle.Contacted() {
+			return port.ProviderResult{}, fmt.Errorf("pi: mcp endpoint %s was never contacted by the CLI for task %q; refusing to report success for an invocation whose tool calls could not have been recorded", a.mcpServerAddr, taskID)
+		}
+	}
+	return result, nil
+}
+
+// writeExtensionFile writes the static extension source to a 0600 temp file ending in
+// .ts (pi loads extensions by suffix) and returns its path. The caller removes it.
+func writeExtensionFile() (string, error) {
+	f, err := os.CreateTemp("", "asf-pi-mcp-*.ts")
+	if err != nil {
+		return "", err
+	}
+	path := f.Name()
+	fail := func(err error) (string, error) {
+		f.Close()
+		os.Remove(path)
+		return "", err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		return fail(err)
+	}
+	if _, err := f.WriteString(extensionSource); err != nil {
+		return fail(err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return "", err
+	}
+	return path, nil
+}
+
+// parseOutput converts raw bytes to a string, prepending TruncationMarker when the
+// byte count equals the limit (meaning io.LimitReader may have stopped early).
+func parseOutput(raw []byte, n, limit int64) string {
+	text := strings.TrimRight(string(raw), "\n")
+	if n >= limit {
+		return TruncationMarker + " " + text
+	}
+	return text
+}
+
+// streamEvent is the pi --mode json JSONL event envelope (verified on pi 1.2.0). The first
+// line is a {"type":"session",...} header; the authoritative per-message events are
+// "message_end". Only the fields this adapter reads are declared.
+type streamEvent struct {
+	Type    string         `json:"type"`
+	Message *streamMessage `json:"message,omitempty"`
+}
+
+type streamMessage struct {
+	Role         string         `json:"role"`
+	Content      []contentBlock `json:"content"`
+	StopReason   string         `json:"stopReason"`
+	ErrorMessage string         `json:"errorMessage"`
+}
+
+// contentBlock is one element of a message's content. Only "text" blocks are extracted;
+// thinking and toolCall blocks are deliberately ignored (ActionIntents come from the sink).
+type contentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// parseStream extracts, in stream order, the text blocks of every assistant message_end,
+// and reports a failure message when the LAST assistant message_end ended with stopReason
+// "error" or "aborted" (pi exits 0 in that case). Lines that fail to parse are skipped.
+//
+// recognised reports whether at least one line was a JSON object with a non-empty "type".
+// When true the extracted text is authoritative even when empty; when false the caller
+// falls back to the raw output.
+func parseStream(raw []byte) (text, failure string, recognised bool) {
+	var sb strings.Builder
+	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var ev streamEvent
+		if err := json.Unmarshal([]byte(line), &ev); err != nil || ev.Type == "" {
+			continue
+		}
+		recognised = true
+		if ev.Type != "message_end" || ev.Message == nil || ev.Message.Role != "assistant" {
+			continue
+		}
+		for _, block := range ev.Message.Content {
+			if block.Type == "text" {
+				sb.WriteString(block.Text)
+			}
+		}
+		failure = ""
+		if sr := ev.Message.StopReason; sr == "error" || sr == "aborted" {
+			failure = ev.Message.ErrorMessage
+			if failure == "" {
+				failure = "stopReason " + sr
+			}
+		}
+	}
+	return sb.String(), failure, recognised
+}
+
+// thinkingSuffixes are the trailing ":<level>" values pi accepts on a model spec.
+var thinkingSuffixes = []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+// ProbeModel verifies the configured pi setup at startup. With no model configured it only
+// checks that the binary runs (`pi --version`). Otherwise it runs
+// `pi -ne [-e <ext>...] --offline --list-models` and requires the configured model to be
+// listed. The model may be "provider/id" or a bare "id", with an optional ":<thinking>"
+// suffix. Extensions are passed so extension-provided providers are visible.
+func (a *Adapter) ProbeModel(ctx context.Context) error {
+	if a.model == "" {
+		cmd := exec.CommandContext(ctx, a.piBin, "--version") //nolint:gosec // argv slice, no shell
+		var stderrBuf bytes.Buffer
+		cmd.Stderr = &stderrBuf
+		cmd.Stdout = io.Discard
+		err := cmd.Run()
+		if ctx.Err() != nil {
+			return fmt.Errorf("pi: probe deadline exceeded: %w", ctx.Err())
+		}
+		if err != nil {
+			return fmt.Errorf("pi: cannot run %q --version: %w\nstderr: %s", a.piBin, err, stderrBuf.String())
+		}
+		return nil
+	}
+
+	args := []string{"-ne"}
+	for _, ext := range a.extensions {
+		args = append(args, "-e", ext)
+	}
+	args = append(args, "--offline", "--list-models")
+	cmd := exec.CommandContext(ctx, a.piBin, args...) //nolint:gosec // argv slice, no shell
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		return fmt.Errorf("pi: probe deadline exceeded: %w", ctx.Err())
+	}
+	if err != nil {
+		return fmt.Errorf("pi: %q --list-models failed: %w\nstderr: %s", a.piBin, err, stderrBuf.String())
+	}
+
+	provider, id := splitModelSpec(a.model)
+	// pi may print the table on stdout or stderr depending on version; scan both.
+	for _, table := range []string{stdoutBuf.String(), stderrBuf.String()} {
+		if listsModel(table, provider, id) {
+			return nil
+		}
+	}
+	return fmt.Errorf("pi: model %q was not listed by `pi --list-models` with the configured extensions %v", a.model, a.extensions)
+}
+
+// splitModelSpec strips a trailing ":<thinking>" suffix and splits an optional
+// "provider/" prefix. Only the first "/" separates provider from id, since ids may
+// themselves contain "/" (e.g. openrouter-style ids).
+func splitModelSpec(spec string) (provider, id string) {
+	if i := strings.LastIndex(spec, ":"); i >= 0 {
+		for _, s := range thinkingSuffixes {
+			if spec[i+1:] == s {
+				spec = spec[:i]
+				break
+			}
+		}
+	}
+	if i := strings.Index(spec, "/"); i >= 0 {
+		return spec[:i], spec[i+1:]
+	}
+	return "", spec
+}
+
+// listsModel reports whether a `--list-models` table contains the model. The first two
+// whitespace-separated columns of each row are provider and model; the header row is
+// skipped. An empty provider matches any provider.
+func listsModel(table, provider, id string) bool {
+	for _, line := range strings.Split(table, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || (fields[0] == "provider" && fields[1] == "model") {
+			continue
+		}
+		if fields[1] == id && (provider == "" || fields[0] == provider) {
+			return true
+		}
+	}
+	return false
+}
+
+// ---- port.Provider stub methods (task-completion reporting side) ------------
+// Complete/CompleteError are implemented by transport/a2a, not by this adapter.
+
+var errNotImplemented = fmt.Errorf("pi: A2A client methods are provided by transport/a2a, not this adapter")
+
+// Capabilities returns the ContextBudget and ActionKinds configured via Options
+// at construction time (see New).
+func (a *Adapter) Capabilities() port.ProviderCapabilities {
+	return port.ProviderCapabilities{ContextBudget: a.contextBudget, ActionKinds: a.policyActionKinds}
+}
+
+func (a *Adapter) Complete(_ string, _ port.TaskResult) error { return errNotImplemented }
+func (a *Adapter) CompleteError(_ string, _ error) error      { return errNotImplemented }
+func (a *Adapter) SendTask(_ context.Context, _ address.A2AAddress, _ string, _ map[string]any, _ *port.TaskOptions) (string, error) {
+	return "", errNotImplemented
+}
+
+// compile-time check: Adapter must satisfy port.Provider.
+var _ port.Provider = (*Adapter)(nil)
