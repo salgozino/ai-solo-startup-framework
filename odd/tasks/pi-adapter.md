@@ -41,7 +41,8 @@ Add a `pi` provider adapter (pi coding agent CLI, verified on pi 1.2.0) next to 
 - T3 [S2,S4] config: `extensions` field, default provider `pi` — inline — commit: 9174d48 (done)
 - T4 [S1,S2,S4] wire.go `pi` case — inline — commit: 3b86b94 (done)
 - T5 [S1-S9] docs: AGENTS.md, README, company.yaml, openspec change — inline — commit: 3b86b94 (done; company.yaml is gitignored, local only)
-- T6 verify (security: token/tool isolation) — gentle-ai-verify — pending
+- T6 verify (security: token/tool isolation) — gentle-ai-verify — done (L5)
+- T7 [S7,S8] fix D1: parse full stream, cap extracted text — gentle-ai-worker — commit: 62e4d79 (done)
 
 ## Delivery slices
 
@@ -64,3 +65,7 @@ PR1 config (9174d48) → PR2 adapters/pi (615e5db, ~1270 lines, mostly tests + f
   `openai-codex/gpt-5.4-mini`; RunTask on it returns "pi: model call failed: Codex error ..." (exit 0 case).
   `--append-system-prompt <path>` injects file contents (verified). T4 wire RED ("unknown provider
   \"pi\"") → GREEN. company.yaml is gitignored (local); switched to pi per L2.
+- L5 (verify T6, gentle-ai-verify): S1-S6, S8, S9 pass; S7 partial. D1 (medium): output cap skipped
+  stopReason detection → fix T7 delegated. D2 (child inherits full env, bash tool can read
+  ASF_MCP_TOKEN — same pattern as siblings, token is task-scoped) and D3 (stderr/stdout in errors)
+  deferred as follow-ups; D4 test gaps partly covered by T7; D5 informational.
