@@ -37,3 +37,11 @@ Branch: `feat/ui-task-tree` (from master, independent of the pi PR #103).
   parked and is cleared on resume (`supervisor.go:410,456`). UI list aggregation:
   `cmd/company/company_ui.go` `ListTasks` (sets `Agent`), `ui/handler.go` `TaskRecord`,
   rendering `ui/app.js` `renderTasks` (flat, newest first).
+- L4 (manual validation, headless Chrome via CDP against the real ui package with a fake supervisor):
+  2 children nested in delegation order, grandchild at a third level, unlisted delegation ignored,
+  orphan stays top-level, children not repeated, Approve on a nested card posts
+  `qa:qa-1 approve=true` and the card turns COMPLETED.
+- L5 (native review, user-requested): lineage review-6cd13c931078d579 (risk/readability/reliability)
+  approved and acknowledged. Advisory follow-ups: R2-001 (cmd/company/ui_test.go:290-291),
+  R3-inherited-keys (ui/app.js:55-57), R3-task-identity (ui/app.js:36-42, id-only matching),
+  R3-tree-coverage (ui/app.js:35-58, no JS tests).
