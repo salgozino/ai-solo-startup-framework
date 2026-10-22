@@ -9,6 +9,7 @@
 package pi
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -28,6 +29,11 @@ const TruncationMarker = "[output truncated]"
 
 // defaultOutputLimit is the maximum bytes read from a pi process before truncation.
 const defaultOutputLimit int64 = 1 << 20 // 1 MiB
+
+// maxLineSize bounds the memory held for a single JSONL line. pi's agent_end event repeats
+// every message of the session, so lines can be large, but a line past this size is drained
+// and skipped without parsing rather than buffered without bound.
+const maxLineSize = 8 << 20 // 8 MiB
 
 // defaultTokenGrace extends the invocation deadline before it is used as the MCP
 // token expiry, so the token remains valid for the brief window between process
@@ -229,11 +235,10 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 		return port.ProviderResult{}, fmt.Errorf("pi: start: %w", err)
 	}
 
-	// Read up to limit bytes, then drain the rest so the child never blocks on a full pipe.
-	// Reads until EOF (process exit) — never waits on a terminal event line.
-	var buf bytes.Buffer
-	n, readErr := io.Copy(&buf, io.LimitReader(stdout, a.limit))
-	io.Copy(io.Discard, stdout) //nolint:errcheck // drain only; error irrelevant
+	// Consume the WHOLE stdout line by line (so a failure past the cap is still seen and the
+	// child never blocks on a full pipe). Reads until EOF (process exit) — never waits on a
+	// terminal event line.
+	parsed, readErr := parseStream(stdout, a.limit)
 
 	waitErr := cmd.Wait()
 
@@ -241,29 +246,26 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 		return port.ProviderResult{}, fmt.Errorf("pi: deadline exceeded: %w", ctx.Err())
 	}
 	if waitErr != nil {
-		return port.ProviderResult{}, fmt.Errorf("pi: %w\nstderr: %s\nstdout: %s", waitErr, stderrBuf.String(), buf.String())
+		return port.ProviderResult{}, fmt.Errorf("pi: %w\nstderr: %s\nstdout: %s", waitErr, stderrBuf.String(), parsed.raw)
 	}
 	if readErr != nil {
 		return port.ProviderResult{}, fmt.Errorf("pi: read output: %w", readErr)
 	}
+	// Failure detection runs regardless of truncation.
+	if parsed.failure != "" {
+		return port.ProviderResult{}, fmt.Errorf("pi: model call failed: %s\nstderr: %s", parsed.failure, stderrBuf.String())
+	}
 
-	var output string
-	if n >= a.limit {
-		// Output was capped mid-stream — the raw bytes may not be valid JSONL.
-		output = parseOutput(buf.Bytes(), n, a.limit)
-	} else {
-		text, failure, recognised := parseStream(buf.Bytes())
-		if failure != "" {
-			return port.ProviderResult{}, fmt.Errorf("pi: model call failed: %s\nstderr: %s", failure, stderrBuf.String())
+	output, truncated := parsed.text, parsed.textTruncated
+	if !parsed.recognised {
+		// Gated on `recognised`, not on an empty extraction: a well-formed stream with no
+		// assistant text must stay empty rather than dump the raw JSONL envelope.
+		if raw := strings.TrimRight(string(parsed.raw), "\n"); raw != "" {
+			output, truncated = raw, parsed.rawTruncated
 		}
-		output = text
-		if !recognised {
-			// Gated on `recognised`, not on an empty extraction: a well-formed stream with
-			// no assistant text must stay empty rather than dump the raw JSONL envelope.
-			if raw := strings.TrimRight(buf.String(), "\n"); raw != "" {
-				output = raw
-			}
-		}
+	}
+	if truncated {
+		output = TruncationMarker + " " + output
 	}
 
 	result := port.ProviderResult{Output: output}
@@ -307,16 +309,6 @@ func writeExtensionFile() (string, error) {
 	return path, nil
 }
 
-// parseOutput converts raw bytes to a string, prepending TruncationMarker when the
-// byte count equals the limit (meaning io.LimitReader may have stopped early).
-func parseOutput(raw []byte, n, limit int64) string {
-	text := strings.TrimRight(string(raw), "\n")
-	if n >= limit {
-		return TruncationMarker + " " + text
-	}
-	return text
-}
-
 // streamEvent is the pi --mode json JSONL event envelope (verified on pi 1.2.0). The first
 // line is a {"type":"session",...} header; the authoritative per-message events are
 // "message_end". Only the fields this adapter reads are declared.
@@ -339,42 +331,118 @@ type contentBlock struct {
 	Text string `json:"text"`
 }
 
-// parseStream extracts, in stream order, the text blocks of every assistant message_end,
-// and reports a failure message when the LAST assistant message_end ended with stopReason
-// "error" or "aborted" (pi exits 0 in that case). Lines that fail to parse are skipped.
+// streamResult is what parseStream extracted from a pi stdout stream.
+type streamResult struct {
+	text          string // assistant text blocks in stream order, capped at limit bytes
+	textTruncated bool   // extracted text exceeded limit
+	failure       string // errorMessage when the LAST assistant message_end errored/aborted
+	recognised    bool   // at least one line was a JSON object with a non-empty "type"
+	raw           []byte // first limit bytes of stdout, for the raw-text fallback
+	rawTruncated  bool   // stdout exceeded limit
+}
+
+// parseStream reads r to EOF line by line. It extracts, in stream order, the text blocks of
+// every assistant message_end, and records a failure message when the LAST assistant
+// message_end ended with stopReason "error" or "aborted" (pi exits 0 in that case).
+// Lines that fail to parse, and lines longer than maxLineSize, are skipped; the stream is
+// always drained so the child never blocks. Memory is bounded: text and raw are each capped
+// at limit bytes, and at most maxLineSize bytes of one line are held.
 //
 // recognised reports whether at least one line was a JSON object with a non-empty "type".
 // When true the extracted text is authoritative even when empty; when false the caller
 // falls back to the raw output.
-func parseStream(raw []byte) (text, failure string, recognised bool) {
-	var sb strings.Builder
-	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+func parseStream(r io.Reader, limit int64) (streamResult, error) {
+	var res streamResult
+	var text strings.Builder
+	br := bufio.NewReaderSize(r, 64<<10)
+	var line []byte
+	overlong := false
+	for {
+		chunk, isPrefix, err := br.ReadLine()
+		if len(chunk) > 0 || !isPrefix {
+			res.addRaw(chunk, limit)
 		}
-		var ev streamEvent
-		if err := json.Unmarshal([]byte(line), &ev); err != nil || ev.Type == "" {
-			continue
-		}
-		recognised = true
-		if ev.Type != "message_end" || ev.Message == nil || ev.Message.Role != "assistant" {
-			continue
-		}
-		for _, block := range ev.Message.Content {
-			if block.Type == "text" {
-				sb.WriteString(block.Text)
+		if !overlong {
+			line = append(line, chunk...)
+			if len(line) > maxLineSize {
+				overlong, line = true, nil
 			}
 		}
-		failure = ""
-		if sr := ev.Message.StopReason; sr == "error" || sr == "aborted" {
-			failure = ev.Message.ErrorMessage
-			if failure == "" {
-				failure = "stopReason " + sr
+		if err != nil {
+			if err == io.EOF {
+				err = nil
 			}
+			return finish(res, &text), err
+		}
+		if isPrefix {
+			continue
+		}
+		if !overlong {
+			res.handleLine(line, &text, limit)
+		}
+		line, overlong = line[:0], false
+	}
+}
+
+func finish(res streamResult, text *strings.Builder) streamResult {
+	res.text = text.String()
+	return res
+}
+
+// addRaw keeps the first limit bytes of stdout (newline-delimited) for the raw fallback.
+func (res *streamResult) addRaw(chunk []byte, limit int64) {
+	room := limit - int64(len(res.raw))
+	if room <= 0 {
+		if len(chunk) > 0 {
+			res.rawTruncated = true
+		}
+		return
+	}
+	if int64(len(chunk)) > room {
+		res.raw = append(res.raw, chunk[:room]...)
+		res.rawTruncated = true
+		return
+	}
+	res.raw = append(res.raw, chunk...)
+}
+
+func (res *streamResult) handleLine(line []byte, text *strings.Builder, limit int64) {
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
+		return
+	}
+	var ev streamEvent
+	if err := json.Unmarshal(line, &ev); err != nil || ev.Type == "" {
+		return
+	}
+	res.recognised = true
+	if ev.Type != "message_end" || ev.Message == nil || ev.Message.Role != "assistant" {
+		return
+	}
+	for _, block := range ev.Message.Content {
+		if block.Type != "text" {
+			continue
+		}
+		room := limit - int64(text.Len())
+		switch {
+		case room <= 0:
+			if block.Text != "" {
+				res.textTruncated = true
+			}
+		case int64(len(block.Text)) > room:
+			text.WriteString(block.Text[:room])
+			res.textTruncated = true
+		default:
+			text.WriteString(block.Text)
 		}
 	}
-	return sb.String(), failure, recognised
+	res.failure = ""
+	if sr := ev.Message.StopReason; sr == "error" || sr == "aborted" {
+		res.failure = ev.Message.ErrorMessage
+		if res.failure == "" {
+			res.failure = "stopReason " + sr
+		}
+	}
 }
 
 // thinkingSuffixes are the trailing ":<level>" values pi accepts on a model spec.

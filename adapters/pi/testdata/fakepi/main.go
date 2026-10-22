@@ -9,6 +9,10 @@
 //	"hang"        — sleeps until SIGKILL
 //	"large"       — prints 1 MiB of 'x' then exits 0
 //	"raw-text"    — prints plain non-JSONL text and exits 0
+//	"big-error"   — >64 KiB of padding events, then a final assistant stopReason "error", exit 0
+//	"big-text"    — one assistant message_end whose text is 20000 'y' bytes
+//	"long-line"   — a 9 MiB single line (an assistant message_end with text SKIPPED), then
+//	                an assistant message_end with text AFTER
 //	"model-error" — assistant message_end with stopReason "error" and errorMessage, EXIT 0
 //	"aborted"     — assistant message_end with stopReason "aborted", exit 0
 //	anything else — echoes the prompt as the assistant text (after a thinking block)
@@ -116,6 +120,35 @@ func main() {
 		fmt.Print(strings.Repeat("x", 1<<20))
 	case "raw-text":
 		fmt.Println("plain text, not an event stream")
+	case "big-error":
+		emitHeader(input)
+		for i := 0; i < 64; i++ {
+			emit(map[string]any{"type": "message_update", "pad": strings.Repeat("p", 2048)})
+		}
+		emit(map[string]any{"type": "agent_end", "pad": strings.Repeat("p", 65536)})
+		emit(map[string]any{"type": "message_end", "message": map[string]any{
+			"role": "assistant", "content": []any{}, "stopReason": "error",
+			"errorMessage": "late failure beyond the cap",
+		}})
+		emitTail()
+	case "big-text":
+		emitHeader(input)
+		emit(map[string]any{"type": "message_end", "message": map[string]any{
+			"role": "assistant", "stopReason": "stop",
+			"content": []any{map[string]any{"type": "text", "text": strings.Repeat("y", 20000)}},
+		}})
+		emitTail()
+	case "long-line":
+		emitHeader(input)
+		emit(map[string]any{"type": "message_end", "message": map[string]any{
+			"role": "assistant", "stopReason": "stop",
+			"content": []any{map[string]any{"type": "text", "text": "SKIPPED" + strings.Repeat("z", 9<<20)}},
+		}})
+		emit(map[string]any{"type": "message_end", "message": map[string]any{
+			"role": "assistant", "stopReason": "stop",
+			"content": []any{map[string]any{"type": "text", "text": "AFTER"}},
+		}})
+		emitTail()
 	case "model-error":
 		emitHeader(input)
 		emit(map[string]any{"type": "message_end", "message": map[string]any{

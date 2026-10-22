@@ -258,6 +258,41 @@ func TestRunTask_OversizedOutputTruncated(t *testing.T) {
 	}
 }
 
+// S7/S8: a failure beyond the output cap is still detected (pi's agent_end repeats every
+// message, so long sessions exceed the cap).
+func TestRunTask_StopReasonErrorBeyondCapIsFailure(t *testing.T) {
+	bin := helperBinary(t)
+	_, err := pi.New(bin, pi.Options{OutputLimit: 4096}, "", "", nil).RunTask(context.Background(), "t", "big-error")
+	if err == nil || !strings.Contains(err.Error(), "late failure beyond the cap") {
+		t.Fatalf("expected errorMessage from beyond the cap, got %v", err)
+	}
+}
+
+// S8: the cap applies to the extracted text, not to the JSONL envelope.
+func TestRunTask_LargeAssistantTextTruncated(t *testing.T) {
+	bin := helperBinary(t)
+	result, err := pi.New(bin, pi.Options{OutputLimit: 4096}, "", "", nil).RunTask(context.Background(), "t", "big-text")
+	if err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	want := pi.TruncationMarker + " " + strings.Repeat("y", 4096)
+	if result.Output != want {
+		t.Errorf("Output = %.60q (len %d), want marker + first 4096 text bytes", result.Output, len(result.Output))
+	}
+}
+
+// S8: an over-long single line is skipped; later lines are still parsed.
+func TestRunTask_OverlongLineSkipped(t *testing.T) {
+	bin := helperBinary(t)
+	result, err := pi.New(bin, pi.Options{}, "", "", nil).RunTask(context.Background(), "t", "long-line")
+	if err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if result.Output != "AFTER" {
+		t.Errorf("Output = %.60q (len %d), want %q", result.Output, len(result.Output), "AFTER")
+	}
+}
+
 // S7: the critical case — pi exits 0 but the final assistant message is an error.
 func TestRunTask_StopReasonErrorIsFailure(t *testing.T) {
 	bin := helperBinary(t)
