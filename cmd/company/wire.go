@@ -1,6 +1,6 @@
 // Package main — wire.go is the ONLY file in the entire codebase that imports
-// adapters/claudecode and gateways/telegram. All other packages depend solely on
-// core/port interfaces; this file is the seam where concretes are injected.
+// adapters/claudecode, adapters/opencode, adapters/pi and gateways/telegram. All other
+// packages depend solely on core/port interfaces; this file is the seam where concretes are injected.
 package main
 
 import (
@@ -16,6 +16,7 @@ import (
 
 	"github.com/salgozino/ai-solo-startup-framework/adapters/claudecode"
 	"github.com/salgozino/ai-solo-startup-framework/adapters/opencode"
+	"github.com/salgozino/ai-solo-startup-framework/adapters/pi"
 	"github.com/salgozino/ai-solo-startup-framework/config"
 	"github.com/salgozino/ai-solo-startup-framework/core/address"
 	"github.com/salgozino/ai-solo-startup-framework/core/policy"
@@ -53,6 +54,16 @@ type opencodeRegistryMinter struct {
 }
 
 func (m *opencodeRegistryMinter) Mint(tenant, agent, taskID string, exp time.Time) (string, opencode.Drainer) {
+	return m.reg.Mint(tenant, agent, taskID, exp)
+}
+
+// piRegistryMinter is claudeRegistryMinter's counterpart for pi.TokenMinter, for the
+// same reason opencodeRegistryMinter exists: pi.Drainer is its own distinct type.
+type piRegistryMinter struct {
+	reg *transmcp.Registry
+}
+
+func (m *piRegistryMinter) Mint(tenant, agent, taskID string, exp time.Time) (string, pi.Drainer) {
 	return m.reg.Mint(tenant, agent, taskID, exp)
 }
 
@@ -340,6 +351,15 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 			prov = opts.providerOverride
 		} else {
 			switch agCfg.Provider {
+			case "pi":
+				prov = pi.New("pi", pi.Options{
+					MCPRegistry:       &piRegistryMinter{reg: mcpSrv.Registry()},
+					MCPServerAddr:     mcpAddr,
+					Tenant:            cfg.Tenant,
+					AgentName:         agCfg.Name,
+					PolicyActionKinds: mcpActionKinds,
+					MCPHealthCheck:    mcpSrv.Err,
+				}, agCfg.Model, agCfg.SystemPrompt, agCfg.Extensions)
 			case "claude-code":
 				prov = claudecode.New("claude", claudecode.Options{
 					MCPRegistry:       &claudeRegistryMinter{reg: mcpSrv.Registry()},

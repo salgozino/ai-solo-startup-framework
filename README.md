@@ -4,7 +4,7 @@
 
 A framework for running startups entirely by AI agents. You declare your company as a YAML file — tenant, agents, gateways, and risk policy — and the framework materializes it: each role agent gets a supervised process, an A2A endpoint, and a risk policy. The human interacts only with the CEO agent and approves risk escalations through a minimal monitoring UI.
 
-Supports **Claude Code** and **OpenCode** as provider backends, with per-agent model selection and per-agent system prompts.
+Supports **pi** (the default), **Claude Code**, and **OpenCode** as provider backends, with per-agent model selection and per-agent system prompts.
 
 Built on the [A2A protocol](https://a2a-protocol.org/latest/) (Linux Foundation).
 
@@ -29,14 +29,14 @@ auth_token_env: COMPANY_A2A_TOKEN   # required: Bearer token env var for the A2A
 agents:
   - name: ceo
     role: ceo
-    provider: claude-code
-    model: anthropic/claude-sonnet-4-20250514
+    # provider omitted → pi (the default)
+    model: openai-codex/gpt-6-luna
     system_prompt: agents/ceo.md   # optional: per-agent persona file
 
   - name: engineer
     role: engineer
-    provider: opencode
-    model: openai/gpt-4o
+    provider: claude-code
+    model: sonnet
 
 gateways:
   telegram:
@@ -54,6 +54,7 @@ risk_policy:
 
 | Provider | CLI binary | `provider` value |
 |----------|-----------|-----------------|
+| [pi](https://pi.dev) (default) | `pi` | `pi` (or omit `provider`) |
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude` | `claude-code` |
 | [OpenCode](https://opencode.ai) | `opencode` | `opencode` |
 
@@ -61,6 +62,7 @@ risk_policy:
 
 The `model` field is optional. When set, the adapter passes `--model <model>` to the CLI.
 
+- **pi**: `provider/id` or a bare `id`, optionally with a `:<thinking>` suffix (e.g. `openai-codex/gpt-6-luna`, `sonnet:high`). The model is checked at startup against `pi --list-models` (with the agent's `extensions` loaded), so a typo fails materialize instead of every task.
 - **Claude Code**: accepts aliases (`sonnet`, `opus`) or full names (`anthropic/claude-sonnet-4-20250514`)
 - **OpenCode**: requires `provider/model` format (e.g. `openai/gpt-4o`, `opencode/mimo-v2.5-free`)
 
@@ -72,6 +74,7 @@ All agents run in **isolated mode** by default, independent of the user's local 
 
 | Provider | Isolation flags |
 |----------|----------------|
+| pi | `-ne --no-session --no-skills --no-prompt-templates --no-context-files --no-approve --offline` — always applied; with MCP also `-e builtin:mcp` + the adapter's own extension and `--tools read,bash,edit,write,mcp__framework__*` |
 | Claude Code | `--no-session-persistence --setting-sources "" --disable-slash-commands` — always applied |
 | OpenCode | `--pure` — always applied |
 
@@ -83,6 +86,29 @@ flags above are the closest substitute that keeps MCP working, but they do not f
 `--safe-mode`'s isolation — CLAUDE.md auto-discovery, plugins, custom commands/agents, and output
 styles/workflows/themes/keybindings still load normally, because no flag in the installed CLI
 disables them while leaving MCP reachable. See `AGENTS.md` for the full rationale.
+
+For pi, `-ne` disables every discovered, configured, and built-in extension — including
+providers that come from extensions (such as `pi-claude-bridge`). Add the ones an agent needs
+with the pi-only `extensions` allowlist:
+
+```yaml
+agents:
+  - name: ceo
+    role: ceo
+    model: claude-bridge/claude-sonnet-4-6
+    extensions:
+      - /home/me/.pi/agent/npm/node_modules/pi-claude-bridge   # installed package dir; `~` is not expanded
+      - builtin:llama.cpp
+```
+
+- Each entry is a file or directory path (relative paths resolve against `company.yaml`; it must
+  exist at startup) or a `builtin:<name>` reference.
+- Package sources (`npm:`, `git:`, URLs) are rejected at load: pi silently ignores them on `-e`.
+- `extensions` is rejected for any provider other than `pi`.
+- When the framework's MCP server is wired, `--tools` hides every tool except the four built-ins
+  and the framework's own MCP tools, so tools registered by these extensions are not callable;
+  use them for providers, not for extra tools. Ambient MCP servers from `~/.pi/agent/mcp.json`
+  still connect but their tools are hidden for the same reason.
 
 #### System prompts and the `agents/` folder
 
@@ -98,6 +124,7 @@ agents:
 
 - The path is resolved relative to the directory of `company.yaml`.
 - The file must exist at startup; the framework fails fast with a descriptive error if it is missing.
+- **pi**: the file is passed via `--append-system-prompt <absolute-path>` (appended to pi's own system prompt).
 - **Claude Code**: the file is passed via `--system-prompt-file <absolute-path>`.
 - **OpenCode**: the file content is read once at startup and prepended to every task as `[SYSTEM]\n{content}\n\n`.
 
@@ -205,7 +232,7 @@ company.yaml
 ## Key Concepts
 
 - **Company as code**: Your company is a YAML file, reviewable in a PR, version-controlled
-- **Agent isolation**: Agents always run with isolation flags (`--no-session-persistence --setting-sources "" --disable-slash-commands` for Claude Code, `--pure` for OpenCode), independent of local config — see [Agent isolation](#agent-isolation) for the accepted tradeoff
+- **Agent isolation**: Agents always run with isolation flags (`-ne` plus no skills/templates/context files/session for pi, `--no-session-persistence --setting-sources "" --disable-slash-commands` for Claude Code, `--pure` for OpenCode), independent of local config — see [Agent isolation](#agent-isolation) for the accepted tradeoff
 - **System prompts**: Per-agent persona files enforce declared roles; loaded once at startup
 - **Risk policy**: Actions are classified as `safe`, `risky`, or `hard-deny` based on role
 - **Human-in-the-loop**: Risky actions escalate to the monitoring UI for approval
