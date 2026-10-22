@@ -36,12 +36,17 @@ Add a `pi` provider adapter (pi coding agent CLI, verified on pi 1.2.0) next to 
 
 ## Tasks
 
-- T1 [S1,S3,S5,S6,S7,S8] adapters/pi RunTask + fakepi + tests — inline — commit: pending
-- T2 [S9] ProbeModel — inline — commit: pending
+- T1 [S1,S3,S5,S6,S7,S8] adapters/pi RunTask + fakepi + tests — gentle-ai-worker — commit: 615e5db (done)
+- T2 [S9] ProbeModel — gentle-ai-worker — commit: 615e5db (done)
 - T3 [S2,S4] config: `extensions` field, default provider `pi` — inline — commit: 9174d48 (done)
-- T4 [S1,S2,S4] wire.go `pi` case — inline — commit: pending
-- T5 [S1-S9] docs: AGENTS.md, README, company.yaml, openspec change — inline — commit: pending
+- T4 [S1,S2,S4] wire.go `pi` case — inline — commit: 3b86b94 (done)
+- T5 [S1-S9] docs: AGENTS.md, README, company.yaml, openspec change — inline — commit: 3b86b94 (done; company.yaml is gitignored, local only)
 - T6 verify (security: token/tool isolation) — gentle-ai-verify — pending
+
+## Delivery slices
+
+~1800 authored lines, past the 400-line review slice. Proposed chained PRs, one per commit:
+PR1 config (9174d48) → PR2 adapters/pi (615e5db, ~1270 lines, mostly tests + fake CLI) → PR3 wire + docs (3b86b94).
 
 ## Log
 
