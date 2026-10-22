@@ -22,6 +22,33 @@ It's very important to run all the tests before pushing a PR. There is a CI that
 
 The provider adapters drive external agent CLIs as subprocesses and parse their structured output.
 
+- **pi** (default provider — an agent that omits `provider` gets `pi`): verified against
+  `pi 1.2.0`. The adapter runs `pi -p --mode json --no-session -ne --no-skills
+  --no-prompt-templates --no-context-files --no-approve --offline`, writes the task input to
+  **stdin** (no argv ceiling, like claude), and passes `system_prompt` as
+  `--append-system-prompt <path>` (pi appends the file's contents to its own system prompt).
+  Exit code is NOT a success signal: pi exits 0 when the model call fails and reports it as a
+  final assistant `message_end` with `stopReason: "error"` (or `"aborted"`) and an
+  `errorMessage`; the adapter turns that into a RunTask error. Output is the `text` blocks of
+  assistant `message_end` messages, in order.
+  MCP delivery: pi reads MCP servers only from persisted `mcp.json` files, so the adapter
+  instead writes a static 0600 temp extension (`-e <file>.ts`, removed on exit) that calls
+  `pi.registerMcpServer("framework", {url, headers, exposure: "direct"})`, reading the URL and
+  bearer token from the subprocess-scoped `ASF_MCP_URL`/`ASF_MCP_TOKEN` env vars; the token is
+  never on argv or in the file. `-e builtin:mcp` re-enables the built-in MCP client that `-ne`
+  disables.
+  Isolation: `-ne` disables every discovered, configured and built-in extension, including
+  providers that come from extensions (e.g. `pi-claude-bridge`). Ambient servers from
+  `~/.pi/agent/mcp.json` still connect under `-ne`, and a `direct`-exposed one would let the
+  agent act outside the risk policy, so with MCP wired the adapter passes
+  `--tools read,bash,edit,write,mcp__framework__*` (the counterpart of claude's
+  `--strict-mcp-config`). Accepted tradeoff: tools registered by allowlisted extensions are
+  hidden by that same allowlist.
+  Per-agent `extensions:` (pi only) adds `-e <entry>` for each entry: a file/directory path
+  (resolved against company.yaml, must exist) or `builtin:<name>`. Package sources (`npm:`,
+  `git:`, URLs) are rejected at load because `pi -e npm:<pkg>` is silently ignored (verified).
+  `ProbeModel` checks the configured model against `pi -ne [-e ...] --offline --list-models`.
+
 - **opencode**: the adapter requires `--format json` NDJSON output support. Verified locally with
   `opencode 1.18.31`; no upstream confirmation of the exact floor is available as of this change.
   Older versions that do not emit NDJSON on `--format json` will yield empty parsed output.
