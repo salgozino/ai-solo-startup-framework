@@ -35,6 +35,11 @@ const defaultOutputLimit int64 = 1 << 20 // 1 MiB
 // and skipped without parsing rather than buffered without bound.
 const maxLineSize = 8 << 20 // 8 MiB
 
+// killWaitDelay is the backstop after cancellation: even if a descendant escaped the
+// process group and still holds the stdout/stderr descriptors, Wait returns and the pipes
+// are force-closed this long after the kill, so RunTask cannot outlive its deadline unboundedly.
+const killWaitDelay = 5 * time.Second
+
 // defaultTokenGrace extends the invocation deadline before it is used as the MCP
 // token expiry, so the token remains valid for the brief window between process
 // exit and the adapter draining it.
@@ -219,6 +224,8 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 
 	cmd := exec.CommandContext(ctx, a.piBin, args...) //nolint:gosec // argv slice, no shell
 	cmd.Stdin = strings.NewReader(input)
+	configureProcessTree(cmd)
+	cmd.WaitDelay = killWaitDelay
 	if mcpEnv != nil {
 		// Subprocess-scoped only — never os.Setenv.
 		cmd.Env = append(os.Environ(), mcpEnv...)
@@ -238,7 +245,22 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 	// Consume the WHOLE stdout line by line (so a failure past the cap is still seen and the
 	// child never blocks on a full pipe). Reads until EOF (process exit) — never waits on a
 	// terminal event line.
+	// The read runs before Wait, so Wait's WaitDelay cannot unblock it; close the pipe
+	// ourselves killWaitDelay after cancellation in case a descendant escaped the group.
+	parseDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			select {
+			case <-parseDone:
+			case <-time.After(killWaitDelay):
+				stdout.Close()
+			}
+		case <-parseDone:
+		}
+	}()
 	parsed, readErr := parseStream(stdout, a.limit)
+	close(parseDone)
 
 	waitErr := cmd.Wait()
 
@@ -456,6 +478,7 @@ var thinkingSuffixes = []string{"off", "minimal", "low", "medium", "high", "xhig
 func (a *Adapter) ProbeModel(ctx context.Context) error {
 	if a.model == "" {
 		cmd := exec.CommandContext(ctx, a.piBin, "--version") //nolint:gosec // argv slice, no shell
+		configureProcessTree(cmd)
 		var stderrBuf bytes.Buffer
 		cmd.Stderr = &stderrBuf
 		cmd.Stdout = io.Discard
@@ -475,6 +498,8 @@ func (a *Adapter) ProbeModel(ctx context.Context) error {
 	}
 	args = append(args, "--offline", "--list-models")
 	cmd := exec.CommandContext(ctx, a.piBin, args...) //nolint:gosec // argv slice, no shell
+	configureProcessTree(cmd)
+	cmd.WaitDelay = killWaitDelay
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf

@@ -13,6 +13,8 @@
 //	"big-text"    — one assistant message_end whose text is 20000 'y' bytes
 //	"long-line"   — a 9 MiB single line (an assistant message_end with text SKIPPED), then
 //	                an assistant message_end with text AFTER
+//	"hang-descendant" — re-execs itself as a sleeping child that inherits stdout/stderr, writes
+//	                the child's PID to FAKEPI_PID_FILE, then sleeps
 //	"model-error" — assistant message_end with stopReason "error" and errorMessage, EXIT 0
 //	"aborted"     — assistant message_end with stopReason "aborted", exit 0
 //	anything else — echoes the prompt as the assistant text (after a thinking block)
@@ -40,6 +42,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -59,6 +62,9 @@ func (h *staticOAuthHandler) Authorize(_ context.Context, _ *http.Request, _ *ht
 }
 
 func main() {
+	if os.Getenv("FAKEPI_DESCENDANT") == "1" {
+		time.Sleep(24 * time.Hour)
+	}
 	if f := os.Getenv("FAKEPI_ARGV_FILE"); f != "" {
 		_ = os.WriteFile(f, []byte(strings.Join(os.Args, "\n")), 0o600)
 	}
@@ -120,6 +126,14 @@ func main() {
 		fmt.Print(strings.Repeat("x", 1<<20))
 	case "raw-text":
 		fmt.Println("plain text, not an event stream")
+	case "hang-descendant":
+		child := exec.Command(os.Args[0])
+		child.Env = append(os.Environ(), "FAKEPI_DESCENDANT=1")
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		if err := child.Start(); err == nil {
+			_ = os.WriteFile(os.Getenv("FAKEPI_PID_FILE"), []byte(fmt.Sprint(child.Process.Pid)), 0o600)
+		}
+		time.Sleep(24 * time.Hour)
 	case "big-error":
 		emitHeader(input)
 		for i := 0; i < 64; i++ {
