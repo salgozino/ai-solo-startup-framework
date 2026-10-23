@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 
+	sdka2a "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/salgozino/ai-solo-startup-framework/ui"
 )
 
@@ -30,7 +31,7 @@ func (a *companyUIAdapter) verdictID(agent, task string) string {
 
 func (a *companyUIAdapter) ListTasks() ([]ui.TaskRecord, error) {
 	out := make([]ui.TaskRecord, 0)
-	for _, rt := range a.runtimes {
+	for i, rt := range a.runtimes {
 		tasks, err := rt.uiAdap.ListTasks()
 		if err != nil {
 			return nil, err
@@ -39,6 +40,8 @@ func (a *companyUIAdapter) ListTasks() ([]ui.TaskRecord, error) {
 		for _, task := range tasks {
 			task.Agent = agent
 			task.VerdictID = a.verdictID(agent, task.TaskID)
+			// Mirrors FollowUp's eligibility: CEO only, terminal only.
+			task.CanFollowUp = i == 0 && sdka2a.TaskState(task.State).Terminal()
 			if task.FollowUpOf != "" {
 				// The UI keys tasks by verdict ID, so the link must use the same key.
 				task.FollowUpOf = a.verdictID(agent, task.FollowUpOf)

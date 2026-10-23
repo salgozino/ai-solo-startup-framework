@@ -28,23 +28,13 @@ function displayLabel(state) {
   return STATE_LABELS[state] || state || '—';
 }
 
-// TERMINAL_STATES can be answered with a follow-up ("Request changes").
-const TERMINAL_STATES = {
-  'TASK_STATE_COMPLETED': true,
-  'TASK_STATE_FAILED':    true,
-  'TASK_STATE_REJECTED':  true,
-  'TASK_STATE_CANCELED':  true,
-};
-
 function taskKey(t) { return t.verdict_id || t.task_id; }
 
-// buildTree groups tasks into nodes {task, children, delegated}. A task listed
+// buildTree groups tasks into nodes {task, children}. A task listed
 // as a delegation of another listed task becomes that task's child (delegation
 // order, recursively) and is not repeated at top level; a child whose parent
 // is not listed stays top-level. A task whose follow_up_of names a listed task
 // is nested under it, after its delegations. Top-level order is newest first.
-// delegated marks delegation children: only the CEO's own cards (top-level and
-// follow-up nodes) can be followed up.
 function buildTree(tasks) {
   var byId = {}, byKey = {};
   tasks.forEach(function(t) {
@@ -68,31 +58,31 @@ function buildTree(tasks) {
     }
   });
   var seen = {};
-  function node(t, delegated) {
+  function node(t) {
     seen[taskKey(t)] = true;
     var children = [];
     (t.delegations || []).forEach(function(d) {
       var c = byId[d.task_id];
-      if (c && c !== t && !seen[taskKey(c)]) children.push(node(c, true));
+      if (c && c !== t && !seen[taskKey(c)]) children.push(node(c));
     });
     (followUps[taskKey(t)] || []).forEach(function(c) {
-      if (!seen[taskKey(c)]) children.push(node(c, false));
+      if (!seen[taskKey(c)]) children.push(node(c));
     });
-    return { task: t, children: children, delegated: delegated };
+    return { task: t, children: children };
   }
   return tasks.slice().reverse().filter(function(t) {
     return !isChild[t.task_id] && !isFollowUp[taskKey(t)];
-  }).map(function(t) { return node(t, false); });
+  }).map(node);
 }
 
 function renderNode(n) {
   var kids = n.children.length
     ? '<div class="task-children">' + n.children.map(renderNode).join('') + '</div>'
     : '';
-  return '<div class="task-node">' + renderCard(n.task, !n.delegated) + kids + '</div>';
+  return '<div class="task-node">' + renderCard(n.task) + kids + '</div>';
 }
 
-function renderCard(t, canFollowUp) {
+function renderCard(t) {
   const key = taskKey(t);
   const label  = displayLabel(t.state);
   const isInput = t.state === 'TASK_STATE_INPUT_REQUIRED' && !t.awaiting_peer;
@@ -108,7 +98,8 @@ function renderCard(t, canFollowUp) {
   const followUpOf = t.follow_up_of
     ? `<div class="task-followup-of">Follow-up of ${escHtml(t.follow_up_of)}</div>`
     : '';
-  const followUp = canFollowUp && TERMINAL_STATES[t.state]
+  // The server decides eligibility (terminal CEO tasks only).
+  const followUp = t.can_follow_up
     ? `<div class="task-followup">
          <button class="btn btn-send" onclick="toggleFollowUp('${key}')">Request changes</button>
          <div class="task-followup-form" style="display:none">

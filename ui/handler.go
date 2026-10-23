@@ -33,6 +33,10 @@ type TaskRecord struct {
 	// Delegations are the peer tasks this task created, in delegation order. The
 	// UI nests each one under this task instead of listing it as independent.
 	Delegations []Delegation `json:"delegations,omitempty"`
+	// CanFollowUp: the client may answer this task with POST /api/follow-up. Set
+	// only on terminal tasks of the agent the human talks to (the CEO); the UI
+	// offers "Request changes" on exactly these cards.
+	CanFollowUp bool `json:"can_follow_up,omitempty"`
 	// FollowUpOf is the key (as listed by the UI) of the terminal task this task
 	// follows up; the UI nests it under that task.
 	FollowUpOf string `json:"follow_up_of,omitempty"`

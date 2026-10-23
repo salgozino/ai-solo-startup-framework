@@ -251,7 +251,8 @@ curl -X POST http://127.0.0.1:8080/api/follow-up \
   -d '{"task_id": "<id as listed by /api/tasks>", "message": "not what I wanted, do X instead"}'
 ```
 
-`task_id` is the task's `verdict_id` (or `task_id` when absent). Responses: `202 {"ok":true}`
+`/api/tasks` marks the eligible tasks with `"can_follow_up": true`. `task_id` is the task's
+`verdict_id` (or `task_id` when absent). Responses: `202 {"ok":true}`
 when submitted; `400` for an invalid body or blank message; `404` when no CEO task has that id
 (tasks of other agents included); `409` when the task has not finished. A refused request
 creates no task.

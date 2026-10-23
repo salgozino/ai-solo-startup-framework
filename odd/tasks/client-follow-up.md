@@ -46,3 +46,7 @@ OpenSpec change: `openspec/changes/client-follow-up/`.
   a2asrv handler (new task, same ContextID, followed task unchanged). Not verified: the UI in a
   real browser. Known gap: a delegation child whose parent is not listed shows "Request changes";
   the request returns 404 and the UI shows a failure toast.
+- **L5** — User: "Ok, arregla lo del boton." / "1 solo pr, no hay problema" / Playwright front
+  tests go in a separate worktree, "pero no en este pr". Fix: `/api/tasks` exposes
+  `can_follow_up` (terminal CEO tasks only, set in `companyUIAdapter.ListTasks`); the UI shows
+  "Request changes" only when it is true. Closes the L4 known gap.

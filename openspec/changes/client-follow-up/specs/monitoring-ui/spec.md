@@ -13,8 +13,9 @@ endpoint MUST answer:
 - `404 Not Found` when no CEO task has that key (delegated tasks included);
 - `409 Conflict` when the task is not in a terminal state.
 
-A refused request MUST NOT create any task. Every terminal CEO task card MUST offer a
-"Request changes" control with a message box, and a follow-up MUST be rendered nested under the
+A refused request MUST NOT create any task. `GET /api/tasks` MUST mark exactly the terminal CEO
+tasks with `"can_follow_up": true`, and the UI MUST offer the "Request changes" control on exactly
+those cards (never on another agent's task, even one listed at top level) with a message box, and a follow-up MUST be rendered nested under the
 task it follows.
 
 #### Scenario: Requesting changes on a completed CEO task

@@ -409,3 +409,30 @@ func TestCompanyUI_ListTasksExposesFollowUpOf(t *testing.T) {
 		}
 	}
 }
+
+// S5: only terminal CEO tasks are offered a follow-up. Peers' tasks are never
+// offered one, whatever their state, so an orphan delegation child listed at
+// top level shows no "Request changes" control.
+func TestCompanyUI_CanFollowUpOnlyOnTerminalCEOTasks(t *testing.T) {
+	done := string(sdka2a.TaskStateCompleted)
+	runtimes, _ := uiRuntimesWith(t, map[string][]supervisor.TaskRecord{
+		"ceo": {
+			{TaskID: "c-done", State: done},
+			{TaskID: "c-failed", State: string(sdka2a.TaskStateFailed)},
+			{TaskID: "c-working", State: string(sdka2a.TaskStateWorking)},
+		},
+		"engineer": {{TaskID: "e-done", State: done}},
+	}, "ceo", "engineer")
+	tasks, err := (&companyUIAdapter{runtimes: runtimes}).ListTasks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"ceo/c-done": true, "ceo/c-failed": true, "ceo/c-working": false, "ceo/shared-id": false, "engineer/e-done": false, "engineer/shared-id": false}
+	got := map[string]bool{}
+	for _, task := range tasks {
+		got[task.Agent+"/"+task.TaskID] = task.CanFollowUp
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("can_follow_up = %v, want %v", got, want)
+	}
+}
