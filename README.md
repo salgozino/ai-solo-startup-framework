@@ -58,6 +58,22 @@ risk_policy:
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude` | `claude-code` |
 | [OpenCode](https://opencode.ai) | `opencode` | `opencode` |
 
+#### Round limit
+
+The optional `max_rounds` field (any provider) caps the provider rounds of one task for that
+agent. It defaults to `8` and must be an integer from `1` to `50`; anything else fails startup
+with an error naming the agent and the field. When a delegating task reaches the cap it fails
+with `supervisor: provider round limit (N) exhausted after delegation`. The agent is not told
+its budget automatically, so the system prompt should state it (and reserve the last round for
+the final action).
+
+```yaml
+agents:
+  - name: ceo
+    role: ceo
+    max_rounds: 12
+```
+
 #### Model selection
 
 The `model` field is optional. When set, the adapter passes `--model <model>` to the CLI.

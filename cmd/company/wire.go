@@ -426,6 +426,7 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 			Gateway:         gw,
 			Delegator:       delegator,
 			DelegateTimeout: opts.delegateTimeout,
+			MaxRounds:       agCfg.MaxRounds,
 			Role:            agCfg.Role,
 			PolicyConfig:    cfg.RiskPolicy,
 		})

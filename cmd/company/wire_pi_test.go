@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/salgozino/ai-solo-startup-framework/config"
+	"github.com/salgozino/ai-solo-startup-framework/core/port/fake"
 )
 
 // TestMaterializeAgents_PiProviderWiresAdapterWithModelAndExtensions verifies that
@@ -99,5 +101,38 @@ func TestMaterializeAgents_PiMCPServerProbeFailureAbortsMaterialize(t *testing.T
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not contain %q", err.Error(), want)
 		}
+	}
+}
+
+// TestMaterializeAgents_MaxRoundsReachesSupervisor pins config max_rounds -> supervisor cap.
+func TestMaterializeAgents_MaxRoundsReachesSupervisor(t *testing.T) {
+	t.Setenv("TEST_AUTH_TOKEN_MAXR", "secret")
+	cfg := &config.CompanyConfig{
+		Tenant:       "acme",
+		AuthTokenEnv: "TEST_AUTH_TOKEN_MAXR",
+		RiskPolicy:   map[string]config.Policy{},
+		Agents: []config.AgentConfig{
+			{Name: "ceo", Role: "ceo", Provider: "pi", MaxRounds: 12},
+			{Name: "eng", Role: "engineer", Provider: "pi"},
+		},
+	}
+	runtimes, err := materializeAgents(cfg, wireOptions{
+		stderr: &bytes.Buffer{}, storeDir: t.TempDir(), providerOverride: &fake.Provider{},
+		authTokenOverride: "test-bearer-token",
+	})
+	if err != nil {
+		t.Fatalf("materializeAgents: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, rt := range runtimes {
+			_ = rt.srv.Shutdown(context.Background())
+		}
+	})
+	got := map[string]int{}
+	for i, rt := range runtimes {
+		got[cfg.Agents[i].Name] = rt.sup.MaxRounds()
+	}
+	if got["ceo"] != 12 || got["eng"] != 8 {
+		t.Errorf("MaxRounds = %v; want ceo 12, eng 8 (unset -> default)", got)
 	}
 }

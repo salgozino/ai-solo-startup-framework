@@ -23,10 +23,10 @@ import (
 // is unset (design D10).
 const defaultDelegateTimeout = 10 * time.Minute
 
-// maxProviderRounds bounds the feedback loop. Rounds are counted from the persisted
+// defaultMaxRounds bounds the feedback loop. Rounds are counted from the persisted
 // transcript (assistant turns), so the cap holds across park/resume boundaries and
 // restarts. A delegation on the last round fails clearly.
-const maxProviderRounds = 8
+const defaultMaxRounds = 8
 
 // Config holds the parameters needed to construct a Supervisor.
 type Config struct {
@@ -54,6 +54,8 @@ type Config struct {
 	// the delegating task FAILS naming the peer role and this duration; the peer's
 	// own task is never canceled.
 	DelegateTimeout time.Duration
+	// MaxRounds caps the provider rounds of one task. Zero means defaultMaxRounds.
+	MaxRounds int
 	// Role is the agent role declared in company.yaml (e.g. "ceo", "engineer").
 	// Used for policy capability checks.
 	Role string
@@ -563,8 +565,8 @@ func (s *Supervisor) runRounds(
 			return
 		}
 		s.notify()
-		if assistantTurns(rec.Turns) >= maxProviderRounds {
-			rec.Output = fmt.Sprintf("supervisor: provider round limit (%d) exhausted after delegation", maxProviderRounds)
+		if assistantTurns(rec.Turns) >= s.MaxRounds() {
+			rec.Output = fmt.Sprintf("supervisor: provider round limit (%d) exhausted after delegation", s.MaxRounds())
 			s.markFailed(rec)
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, outputMessage(rec.Output)), nil) //nolint
 			return
@@ -1002,4 +1004,12 @@ func errorMessage(err error) *a2a.Message {
 		return nil
 	}
 	return a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("task execution failed"))
+}
+
+// MaxRounds reports the effective provider-round cap (the default when unset).
+func (s *Supervisor) MaxRounds() int {
+	if s.cfg.MaxRounds > 0 {
+		return s.cfg.MaxRounds
+	}
+	return defaultMaxRounds
 }

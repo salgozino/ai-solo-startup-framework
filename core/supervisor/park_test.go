@@ -215,8 +215,8 @@ func TestPark_RoundCapSurvivesResume(t *testing.T) {
 	collectStatusEvents(context.Background(), h.sup, newExecCtx("park-5", "go"))
 
 	rec := waitForRecord(t, h.sup, "park-5", isState(sdka2a.TaskStateFailed))
-	if got := h.prov.RunTaskCallCount(); got != maxProviderRounds {
-		t.Errorf("RunTask calls = %d, want exactly %d", got, maxProviderRounds)
+	if got := h.prov.RunTaskCallCount(); got != defaultMaxRounds {
+		t.Errorf("RunTask calls = %d, want exactly %d", got, defaultMaxRounds)
 	}
 	if !strings.Contains(rec.Output, "round limit") {
 		t.Errorf("exhaustion must be explicit; Output = %q", rec.Output)
@@ -452,5 +452,52 @@ func TestStopWatchers_NoWatcherArmsAfterStop(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("StopWatchers blocked on a watcher armed after the stop")
+	}
+}
+
+// runDelegatingForever drives a CEO whose provider delegates on every round and
+// returns the failed record once the round cap trips.
+func runDelegatingForever(t *testing.T, maxRounds int, id string) (TaskRecord, *parkHarness) {
+	t.Helper()
+	h := newParkSupervisor(t, nil, peerWorking(), peerDone("again"))
+	h.sup.cfg.MaxRounds = maxRounds
+	h.prov.ReturnRunResults = nil
+	h.prov.ReturnRunResult = port.ProviderResult{
+		Output: "more", ActionIntents: []port.ActionIntent{delegateIntent("engineer", "again")},
+	}
+	collectStatusEvents(context.Background(), h.sup, newExecCtx(id, "go"))
+	return waitForRecord(t, h.sup, id, isState(sdka2a.TaskStateFailed)), h
+}
+
+// S2: Config.MaxRounds replaces the default cap, in the count and in the failure text.
+func TestConfig_MaxRoundsLowersCap(t *testing.T) {
+	rec, h := runDelegatingForever(t, 3, "mr-3")
+	if got := h.prov.RunTaskCallCount(); got != 3 {
+		t.Errorf("RunTask calls = %d, want exactly 3", got)
+	}
+	const want = "supervisor: provider round limit (3) exhausted after delegation"
+	if !strings.Contains(rec.Output, want) {
+		t.Errorf("Output = %q, want it to contain %q", rec.Output, want)
+	}
+}
+
+func TestConfig_MaxRoundsRaisesCapPastDefault(t *testing.T) {
+	rec, h := runDelegatingForever(t, 12, "mr-12")
+	if got := h.prov.RunTaskCallCount(); got != 12 {
+		t.Errorf("RunTask calls = %d, want exactly 12", got)
+	}
+	if !strings.Contains(rec.Output, "round limit (12)") {
+		t.Errorf("Output = %q, want round limit (12)", rec.Output)
+	}
+}
+
+func TestSupervisor_MaxRoundsAccessor(t *testing.T) {
+	h := newParkSupervisor(t, nil)
+	if got := h.sup.MaxRounds(); got != 8 {
+		t.Errorf("default MaxRounds() = %d, want 8", got)
+	}
+	h.sup.cfg.MaxRounds = 5
+	if got := h.sup.MaxRounds(); got != 5 {
+		t.Errorf("MaxRounds() = %d, want 5", got)
 	}
 }
