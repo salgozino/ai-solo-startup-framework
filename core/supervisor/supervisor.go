@@ -92,6 +92,9 @@ type Supervisor struct {
 	watchMu  sync.Mutex
 	watchers map[string]*watcher
 	watchWG  sync.WaitGroup
+	// watchStopped is set once the watchers are cancelled (Shutdown, StopWatchers);
+	// armWatcher then starts nothing. Guarded by watchMu.
+	watchStopped bool
 }
 
 // New creates a Supervisor in STARTING state.

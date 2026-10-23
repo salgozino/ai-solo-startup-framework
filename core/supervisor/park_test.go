@@ -432,3 +432,25 @@ func TestPark_WatcherDoesNotResumeHumanEscalation(t *testing.T) {
 		t.Errorf("watcher resumed a human escalation %d times", n)
 	}
 }
+
+// A resume that re-parks while StopWatchers runs arms a fresh watcher after the
+// cancel sweep. That watcher was never cancelled, so StopWatchers' Wait blocked
+// until DelegateTimeout (CI run 39973727435 hung 10m in
+// TestDelegations_ChainedApprovalPeerRecorded). Once stopped, no watcher may start.
+func TestStopWatchers_NoWatcherArmsAfterStop(t *testing.T) {
+	h := newParkSupervisor(t, nil, peerWorking())
+	h.sup.StopWatchers()
+
+	h.sup.armWatcher("T1", "engineer", "P1")
+
+	if n := h.sup.watcherCount(); n != 0 {
+		t.Errorf("watchers after StopWatchers = %d, want 0", n)
+	}
+	done := make(chan struct{})
+	go func() { h.sup.StopWatchers(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StopWatchers blocked on a watcher armed after the stop")
+	}
+}

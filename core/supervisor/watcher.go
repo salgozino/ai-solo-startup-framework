@@ -67,12 +67,20 @@ func (s *Supervisor) repark(execCtx *a2asrv.ExecutorContext, yield func(a2a.Even
 	s.armWatcher(rec.TaskID, rec.AwaitingPeerRole, rec.AwaitingPeerTaskID)
 }
 
-// armWatcher starts the peer watcher for taskID, replacing any earlier one.
+// armWatcher starts the peer watcher for taskID, replacing any earlier one. After the
+// watchers were cancelled it starts nothing: a resume that re-parks concurrently with
+// Shutdown or StopWatchers would otherwise arm a watcher the cancel sweep never saw,
+// which keeps polling (and blocks StopWatchers' Wait) until DelegateTimeout.
 func (s *Supervisor) armWatcher(taskID, role, peerTaskID string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	w := &watcher{cancel: cancel}
 
 	s.watchMu.Lock()
+	if s.watchStopped {
+		s.watchMu.Unlock()
+		cancel()
+		return
+	}
 	if old := s.watchers[taskID]; old != nil {
 		old.cancel()
 	}
@@ -174,6 +182,7 @@ func (s *Supervisor) stopWatcher(taskID string) {
 func (s *Supervisor) cancelWatchers() {
 	s.watchMu.Lock()
 	defer s.watchMu.Unlock()
+	s.watchStopped = true
 	for id, w := range s.watchers {
 		w.cancel()
 		delete(s.watchers, id)
