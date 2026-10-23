@@ -222,6 +222,7 @@ Open **`http://127.0.0.1:8080`** — this is the primary way to interact with yo
 - Send tasks to the CEO agent
 - Monitor task state in real time; tasks an agent delegates to other agents appear nested under the delegating task
 - Approve or reject risky actions (e.g. sending a Telegram message)
+- Request changes on a finished CEO task (see below)
 
 **What happens when you send a task:**
 
@@ -233,6 +234,28 @@ Open **`http://127.0.0.1:8080`** — this is the primary way to interact with yo
 
 > **Note:** The Telegram gateway is outbound only — you don't send messages to the bot,
 > the bot sends messages to you after you approve the action in the UI.
+
+**Requesting changes on a finished task:**
+
+Every terminal CEO task (`COMPLETED`, `FAILED`, `REJECTED` or `CANCELED`) has a
+**Request changes** button. Write what you want different and press **Send**: the framework
+starts a *new* CEO task linked to the old one (the old task is left untouched). The new task
+inherits the whole thread — the previous transcript, its outcome and your message — and is
+shown nested under the task it follows. Rounds are counted only from the follow-up's own turns.
+
+The same flow is available over HTTP:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/follow-up \
+  -H 'Content-Type: application/json' \
+  -d '{"task_id": "<id as listed by /api/tasks>", "message": "not what I wanted, do X instead"}'
+```
+
+`/api/tasks` marks the eligible tasks with `"can_follow_up": true`. `task_id` is the task's
+`verdict_id` (or `task_id` when absent). Responses: `202 {"ok":true}`
+when submitted; `400` for an invalid body or blank message; `404` when no CEO task has that id
+(tasks of other agents included); `409` when the task has not finished. A refused request
+creates no task.
 
 #### Advanced: direct A2A endpoint
 

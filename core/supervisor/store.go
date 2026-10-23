@@ -76,6 +76,17 @@ type TaskRecord struct {
 	Delegations []Delegation `json:"delegations,omitempty"`
 	// Output is the result produced by the provider when the task completes.
 	Output string `json:"output,omitempty"`
+	// ContextID is the A2A context the task belongs to. A follow-up reuses the
+	// context of the task it follows. Zero-value safe.
+	ContextID string `json:"context_id,omitempty"`
+	// FollowUpOf is the terminal task this task follows up on: the client's answer
+	// to a finished task, executed as a new task because A2A forbids messages to a
+	// terminal one. Empty for a task that follows nothing.
+	FollowUpOf string `json:"follow_up_of,omitempty"`
+	// BaseTurns is how many leading Turns a follow-up inherited from the chain it
+	// follows. Rounds are counted after them, so inherited rounds never count
+	// toward the cap. Zero-value safe: zero means nothing was inherited.
+	BaseTurns int `json:"base_turns,omitempty"`
 }
 
 // Delegation is one peer task created by a delegate_task intent: the role that

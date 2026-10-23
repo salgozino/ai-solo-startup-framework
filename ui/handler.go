@@ -33,6 +33,13 @@ type TaskRecord struct {
 	// Delegations are the peer tasks this task created, in delegation order. The
 	// UI nests each one under this task instead of listing it as independent.
 	Delegations []Delegation `json:"delegations,omitempty"`
+	// CanFollowUp: the client may answer this task with POST /api/follow-up. Set
+	// only on terminal tasks of the agent the human talks to (the CEO); the UI
+	// offers "Request changes" on exactly these cards.
+	CanFollowUp bool `json:"can_follow_up,omitempty"`
+	// FollowUpOf is the key (as listed by the UI) of the terminal task this task
+	// follows up; the UI nests it under that task.
+	FollowUpOf string `json:"follow_up_of,omitempty"`
 }
 
 // Delegation links a task to one peer task it delegated.
@@ -59,6 +66,10 @@ type Supervisor interface {
 	PostVerdict(taskID string, approve bool) error
 	// SendTask submits a new task with the given message text.
 	SendTask(text string) error
+	// FollowUp submits text as a new task linked to the terminal task taskID.
+	// It returns ErrTaskNotFound for an unknown (or non-CEO) task and
+	// ErrNotTerminal when the task is still running; a refusal creates no task.
+	FollowUp(taskID, text string) error
 }
 
 // sseClient holds the channel for a single connected SSE client.
@@ -78,6 +89,8 @@ type sseClient struct {
 //	POST /api/approve → approve an INPUT_REQUIRED task (409 otherwise)
 //	POST /api/reject  → reject an INPUT_REQUIRED task (409 otherwise)
 //	POST /api/send    → submit a new task with a message
+//	POST /api/follow-up → request changes on a terminal CEO task: submits a new
+//	                      task linked to it (400 invalid, 404 unknown, 409 not terminal)
 type UIHandler struct {
 	sup Supervisor
 
@@ -112,6 +125,7 @@ func (h *UIHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/approve", h.handleApprove)
 	mux.HandleFunc("/api/reject", h.handleReject)
 	mux.HandleFunc("/api/send", h.handleSendTask)
+	mux.HandleFunc("/api/follow-up", h.handleFollowUp)
 }
 
 // Broadcast sends a JSON-encoded SSE 'state' event to all connected clients.
@@ -275,4 +289,48 @@ var ErrNotInputRequired = errors.New("task is not in INPUT_REQUIRED state")
 
 func isNotInputRequired(err error) bool {
 	return errors.Is(err, ErrNotInputRequired)
+}
+
+// ErrTaskNotFound is returned by FollowUp when no CEO task has the given key.
+var ErrTaskNotFound = errors.New("task not found")
+
+// ErrNotTerminal is returned by FollowUp when the task has not finished yet.
+var ErrNotTerminal = errors.New("task is not in a terminal state")
+
+// followUpRequest is the JSON body for /api/follow-up.
+type followUpRequest struct {
+	TaskID  string `json:"task_id"`
+	Message string `json:"message"`
+}
+
+// handleFollowUp handles POST /api/follow-up.
+func (h *UIHandler) handleFollowUp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req followUpRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TaskID == "" {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	req.Message = strings.TrimSpace(req.Message)
+	if req.Message == "" {
+		http.Error(w, ErrEmptyMessage.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := h.sup.FollowUp(req.TaskID, req.Message); err != nil {
+		switch {
+		case errors.Is(err, ErrTaskNotFound):
+			http.Error(w, err.Error(), http.StatusNotFound)
+		case errors.Is(err, ErrNotTerminal):
+			http.Error(w, err.Error(), http.StatusConflict)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }

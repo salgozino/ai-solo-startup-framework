@@ -142,6 +142,7 @@ func (a *supervisorUIAdapter) ListTasks() ([]ui.TaskRecord, error) {
 			AwaitingPeer:         r.AwaitingPeerRole,
 			AwaitingPeerApproval: r.AwaitingPeerApproval,
 			Delegations:          delegations,
+			FollowUpOf:           r.FollowUpOf,
 		}
 	}
 	return out, nil
@@ -196,6 +197,46 @@ func (a *supervisorUIAdapter) SendTask(text string) error {
 	msg := sdka2a.NewMessage(sdka2a.MessageRoleUser, sdka2a.NewTextPart(text))
 
 	// Fire and forget: run SendMessage in background so the UI returns immediately.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		_, _ = a.handler.SendMessage(ctx, &sdka2a.SendMessageRequest{
+			Tenant:  a.tenant,
+			Message: msg,
+		})
+	}()
+	return nil
+}
+
+// FollowUp implements ui.Supervisor.
+// It refuses, before anything is sent, a task that is unknown or not terminal;
+// otherwise it submits a new task whose message references taskID and carries its
+// context, in a background goroutine like SendTask. The old task is left untouched.
+func (a *supervisorUIAdapter) FollowUp(taskID, text string) error {
+	tasks, err := a.sup.ListTasks()
+	if err != nil {
+		return err
+	}
+	var prev *supervisor.TaskRecord
+	for i := range tasks {
+		if tasks[i].TaskID == taskID {
+			prev = &tasks[i]
+			break
+		}
+	}
+	if prev == nil {
+		return fmt.Errorf("%w: %q", ui.ErrTaskNotFound, taskID)
+	}
+	if !sdka2a.TaskState(prev.State).Terminal() {
+		return fmt.Errorf("%w: %q is %s", ui.ErrNotTerminal, taskID, prev.State)
+	}
+
+	msg := sdka2a.NewMessage(sdka2a.MessageRoleUser, sdka2a.NewTextPart(text))
+	msg.ReferenceTasks = []sdka2a.TaskID{sdka2a.TaskID(taskID)}
+	if prev.ContextID != "" {
+		msg.ContextID = prev.ContextID
+	}
+
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
