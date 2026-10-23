@@ -33,6 +33,7 @@ type delegationHarness struct {
 	prov *fake.Provider
 	gw   *fake.Gateway
 	del  *fake.Delegator
+	logs *bytes.Buffer
 }
 
 // delegateIntent builds a delegate_task intent with the {target, body} payload shape.
@@ -93,7 +94,7 @@ func newDelegatingSupervisor(
 		t.Fatalf("New: %v", err)
 	}
 	sup.MarkReady()
-	return &delegationHarness{sup: sup, prov: prov, gw: gw, del: del}
+	return &delegationHarness{sup: sup, prov: prov, gw: gw, del: del, logs: logs}
 }
 
 // run drives one new task through the supervisor and returns the terminal status

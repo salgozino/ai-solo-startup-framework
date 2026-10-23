@@ -20,6 +20,10 @@ import (
 // recorded under any other key reaches the gateway with empty text.
 const bodyArg = "body"
 
+// finishRejectedText is the error a finish_task call gets after a delegate_task intent
+// was recorded in the same invocation; the supervisor backstops the same rule.
+const finishRejectedText = "finish_task rejected: this turn delegated work. The peer's result arrives in your next turn; call finish_task then."
+
 // buildToolDescription returns the spec-mandated disclosure text for a tool of the given kind.
 // Design Decision C: description must state it records intent and does not execute.
 // It also names the body argument, so the contract is legible to the model in prose as
@@ -36,8 +40,9 @@ func buildToolDescription(kind string) string {
 	if kind == port.KindFinishTask {
 		return fmt.Sprintf(
 			"Ends the task. Pass your final answer to the user in the required %q argument; it becomes the task's result. "+
-				"Call it only when no further work or delegation results are needed. The task ends after this turn, "+
-				"even if you also delegated in the same turn. If you do not call it, a turn that delegates is continued with "+
+				"Call it only when no further work or delegation results are needed. The task ends after this turn. "+
+				"A finish_task in a turn that delegates work is rejected: the peer's result arrives in your next turn, so "+
+				"call finish_task then. If you do not call it, a turn that delegates is continued with "+
 				"the delegation results, and a turn that does not delegate ends with your reply.",
 			bodyArg)
 	}
@@ -206,6 +211,13 @@ func registerTools(srv *gomcp.Server, tenant string, policies map[string]config.
 					return buildAckResult(existingReceipt, kind, true), nil, nil
 				}
 
+				if kind == port.KindFinishTask && inv.delegated {
+					return &gomcp.CallToolResult{
+						IsError: true,
+						Content: []gomcp.Content{&gomcp.TextContent{Text: finishRejectedText}},
+					}, nil, nil
+				}
+
 				intent := port.ActionIntent{
 					Kind:    kind,
 					Payload: args,
@@ -217,6 +229,9 @@ func registerTools(srv *gomcp.Server, tenant string, policies map[string]config.
 					}, nil, nil
 				}
 
+				if kind == port.KindDelegateTask {
+					inv.delegated = true
+				}
 				receipt := newReceipt()
 				inv.dedupe[dkey] = receipt
 				return buildAckResult(receipt, kind, false), nil, nil

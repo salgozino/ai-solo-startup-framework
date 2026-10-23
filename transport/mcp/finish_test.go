@@ -118,3 +118,58 @@ func TestDedupe_IdenticalCallInLaterInvocationIsNotSwallowed(t *testing.T) {
 		}
 	}
 }
+
+const wantFinishRejected = "finish_task rejected: this turn delegated work. The peer's result arrives in your next turn; call finish_task then."
+
+// S3: finish_task after a delegate_task intent in the same invocation is an MCP
+// error with the exact rejection text, and records no finish intent. A finish in a
+// later invocation (the next turn) is accepted, and a finish-only turn is unchanged.
+func TestFinishTask_RejectedAfterDelegationInSameInvocation(t *testing.T) {
+	reg := transportmcp.NewRegistry()
+	addr := startServer(t, transportmcp.New("acme", map[string]config.Policy{port.KindDelegateTask: {}}, reg))
+	token, handle := reg.Mint("acme", "ceo", "t1", time.Now().Add(time.Hour))
+	session := connectMCPClient(t, addr, token)
+
+	if r, err := session.CallTool(context.Background(), &gomcp.CallToolParams{Name: port.KindDelegateTask, Arguments: map[string]any{"body": "x", port.TargetArg: "engineer"}}); err != nil || r.IsError {
+		t.Fatalf("delegate: err=%v result=%+v", err, r)
+	}
+	r, err := session.CallTool(context.Background(), &gomcp.CallToolParams{Name: port.KindFinishTask, Arguments: map[string]any{"body": "all done"}})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !r.IsError || len(r.Content) != 1 {
+		t.Fatalf("finish after delegation = %+v, want one isError content", r)
+	}
+	if got := r.Content[0].(*gomcp.TextContent).Text; got != wantFinishRejected {
+		t.Errorf("rejection text = %q, want %q", got, wantFinishRejected)
+	}
+	intents := handle.Drain()
+	if len(intents) != 1 || intents[0].Kind != port.KindDelegateTask {
+		t.Fatalf("intents = %+v, want only the delegate_task (no finish recorded)", intents)
+	}
+
+	// Next turn = new invocation token: finish is accepted again.
+	token2, handle2 := reg.Mint("acme", "ceo", "t1", time.Now().Add(time.Hour))
+	r2, err := connectMCPClient(t, addr, token2).CallTool(context.Background(), &gomcp.CallToolParams{Name: port.KindFinishTask, Arguments: map[string]any{"body": "all done"}})
+	if err != nil || r2.IsError {
+		t.Fatalf("finish in a later invocation: err=%v result=%+v", err, r2)
+	}
+	if got := handle2.Drain(); len(got) != 1 || got[0].Kind != port.KindFinishTask {
+		t.Errorf("intents = %+v, want the finish recorded", got)
+	}
+}
+
+// S3: the tool description tells the model a finish in a delegating turn is rejected.
+func TestFinishTask_DescriptionSaysDelegatingTurnIsRejected(t *testing.T) {
+	reg := transportmcp.NewRegistry()
+	addr := startServer(t, transportmcp.New("acme", map[string]config.Policy{}, reg))
+	token, _ := reg.Mint("acme", "ceo", "t1", time.Now().Add(time.Hour))
+	tools, err := connectMCPClient(t, addr, token).ListTools(context.Background(), nil)
+	if err != nil || len(tools.Tools) != 1 {
+		t.Fatalf("tools/err = %v/%v", tools, err)
+	}
+	desc := tools.Tools[0].Description
+	if !strings.Contains(desc, "rejected") || strings.Contains(desc, "even if you also delegated") {
+		t.Errorf("finish_task description = %q, want it to say a finish in a delegating turn is rejected", desc)
+	}
+}

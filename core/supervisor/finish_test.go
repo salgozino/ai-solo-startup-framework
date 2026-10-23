@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	a2a "github.com/a2aproject/a2a-go/v2/a2a"
@@ -15,34 +16,52 @@ func finishIntent(answer string) port.ActionIntent {
 	return port.ActionIntent{Kind: port.KindFinishTask, Payload: map[string]any{"body": answer}}
 }
 
-// T10(a): finish_task ends the loop after the turn that called it, even when the
-// same turn also delegated, and its text — not the turn's prose — is the Output.
-// finish_task is a supervisor control tool: it is absent from PolicyConfig here, so
-// reaching the policy engine would HardDeny it and end the task REJECTED.
-func TestFinishTask_EndsLoopAfterDelegatingTurn(t *testing.T) {
-	del := &fake.Delegator{Results: map[string]port.DelegationResult{
-		"engineer": {State: string(a2a.TaskStateCompleted), Output: "peer draft"},
-	}}
-	h := newDelegatingSupervisor(t, "ceo", nil, del, 0)
-	h.prov.ReturnRunResults = []port.ProviderResult{{
-		Output:        "turn prose",
-		ActionIntents: []port.ActionIntent{delegateIntent("engineer", "draft"), finishIntent("final answer")},
-	}}
-	last, rec := h.run(t, "finish-after-delegation")
-	if last.Status.State != a2a.TaskStateCompleted || rec.State != string(a2a.TaskStateCompleted) {
-		t.Fatalf("event/record = %s/%s, want COMPLETED", last.Status.State, rec.State)
+// S3 backstop: a turn that both delegates and calls finish_task (in either order)
+// does not end the task. The finish is discarded and logged, the delegation runs, and
+// the loop continues into the next round with the peer result; the task's output is
+// the next round's answer, never the discarded finish text. finish_task is a control
+// tool: it never reaches a gateway.
+func TestFinishTask_DiscardedInDelegatingTurn(t *testing.T) {
+	cases := map[string][]port.ActionIntent{
+		"finish after delegation":  {delegateIntent("engineer", "draft"), finishIntent("premature answer")},
+		"finish before delegation": {finishIntent("premature answer"), delegateIntent("engineer", "draft")},
 	}
-	if got := h.prov.RunTaskCallCount(); got != 1 {
-		t.Errorf("RunTask calls = %d, want 1 (finish_task ends the loop)", got)
-	}
-	if len(del.Calls) != 1 {
-		t.Errorf("delegations = %d, want the same-turn delegation still executed", len(del.Calls))
-	}
-	if rec.Output != "final answer" || messageText(last.Status.Message) != "final answer" {
-		t.Errorf("record/event output = %q/%q, want the finish_task text", rec.Output, messageText(last.Status.Message))
-	}
-	if len(h.gw.Calls) != 0 {
-		t.Errorf("gateway sends = %d, a control tool must never reach a gateway", len(h.gw.Calls))
+	for name, intents := range cases {
+		t.Run(name, func(t *testing.T) {
+			del := &fake.Delegator{Results: map[string]port.DelegationResult{
+				"engineer": {State: string(a2a.TaskStateCompleted), Output: "peer draft"},
+			}}
+			h := newDelegatingSupervisor(t, "ceo", nil, del, 0)
+			h.prov.ReturnRunResults = []port.ProviderResult{
+				{Output: "turn prose", ActionIntents: intents},
+				{Output: "second round answer"},
+			}
+			last, rec := h.run(t, "finish-in-delegating-turn")
+			if last.Status.State != a2a.TaskStateCompleted || rec.State != string(a2a.TaskStateCompleted) {
+				t.Fatalf("event/record = %s/%s, want COMPLETED", last.Status.State, rec.State)
+			}
+			if got := h.prov.RunTaskCallCount(); got != 2 {
+				t.Fatalf("RunTask calls = %d, want 2 (the rejected finish must not end the task)", got)
+			}
+			if len(del.Calls) != 1 {
+				t.Errorf("delegations = %d, want the delegation still executed once", len(del.Calls))
+			}
+			if in := h.prov.RunCalls[1].Input; !strings.Contains(in, "peer draft") {
+				t.Errorf("round two must carry the peer result; input = %q", in)
+			}
+			if rec.Output != "second round answer" || messageText(last.Status.Message) != "second round answer" {
+				t.Errorf("record/event output = %q/%q, want the second round's answer", rec.Output, messageText(last.Status.Message))
+			}
+			if rec.FinishRequested {
+				t.Error("the discarded finish must not linger on the record")
+			}
+			if len(h.gw.Calls) != 0 {
+				t.Errorf("gateway sends = %d, a control tool must never reach a gateway", len(h.gw.Calls))
+			}
+			if !strings.Contains(h.logs.String(), "finish.rejected") {
+				t.Errorf("log lacks finish.rejected: %s", h.logs.String())
+			}
+		})
 	}
 }
 
@@ -54,6 +73,9 @@ func TestFinishTask_AloneCompletesWithItsText(t *testing.T) {
 	}
 	if got := h.prov.RunTaskCallCount(); got != 1 {
 		t.Errorf("RunTask calls = %d, want 1", got)
+	}
+	if strings.Contains(h.logs.String(), "finish.rejected") {
+		t.Errorf("a finish-only turn must not log finish.rejected: %s", h.logs.String())
 	}
 }
 

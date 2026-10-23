@@ -451,10 +451,16 @@ func (s *Supervisor) resumeFromPeer(
 	// its watcher; cancel without waiting (the watcher may be the caller).
 	s.stopWatcher(rec.TaskID)
 	log.Info("resume.peer.done", "peer_task_id", rec.AwaitingPeerTaskID)
-	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, nil), nil) //nolint
 	rec.Turns = append(rec.Turns, port.ContextMessage{Role: "peer", Content: outcome.Output, At: time.Now()})
 	remaining := rec.RemainingIntents
 	rec.AwaitingPeerRole, rec.AwaitingPeerTaskID, rec.AwaitingPeerApproval, rec.RemainingIntents = "", "", false, nil
+	// The parked record is INPUT_REQUIRED; persist WORKING before the next round so
+	// the task list and state broadcasts do not show a verdict prompt nobody needs.
+	// Anything that parks or escalates again overwrites this state itself.
+	rec.State = string(a2a.TaskStateWorking)
+	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
+	s.notify()
+	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, nil), nil) //nolint
 	rec, halted := s.runIntents(ctx, execCtx, yield, rec, remaining)
 	if halted {
 		return
@@ -518,6 +524,12 @@ func (s *Supervisor) runRounds(
 			// never reach the policy engine, a gateway or the delegator. The signal is
 			// persisted because the turn may park (escalation, peer wait) before it ends.
 			actions, finish, finished := splitFinishTask(result.ActionIntents)
+			if finished && hasDelegation(actions) {
+				// A finish cannot combine with a delegation: the peer's result has
+				// not been read yet. Discard the finish; the loop continues with it.
+				log.Warn("finish.rejected", "reason", "turn delegated work")
+				finish, finished = "", false
+			}
 			if finished && finish != "" {
 				rec.Output = finish
 			}
@@ -883,6 +895,16 @@ func splitFinishTask(intents []port.ActionIntent) (actions []port.ActionIntent, 
 		finished = true
 	}
 	return actions, answer, finished
+}
+
+// hasDelegation reports whether any of the action intents is a delegate_task.
+func hasDelegation(actions []port.ActionIntent) bool {
+	for _, a := range actions {
+		if a.Kind == port.KindDelegateTask {
+			return true
+		}
+	}
+	return false
 }
 
 // remainingAfter returns a copy of the intents queued after index i, or nil when
