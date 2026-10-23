@@ -364,6 +364,7 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 					AgentName:         agCfg.Name,
 					PolicyActionKinds: mcpActionKinds,
 					MCPHealthCheck:    mcpSrv.Err,
+					MCPServers:        piMCPServers(agCfg.MCPServers),
 				}, agCfg.Model, agCfg.SystemPrompt, agCfg.Extensions)
 			case "claude-code":
 				prov = claudecode.New("claude", claudecode.Options{
@@ -454,4 +455,16 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 	}
 
 	return runtimes, nil
+}
+
+// piMCPServers converts an agent's declared mcp_servers to the pi adapter's type.
+func piMCPServers(in map[string]config.MCPServer) map[string]pi.MCPServer {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]pi.MCPServer, len(in))
+	for name, s := range in {
+		out[name] = pi.MCPServer{Command: s.Command, Args: s.Args}
+	}
+	return out
 }

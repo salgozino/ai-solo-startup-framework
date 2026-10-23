@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -45,7 +46,21 @@ type AgentConfig struct {
 	Model        string   `yaml:"model,omitempty"`
 	SystemPrompt string   `yaml:"system_prompt,omitempty"` // abs path after Load()
 	Extensions   []string `yaml:"extensions,omitempty"`    // abs paths or builtin:<name> after Load()
+	// MCPServers (pi only) declares the agent's own stdio MCP servers by name. Their tools
+	// are not action intents and bypass the risk policy: declaring one is an explicit grant
+	// by the company owner.
+	MCPServers map[string]MCPServer `yaml:"mcp_servers,omitempty"`
 }
+
+// MCPServer is one agent-declared stdio MCP server: the command pi spawns and its argv.
+type MCPServer struct {
+	Command string   `yaml:"command"`
+	Args    []string `yaml:"args,omitempty"`
+}
+
+// mcpServerName is the shape of an agent-declared MCP server name; it becomes part of the
+// pi tool prefix mcp__<name>__*.
+var mcpServerName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 // DefaultProvider is the provider an agent gets when its entry omits provider.
 const DefaultProvider = "pi"
@@ -134,7 +149,7 @@ func Load(path string) (*CompanyConfig, error) {
 		// Reject any other unknown field.
 		for k := range a {
 			switch k {
-			case "name", "role", "provider", "model", "system_prompt", "extensions":
+			case "name", "role", "provider", "model", "system_prompt", "extensions", "mcp_servers":
 				// valid fields
 			default:
 				return nil, fmt.Errorf("config: agent[%d] (%q): unknown field %q", i, name, k)
@@ -170,6 +185,11 @@ func Load(path string) (*CompanyConfig, error) {
 			return nil, fmt.Errorf("config: agent[%d] (%q): %w", i, name, err)
 		}
 
+		mcpServers, err := resolveMCPServers(a["mcp_servers"], provider)
+		if err != nil {
+			return nil, fmt.Errorf("config: agent[%d] (%q): %w", i, name, err)
+		}
+
 		agents = append(agents, AgentConfig{
 			Name:         name,
 			Role:         role,
@@ -177,6 +197,7 @@ func Load(path string) (*CompanyConfig, error) {
 			Model:        model,
 			SystemPrompt: systemPrompt,
 			Extensions:   extensions,
+			MCPServers:   mcpServers,
 		})
 	}
 
@@ -212,6 +233,74 @@ func requireEnvRef(field, value string) error {
 		return fmt.Errorf("config: %s appears to be an inline secret value rather than an environment variable name; use the env var name (e.g. TELEGRAM_BOT_TOKEN), not the secret value itself", field)
 	}
 	return nil
+}
+
+// resolveMCPServers validates an agent's raw mcp_servers value. Absent returns nil.
+func resolveMCPServers(raw any, provider string) (map[string]MCPServer, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	if provider != DefaultProvider {
+		return nil, fmt.Errorf("mcp_servers: only supported for provider %q, got %q", DefaultProvider, provider)
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("mcp_servers: must be a map of server name to {command, args}")
+	}
+	out := make(map[string]MCPServer, len(m))
+	for name, v := range m {
+		if !mcpServerName.MatchString(name) {
+			return nil, fmt.Errorf("mcp_servers: invalid server name %q: must match ^[a-z0-9][a-z0-9_-]*$", name)
+		}
+		if name == "framework" {
+			return nil, fmt.Errorf("mcp_servers: server name %q is reserved for the framework's own MCP server", name)
+		}
+		entry, ok := v.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("mcp_servers[%q]: must be a map with command and optional args", name)
+		}
+		var srv MCPServer
+		for k, val := range entry {
+			switch k {
+			case "command":
+				srv.Command, _ = val.(string)
+			case "args":
+				list, ok := val.([]any)
+				if !ok {
+					return nil, fmt.Errorf("mcp_servers[%q]: args must be a list of strings", name)
+				}
+				for _, item := range list {
+					str, ok := item.(string)
+					if !ok {
+						return nil, fmt.Errorf("mcp_servers[%q]: args must be a list of strings", name)
+					}
+					srv.Args = append(srv.Args, str)
+				}
+			default:
+				return nil, fmt.Errorf("mcp_servers[%q]: unknown field %q", name, k)
+			}
+		}
+		if srv.Command == "" {
+			return nil, fmt.Errorf("mcp_servers[%q]: command is required", name)
+		}
+		out[name] = srv
+	}
+	// pi treats "-" and "_" in server names as the same character and rejects the
+	// second registration, so such a pair must fail at load, not on every task.
+	names := make([]string, 0, len(out))
+	for name := range out {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	seen := make(map[string]string, len(names))
+	for _, name := range names {
+		key := strings.ReplaceAll(name, "-", "_")
+		if prev, dup := seen[key]; dup {
+			return nil, fmt.Errorf("mcp_servers: server names %q and %q collide: pi treats \"-\" and \"_\" in server names as the same character", prev, name)
+		}
+		seen[key] = name
+	}
+	return out, nil
 }
 
 // resolveExtensions validates an agent's raw extensions value and returns the entries

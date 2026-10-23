@@ -110,6 +110,29 @@ agents:
   use them for providers, not for extra tools. Ambient MCP servers from `~/.pi/agent/mcp.json`
   still connect but their tools are hidden for the same reason.
 
+To give a pi agent its own tools (e.g. a browser for a QA agent), declare stdio MCP servers with
+the pi-only `mcp_servers` field:
+
+```yaml
+agents:
+  - name: qa
+    role: qa
+    mcp_servers:
+      chrome-devtools:
+        command: npx
+        args: ["chrome-devtools-mcp", "--headless", "--isolated"]
+```
+
+- Server names must match `^[a-z0-9][a-z0-9_-]*$` and cannot be `framework`; two names that
+  differ only in `-` and `_` are rejected (pi treats them as the same server); `command` is
+  required; unknown keys are rejected. `mcp_servers` is rejected for any provider other than `pi`.
+- The adapter registers each server on every task invocation and adds its tools to the
+  `--tools` allowlist. pi names them `mcp__<name>__<tool>` with `-` replaced by `_`, so the
+  server above exposes `mcp__chrome_devtools__*`; other ambient MCP servers stay hidden. `command` and `args` are written to
+  a temporary extension file, so do not put secrets in them.
+- **These tools are not action intents and bypass the risk policy.** The framework neither
+  gates nor audits their calls; declaring a server is an explicit grant by the company owner.
+
 #### System prompts and the `agents/` folder
 
 The optional `system_prompt` field declares a per-agent persona file:

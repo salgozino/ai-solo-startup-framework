@@ -60,3 +60,14 @@ func TestMaterializeAgents_PiProviderWiresAdapterWithModelAndExtensions(t *testi
 		t.Errorf("probe argv = %q; want %q", got, want)
 	}
 }
+
+// TestPiMCPServers pins the config -> adapter conversion of an agent's mcp_servers.
+func TestPiMCPServers(t *testing.T) {
+	if got := piMCPServers(nil); got != nil {
+		t.Errorf("piMCPServers(nil) = %v; want nil", got)
+	}
+	got := piMCPServers(map[string]config.MCPServer{"a": {Command: "npx", Args: []string{"x"}}})
+	if s, ok := got["a"]; !ok || s.Command != "npx" || len(s.Args) != 1 || s.Args[0] != "x" {
+		t.Errorf("piMCPServers = %#v", got)
+	}
+}
