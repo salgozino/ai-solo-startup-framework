@@ -84,6 +84,13 @@ type modelProber interface {
 	ProbeModel(ctx context.Context) error
 }
 
+// mcpProber is implemented by adapters that probe their agent's declared MCP servers at
+// startup (pi: the exact --tools allowlist is built from the probed tool lists). Each
+// server is bounded by the adapter's own probe timeout.
+type mcpProber interface {
+	ProbeMCP(ctx context.Context) error
+}
+
 // agentRuntime groups the live objects for a single materialized agent.
 type agentRuntime struct {
 	sup    *supervisor.Supervisor
@@ -364,6 +371,7 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 					AgentName:         agCfg.Name,
 					PolicyActionKinds: mcpActionKinds,
 					MCPHealthCheck:    mcpSrv.Err,
+					MCPServers:        piMCPServers(agCfg.MCPServers),
 				}, agCfg.Model, agCfg.SystemPrompt, agCfg.Extensions)
 			case "claude-code":
 				prov = claudecode.New("claude", claudecode.Options{
@@ -400,6 +408,12 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 				probeCancel()
 				if probeErr != nil {
 					return nil, fmt.Errorf("agent %q model probe failed: %w", agCfg.Name, probeErr)
+				}
+			}
+			// Same abort-before-bind guarantee for declared MCP servers.
+			if prober, ok := prov.(mcpProber); ok {
+				if probeErr := prober.ProbeMCP(context.Background()); probeErr != nil {
+					return nil, fmt.Errorf("agent %q mcp probe failed: %w", agCfg.Name, probeErr)
 				}
 			}
 		}
@@ -454,4 +468,16 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 	}
 
 	return runtimes, nil
+}
+
+// piMCPServers converts an agent's declared mcp_servers to the pi adapter's type.
+func piMCPServers(in map[string]config.MCPServer) map[string]pi.MCPServer {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]pi.MCPServer, len(in))
+	for name, s := range in {
+		out[name] = pi.MCPServer{Command: s.Command, Args: s.Args}
+	}
+	return out
 }

@@ -437,7 +437,7 @@ func TestRunTask_EphemeralTokenAndExtensionFile(t *testing.T) {
 			t.Errorf("token leaked onto argv: %q", a)
 		}
 	}
-	if tools, _ := valueAfter(args, "--tools"); tools != "read,bash,edit,write,mcp__framework__*" {
+	if tools, _ := valueAfter(args, "--tools"); tools != "read,bash,edit,write,mcp__framework__finish_task" {
 		t.Errorf("--tools = %q", tools)
 	}
 	if !contains(args, "builtin:mcp") {
@@ -579,5 +579,115 @@ func TestProbeModel_DeadlineExceeded(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "deadline") {
 			t.Errorf("model %q: expected deadline error, got %v", model, err)
 		}
+	}
+}
+
+// S4 (software-factory): agent-declared stdio MCP servers are registered in the same
+// temp extension and their tools are allowlisted; everything else stays hidden.
+func runWithServers(t *testing.T, servers map[string]pi.MCPServer, withMCP bool) (args []string, ext string) {
+	t.Helper()
+	bin := helperBinary(t)
+	argv := dumpArgv(t)
+	extFile := filepath.Join(t.TempDir(), "ext.txt")
+	t.Setenv("FAKEPI_EXT_FILE", extFile)
+	opts := pi.Options{MCPServers: servers}
+	if withMCP {
+		t.Setenv("FAKEPI_CONNECT_MCP_ONLY", "1")
+		srv, registry := startTestMCPServer(t)
+		opts.MCPRegistry = &registryMinter{reg: registry}
+		opts.MCPServerAddr = srv.Addr()
+		opts.Tenant = "acme"
+		opts.AgentName = "ceo"
+	}
+	a := pi.New(bin, opts, "", "", nil)
+	if err := a.ProbeMCP(context.Background()); err != nil {
+		t.Fatalf("ProbeMCP: %v", err)
+	}
+	if _, err := a.RunTask(context.Background(), "t", "hello"); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	args = argv()
+	if raw, err := os.ReadFile(extFile); err == nil {
+		ext = strings.SplitN(string(raw), "\n", 3)[2]
+	}
+	return args, ext
+}
+
+func TestRunTask_MCPServersRegisteredAndAllowlisted(t *testing.T) {
+	servers := map[string]pi.MCPServer{
+		"chrome-devtools": {Command: fakeMCP(t), Args: []string{"paged"}},
+		"alpha":           {Command: fakeMCP(t)},
+	}
+	args, ext := runWithServers(t, servers, true)
+
+	// Exact names only, never a prefix pattern: framework first, then each server in name
+	// order with its tools sorted; "-" and every non [A-Za-z0-9_] char became "_".
+	const wantTools = "read,bash,edit,write,mcp__framework__finish_task," +
+		"mcp__alpha__list_files,mcp__alpha__plain," +
+		"mcp__chrome_devtools__t1,mcp__chrome_devtools__t2,mcp__chrome_devtools__t3,mcp__chrome_devtools__t4,mcp__chrome_devtools__t5"
+	if tools, _ := valueAfter(args, "--tools"); tools != wantTools {
+		t.Errorf("--tools = %q\nwant      %q", tools, wantTools)
+	}
+	if contains(args, "--exclude-tools") {
+		t.Errorf("--exclude-tools must be gone: %v", args)
+	}
+	for _, want := range []string{
+		`pi.registerMcpServer("framework"`,
+		`pi.registerMcpServer("alpha", {"command":"` + servers["alpha"].Command + `","args":[],"exposure":"direct"});`,
+		`pi.registerMcpServer("chrome-devtools", {"command":"` + servers["chrome-devtools"].Command + `","args":["paged"],"exposure":"direct"});`,
+	} {
+		if !strings.Contains(ext, want) {
+			t.Errorf("extension missing %q:\n%s", want, ext)
+		}
+	}
+	if strings.Index(ext, `"alpha"`) > strings.Index(ext, `"chrome-devtools"`) {
+		t.Errorf("servers must be registered in sorted name order:\n%s", ext)
+	}
+}
+
+func TestRunTask_MCPServersWithoutFrameworkMCP(t *testing.T) {
+	args, ext := runWithServers(t, map[string]pi.MCPServer{"a": {Command: fakeMCP(t), Args: []string{"collide-free"}}}, false)
+	if tools, _ := valueAfter(args, "--tools"); tools != "read,bash,edit,write,mcp__a__only" {
+		t.Errorf("--tools = %q", tools)
+	}
+	if contains(args, "--exclude-tools") {
+		t.Errorf("--exclude-tools must be gone: %v", args)
+	}
+	if contains(args, "builtin:mcp") == false {
+		t.Errorf("expected -e builtin:mcp, got %v", args)
+	}
+	if strings.Contains(ext, "framework") || !strings.Contains(ext, `pi.registerMcpServer("a"`) {
+		t.Errorf("unexpected extension:\n%s", ext)
+	}
+}
+
+// Without mcp_servers the argv and extension content are exactly what they were before.
+func TestRunTask_NoMCPServersUnchanged(t *testing.T) {
+	for _, servers := range []map[string]pi.MCPServer{nil, {}} {
+		args, ext := runWithServers(t, servers, true)
+		if tools, _ := valueAfter(args, "--tools"); tools != "read,bash,edit,write,mcp__framework__finish_task" {
+			t.Errorf("--tools = %q", tools)
+		}
+		if contains(args, "--exclude-tools") {
+			t.Errorf("--exclude-tools must be gone: %v", args)
+		}
+		const want = `export default function (pi: any) {
+  pi.registerMcpServer("framework", {
+    url: process.env.ASF_MCP_URL,
+    headers: { Authorization: "Bearer " + process.env.ASF_MCP_TOKEN },
+    exposure: "direct",
+  });
+}
+`
+		if ext != want {
+			t.Errorf("extension changed without mcp_servers:\n%s", ext)
+		}
+	}
+}
+
+func TestRunTask_NoMCPAtAllStaysBare(t *testing.T) {
+	args, ext := runWithServers(t, nil, false)
+	if contains(args, "--tools") || contains(args, "builtin:mcp") || ext != "" {
+		t.Errorf("no MCP and no servers must add nothing: %v ext=%q", args, ext)
 	}
 }

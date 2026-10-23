@@ -60,3 +60,44 @@ func TestMaterializeAgents_PiProviderWiresAdapterWithModelAndExtensions(t *testi
 		t.Errorf("probe argv = %q; want %q", got, want)
 	}
 }
+
+// TestPiMCPServers pins the config -> adapter conversion of an agent's mcp_servers.
+func TestPiMCPServers(t *testing.T) {
+	if got := piMCPServers(nil); got != nil {
+		t.Errorf("piMCPServers(nil) = %v; want nil", got)
+	}
+	got := piMCPServers(map[string]config.MCPServer{"a": {Command: "npx", Args: []string{"x"}}})
+	if s, ok := got["a"]; !ok || s.Command != "npx" || len(s.Args) != 1 || s.Args[0] != "x" {
+		t.Errorf("piMCPServers = %#v", got)
+	}
+}
+
+// S6: a declared mcp_servers entry is probed at materialize; a failing probe aborts
+// before any server binds, naming the agent and the server.
+func TestMaterializeAgents_PiMCPServerProbeFailureAbortsMaterialize(t *testing.T) {
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "pi"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write fake pi: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TEST_AUTH_TOKEN_PI_PROBE", "secret")
+
+	cfg := &config.CompanyConfig{
+		Tenant:       "acme",
+		AuthTokenEnv: "TEST_AUTH_TOKEN_PI_PROBE",
+		RiskPolicy:   map[string]config.Policy{},
+		Agents: []config.AgentConfig{{
+			Name: "qa", Role: "qa", Provider: "pi",
+			MCPServers: map[string]config.MCPServer{"browser": {Command: filepath.Join(binDir, "missing-mcp")}},
+		}},
+	}
+	_, err := materializeAgents(cfg, wireOptions{stderr: &bytes.Buffer{}, storeDir: t.TempDir()})
+	if err == nil {
+		t.Fatal("materializeAgents succeeded; want the mcp server probe to fail")
+	}
+	for _, want := range []string{`agent "qa" mcp probe failed`, `pi: mcp server "browser" probe failed`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err.Error(), want)
+		}
+	}
+}

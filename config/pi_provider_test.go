@@ -130,3 +130,66 @@ func TestLoad_PiProvider(t *testing.T) {
 		})
 	}
 }
+
+// TestLoad_MCPServers covers the pi-only per-agent mcp_servers field (S4) from
+// odd/tasks/software-factory.md.
+func TestLoad_MCPServers(t *testing.T) {
+	t.Run("valid servers load with command and args", func(t *testing.T) {
+		c, err := config.Load(writeCompany(t, "    mcp_servers:\n      chrome-devtools:\n        command: npx\n        args: [\"chrome-devtools-mcp\", \"--headless\"]\n      plain_1:\n        command: /usr/bin/tool\n"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		want := map[string]config.MCPServer{
+			"chrome-devtools": {Command: "npx", Args: []string{"chrome-devtools-mcp", "--headless"}},
+			"plain_1":         {Command: "/usr/bin/tool"},
+		}
+		if !reflect.DeepEqual(c.Agents[0].MCPServers, want) {
+			t.Errorf("MCPServers = %#v; want %#v", c.Agents[0].MCPServers, want)
+		}
+	})
+
+	t.Run("absent field leaves MCPServers nil", func(t *testing.T) {
+		c, err := config.Load(writeCompany(t, ""))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.Agents[0].MCPServers != nil {
+			t.Errorf("MCPServers = %v; want nil", c.Agents[0].MCPServers)
+		}
+	})
+
+	rejects := []struct {
+		name, yaml, want string
+	}{
+		{"non-pi provider", "    provider: claude-code\n    mcp_servers:\n      a:\n        command: x\n", `mcp_servers: only supported for provider "pi", got "claude-code"`},
+		{"uppercase name", "    mcp_servers:\n      Bad:\n        command: x\n", `mcp_servers: invalid server name "Bad": must match ^[a-z0-9][a-z0-9_-]*$`},
+		{"leading dash name", "    mcp_servers:\n      -bad:\n        command: x\n", `mcp_servers: invalid server name "-bad": must match ^[a-z0-9][a-z0-9_-]*$`},
+		{"reserved framework name", "    mcp_servers:\n      framework:\n        command: x\n", `mcp_servers: server name "framework" is reserved for the framework's own MCP server`},
+		{"empty command", "    mcp_servers:\n      a:\n        args: [x]\n", `mcp_servers["a"]: command is required`},
+		{"unknown key", "    mcp_servers:\n      a:\n        command: x\n        env: {A: b}\n", `mcp_servers["a"]: unknown field "env"`},
+		{"not a map", "    mcp_servers: [a]\n", `mcp_servers: must be a map of server name to {command, args}`},
+		{"args not strings", "    mcp_servers:\n      a:\n        command: x\n        args: [1]\n", `mcp_servers["a"]: args must be a list of strings`},
+		{"names differing only in dash and underscore", "    mcp_servers:\n      a_b:\n        command: x\n      a-b:\n        command: y\n", `mcp_servers: server names "a-b" and "a_b" collide: pi treats "-" and "_" in server names as the same character`},
+	}
+	for _, tc := range rejects {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
+			_, err := config.Load(writeCompany(t, tc.yaml))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Load error = %v; want it to contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// S6: the "__" server-name rule is gone (exact tool names make it unnecessary).
+// pi flattens tools to mcp__<server>__<tool>; a server name with "__" or a trailing "_"
+// (after mapping "-" to "_") would let another server/tool pair produce the same name.
+func TestLoad_MCPServerNameAmbiguousInPiRejected(t *testing.T) {
+	for name, normalized := range map[string]string{"github__prod": "github__prod", "a-_b": "a__b", "tail_": "tail_", "tail-": "tail_"} {
+		_, err := config.Load(writeCompany(t, "    mcp_servers:\n      "+name+":\n        command: x\n"))
+		want := `mcp_servers: invalid server name "` + name + `": its pi name "` + normalized + `" must not contain "__" or end with "_"`
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err = %v\nwant it to contain %q", name, err, want)
+		}
+	}
+}

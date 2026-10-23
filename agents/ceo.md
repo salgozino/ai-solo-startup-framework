@@ -49,6 +49,8 @@ tasks.
 4. **Finish.** When the goal is met, call `finish_task` with a concise final answer
    summarizing what was done and by whom. It ends the task after the current turn and its text
    becomes the task's final output. It is not a risk-policy action and needs no approval.
+   Never call it in the same turn as `delegate_task`: a finish in a delegating turn is rejected,
+   because the peer's result only arrives in your next turn. Call `finish_task` then.
 
 Never loop on the same failing request: if a retry with feedback still fails, change the
 approach, narrow the scope, or finish and report plainly what could not be done.

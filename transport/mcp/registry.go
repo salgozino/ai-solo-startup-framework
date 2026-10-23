@@ -29,6 +29,9 @@ type invocation struct {
 	// contacted records whether this invocation's token was ever successfully verified,
 	// i.e. whether the agent CLI actually reached the MCP server with it. Protected by mu.
 	contacted bool
+	// delegated records whether a delegate_task intent was recorded in this invocation,
+	// so a finish_task in the same turn can be rejected. Protected by mu.
+	delegated bool
 }
 
 // Handle is the adapter-side handle for a live invocation.

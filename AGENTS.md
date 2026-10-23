@@ -41,12 +41,40 @@ The provider adapters drive external agent CLIs as subprocesses and parse their 
   providers that come from extensions (e.g. `pi-claude-bridge`). Ambient servers from
   `~/.pi/agent/mcp.json` still connect under `-ne`, and a `direct`-exposed one would let the
   agent act outside the risk policy, so with MCP wired the adapter passes
-  `--tools read,bash,edit,write,mcp__framework__*` (the counterpart of claude's
+  `--tools read,bash,edit,write,mcp__framework__<kind>,...` (exact names, see below; the counterpart of claude's
   `--strict-mcp-config`). Accepted tradeoff: tools registered by allowlisted extensions are
   hidden by that same allowlist.
   Per-agent `extensions:` (pi only) adds `-e <entry>` for each entry: a file/directory path
   (resolved against company.yaml, must exist) or `builtin:<name>`. Package sources (`npm:`,
   `git:`, URLs) are rejected at load because `pi -e npm:<pkg>` is silently ignored (verified).
+  Per-agent `mcp_servers:` (pi only; name -> `{command, args}`, name `^[a-z0-9][a-z0-9_-]*$`
+  and not `framework`; names equal after `-`->`_` collide in pi and are rejected; after that
+  mapping no `__` and no trailing `_`) registers each
+  stdio server through `pi.registerMcpServer(name, {command, args, exposure: "direct"})` in the
+  same temp extension (verified against pi 1.2.0 `docs/extensions.md`: stdio `command`/`args` are
+  accepted). The `--tools` allowlist names MCP tools EXACTLY, never `mcp__<server>__*`: a prefix
+  would also match an undeclared ambient server (`<name>__x` -> `mcp__<name>__x__<tool>`), and
+  `--exclude-tools` is not used. pi names tools `mcp__<server>__<tool>` replacing every
+  non-`[A-Za-z0-9_]` character with `_` (`docs/mcp.md`; `toolName` in
+  `adapters/pi/mcp_probe.go`). Framework: `mcp__framework__<kind>` for each
+  `Options.PolicyActionKinds` entry plus `finish_task` (the exact set `transport/mcp`
+  `registerTools` registers), sorted. Declared servers: `Adapter.ProbeMCP`, called from the
+  `mcpProber` loop in `cmd/company/wire.go` right after `ProbeModel` (so a failure aborts
+  materialize before any server binds), spawns each server once over stdio with the MCP Go SDK
+  (`mcp.CommandTransport` + `Client.Connect` + `ClientSession.Tools`, which follows
+  `nextCursor`), bounded by `Options.MCPProbeTimeout` (30s default) per server, then closes it.
+  Named failures: probe failed/timed out, zero tools, two tools of one server normalizing to the
+  same name (pi would hash-suffix them), and an ambiguous name: a normalized server with `__` or a
+  trailing `_`, or a normalized tool / policy kind with `__` or a leading `_`. Those rules make the
+  separator the only `__` in `mcp__<server>__<tool>`, so the flat name parses one way and no other
+  server/tool pair (declared or ambient) can produce it (native review R1-ambiguous-tool-ownership,
+  R3-cross-server-tool-collision). `RunTask` fails closed if declared servers were never
+  probed. Tools a server adds after startup are not callable. Residual: an ambient `mcp.json` server with exactly the
+  same name as a declared/framework server replaces it in pi (mcp.json wins over registered
+  servers). Without `mcp_servers` the extension is byte-identical and only the framework part of
+  `--tools` changed (prefix -> exact names). These tools
+  are NOT action intents and bypass the risk policy: declaring a server is an explicit grant by
+  the company owner. Command/args live in the extension file, never put secrets there.
   `ProbeModel` checks the configured model against `pi -ne [-e ...] --offline --list-models`.
 
 - **opencode**: the adapter requires `--format json` NDJSON output support. Verified locally with

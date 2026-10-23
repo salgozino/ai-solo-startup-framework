@@ -17,7 +17,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/salgozino/ai-solo-startup-framework/core/address"
@@ -49,23 +51,52 @@ const defaultTokenGrace = 30 * time.Second
 // regardless, so this only avoids mid-task 401s from an arbitrary ceiling.
 const defaultMintTimeout = 24 * time.Hour
 
-// mcpToolsAllowlist is the --tools value used when MCP is wired. pi loads user-level MCP
-// servers (e.g. ~/.pi/agent/mcp.json) even under -ne; restricting the tool set to the
-// built-in file/shell tools plus the framework server keeps ambient servers from running
-// actions outside the risk policy.
-const mcpToolsAllowlist = "read,bash,edit,write,mcp__framework__*"
-
-// extensionSource is the ephemeral pi extension registering the framework MCP server. It
+// extensionHeader opens the ephemeral pi extension registering the framework MCP server. It
 // is static: the URL and bearer token reach it only through the subprocess env vars
 // ASF_MCP_URL / ASF_MCP_TOKEN, so the file never contains the token.
-const extensionSource = `export default function (pi: any) {
-  pi.registerMcpServer("framework", {
+const extensionHeader = "export default function (pi: any) {\n"
+
+const frameworkRegistration = `  pi.registerMcpServer("framework", {
     url: process.env.ASF_MCP_URL,
     headers: { Authorization: "Bearer " + process.env.ASF_MCP_TOKEN },
     exposure: "direct",
   });
-}
 `
+
+// MCPServer is an agent-declared stdio MCP server (config.MCPServer), registered through
+// pi.registerMcpServer for every invocation. Its tools are not action intents and bypass
+// the risk policy: declaring it is an explicit grant by the company owner. Command and Args
+// are written into the temp extension file, so they must not carry secrets.
+type MCPServer struct {
+	Command string
+	Args    []string
+}
+
+// buildExtensionSource renders the static extension: the framework registration when
+// withFramework, then each declared server in sorted name order. names is that sorted order.
+// With no servers and withFramework the output is exactly the pre-mcp_servers source.
+func buildExtensionSource(withFramework bool, servers map[string]MCPServer, names []string) string {
+	var b strings.Builder
+	b.WriteString(extensionHeader)
+	if withFramework {
+		b.WriteString(frameworkRegistration)
+	}
+	for _, name := range names {
+		srv := servers[name]
+		args := srv.Args
+		if args == nil {
+			args = []string{}
+		}
+		cfg, _ := json.Marshal(struct {
+			Command  string   `json:"command"`
+			Args     []string `json:"args"`
+			Exposure string   `json:"exposure"`
+		}{srv.Command, args, "direct"})
+		fmt.Fprintf(&b, "  pi.registerMcpServer(%q, %s);\n", name, cfg)
+	}
+	b.WriteString("}\n")
+	return b.String()
+}
 
 // Drainer is satisfied by a live MCP invocation handle: after the subprocess exits,
 // Drain releases the invocation and returns any action intents the MCP server's sink
@@ -113,6 +144,12 @@ type Options struct {
 	// instead of running an agent whose tool calls could never reach a live server, which
 	// would otherwise look like "the agent made no tool calls".
 	MCPHealthCheck func() error
+	// MCPServers are the agent's own stdio MCP servers (pi-only mcp_servers), registered on
+	// every invocation next to (or, without MCPRegistry, instead of) the framework server.
+	MCPServers map[string]MCPServer
+	// MCPProbeTimeout bounds ProbeMCP's probe of each declared server; zero uses
+	// defaultMCPProbeTimeout.
+	MCPProbeTimeout time.Duration
 }
 
 // Adapter implements port.Provider by running an ephemeral pi CLI process per task.
@@ -131,6 +168,11 @@ type Adapter struct {
 	contextBudget     int
 	tokenLifetime     time.Duration
 	mcpHealthCheck    func() error
+	mcpServers        map[string]MCPServer
+	mcpServerNames    []string // sorted keys of mcpServers
+	mcpProbeTimeout   time.Duration
+	mcpMu             sync.RWMutex
+	mcpTools          map[string][]string // server -> exact pi tool names, set by ProbeMCP
 }
 
 // New returns an Adapter that invokes piBin as the pi CLI.
@@ -149,7 +191,19 @@ func New(piBin string, opts Options, model string, systemPromptPath string, exte
 	if lifetime <= 0 {
 		lifetime = defaultMintTimeout
 	}
+	names := make([]string, 0, len(opts.MCPServers))
+	for name := range opts.MCPServers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	probeTimeout := opts.MCPProbeTimeout
+	if probeTimeout <= 0 {
+		probeTimeout = defaultMCPProbeTimeout
+	}
 	return &Adapter{
+		mcpProbeTimeout:   probeTimeout,
+		mcpServers:        opts.MCPServers,
+		mcpServerNames:    names,
 		piBin:             piBin,
 		limit:             limit,
 		model:             model,
@@ -194,8 +248,21 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 		args = append(args, "-e", ext)
 	}
 
+	if err := a.requireProbed(); err != nil {
+		return port.ProviderResult{}, err
+	}
+
 	var handle Drainer
 	var mcpEnv []string
+	if a.mcpRegistry == nil && len(a.mcpServers) > 0 {
+		extPath, err := writeExtensionFile(buildExtensionSource(false, a.mcpServers, a.mcpServerNames))
+		if err != nil {
+			return port.ProviderResult{}, fmt.Errorf("pi: mcp extension: %w", err)
+		}
+		defer os.Remove(extPath)
+		args = append(args, "-e", "builtin:mcp", "-e", extPath)
+		args = append(args, a.toolSelection(false)...)
+	}
 	if a.mcpRegistry != nil {
 		// Consult the MCP server's health before ever spawning the subprocess; see
 		// Options.MCPHealthCheck.
@@ -212,13 +279,14 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 		handle = h
 		defer h.Drain() // release on every return path; idempotent
 
-		extPath, err := writeExtensionFile()
+		extPath, err := writeExtensionFile(buildExtensionSource(true, a.mcpServers, a.mcpServerNames))
 		if err != nil {
 			return port.ProviderResult{}, fmt.Errorf("pi: mcp extension: %w", err)
 		}
 		defer os.Remove(extPath)
 
-		args = append(args, "-e", "builtin:mcp", "-e", extPath, "--tools", mcpToolsAllowlist)
+		args = append(args, "-e", "builtin:mcp", "-e", extPath)
+		args = append(args, a.toolSelection(true)...)
 		mcpEnv = []string{"ASF_MCP_URL=http://" + a.mcpServerAddr, "ASF_MCP_TOKEN=" + token}
 	}
 
@@ -305,9 +373,45 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 	return result, nil
 }
 
+// requireProbed fails closed when declared servers were never probed: the allowlist names
+// their tools exactly, so without a probe there is nothing safe to allow.
+func (a *Adapter) requireProbed() error {
+	a.mcpMu.RLock()
+	defer a.mcpMu.RUnlock()
+	for _, name := range a.mcpServerNames {
+		if _, ok := a.mcpTools[name]; !ok {
+			return fmt.Errorf("pi: mcp server %q was not probed; call ProbeMCP at startup", name)
+		}
+	}
+	return nil
+}
+
+// toolsAllowlist is the --tools value: the built-ins, then EXACT MCP tool names, never a
+// mcp__<server>__* prefix (a prefix would also match an undeclared ambient server such as
+// "<name>__x"). Framework tools are known statically (policy kinds + finish_task);
+// declared servers' tools come from the startup probe (ProbeMCP), in server-name order.
+// Tools a server adds after the probe are therefore not callable.
+func (a *Adapter) toolsAllowlist(withFramework bool) string {
+	parts := []string{"read,bash,edit,write"}
+	if withFramework {
+		parts = append(parts, frameworkTools(a.policyActionKinds)...)
+	}
+	a.mcpMu.RLock()
+	defer a.mcpMu.RUnlock()
+	for _, name := range a.mcpServerNames {
+		parts = append(parts, a.mcpTools[name]...)
+	}
+	return strings.Join(parts, ",")
+}
+
+// toolSelection is the --tools argv.
+func (a *Adapter) toolSelection(withFramework bool) []string {
+	return []string{"--tools", a.toolsAllowlist(withFramework)}
+}
+
 // writeExtensionFile writes the static extension source to a 0600 temp file ending in
 // .ts (pi loads extensions by suffix) and returns its path. The caller removes it.
-func writeExtensionFile() (string, error) {
+func writeExtensionFile(source string) (string, error) {
 	f, err := os.CreateTemp("", "asf-pi-mcp-*.ts")
 	if err != nil {
 		return "", err
@@ -321,7 +425,7 @@ func writeExtensionFile() (string, error) {
 	if err := f.Chmod(0o600); err != nil {
 		return fail(err)
 	}
-	if _, err := f.WriteString(extensionSource); err != nil {
+	if _, err := f.WriteString(source); err != nil {
 		return fail(err)
 	}
 	if err := f.Close(); err != nil {
