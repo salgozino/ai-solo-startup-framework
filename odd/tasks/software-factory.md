@@ -132,4 +132,20 @@ framework fixes found while running it. Branch: `feat/software-factory` in workt
   callback/provider hook, working_state_test.go:69 vs :81). Guarded with the test's mutex; 600
   runs (-race -cpu 1,2,4) clean afterwards (one earlier post-fix batch reported 2 hits whose log
   was not kept and did not reproduce). Full suite -race green.
+- L16 (e2e run 5, PASS, 12m40s, exact allowlist): full pipeline incl. a fix cycle (QA FAIL -> engineer
+  -> QA PASS); security APPROVED (re-review not requested by the CEO: only a Low finding); tests 8/8;
+  telegram delivered; QA browser evidence present.
+- L17 (merge): PR #109 (fix/flaky-ci) merged as 3e44e2a; this branch rebased onto it; PR #110 opened.
+- L18 (native review review-44c0523bed9b9b75, tier high): R1-ambiguous-tool-ownership (BLOCKER) and
+  R3-cross-server-tool-collision (CRITICAL): flattened mcp__<server>__<tool> names were ambiguous
+  (`github__prod`+`delete` == `github`+`prod__delete`). Correction 33855b6: normalized server names
+  without `__` or trailing `_`, tool names / policy kinds without `__` or leading `_` -> the
+  separator is the only `__`, unique parse. Targeted validator APPROVED; acknowledged (authority
+  burned). Advisory, non-blocking follow-ups: R2-delegation-rule (examples/software-factory/agents/ceo.md:22-24),
+  R3-finish-dedupe-bypasses-rejection (transport/mcp/tools.go:214-219).
+- L19 (process note, root cause confirmed): twice a config test failed only on the first run after
+  an edit and never reproduced (300 isolated + 6 combined runs clean); a `git diff --stat` missed doc
+  edits; a `git add` found nothing to commit. In every case the edit and the command were issued in
+  the same parallel tool batch, so the command ran before the edit landed. Not a repository flake;
+  edits and the commands that depend on them must be sequential.
 - L12 (CI): master CI flakes are pre-existing; fixed separately in PR #109 (branch fix/flaky-ci).
