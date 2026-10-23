@@ -12,6 +12,9 @@ auth_token_env: FACTORY_A2A_TOKEN
 agents:
   - name: ceo
     role: ceo
+    # Five pipeline phases + up to two fix cycles (two rounds each) + the closing round.
+    # agents/ceo.md states the same budget.
+    max_rounds: 12
     model: claude-bridge/claude-sonnet-5-5
     extensions:
       # pi-claude-bridge provides the claude-bridge/* models; adjust to your install.

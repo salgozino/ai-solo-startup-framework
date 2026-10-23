@@ -113,6 +113,9 @@ def verify(tasks, workspace, log, browser_log):
         print("QA browser verification:", "present" if "http://127.0.0.1:" in browser else "missing")
         if "http://127.0.0.1:" not in browser:
             failures.append("docs/QA_REPORT.md has no '## Browser verification' section with a served http://127.0.0.1 URL")
+        # QA must also have followed the project's README run instructions as written.
+        if "README run instructions:" not in browser:
+            failures.append("docs/QA_REPORT.md '## Browser verification' has no 'README run instructions:' line")
         run = subprocess.run(["node", "--test"], cwd=project, capture_output=True, text=True, timeout=300)
         # TAP reporter prints "# pass 3"; the default spec reporter prints "ℹ pass 3".
         summary = [l for l in run.stdout.splitlines() if l.lstrip("#ℹ ").startswith(("tests ", "pass ", "fail "))]

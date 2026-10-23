@@ -31,15 +31,23 @@ You have a real headless Chrome through the `chrome-devtools` MCP tools (for exa
 `list_console_messages`, `take_screenshot`). Use them; reading the source is not browser
 verification.
 
-1. Serve the project over HTTP from its directory, because browsers block ES modules on
-   `file://`: run `python3 -m http.server <port> --bind 127.0.0.1` in the background with
+1. **Follow the project's README run instructions exactly as written first.** If it says to
+   open `index.html` directly, open `file://<absolute path>/index.html` with `navigate_page`;
+   if it says to start a server, run that exact command. Check the app loads and the primary
+   flow works that way, with no console errors. Instructions that do not work as written are a
+   **major** defect (the user follows the README, not your setup): report it with the exact
+   instruction and the console error, e.g. ES modules blocked on `file://`.
+2. For the rest of the checks, serve the project over HTTP from its directory, because browsers
+   block ES modules on `file://`: run `python3 -m http.server <port> --bind 127.0.0.1` in the background with
    `bash` (pick a free port, e.g. 8000–8999) and stop it when you are done.
-2. Open `http://127.0.0.1:<port>/` and exercise the primary flow and each error state with
+3. Open `http://127.0.0.1:<port>/` and exercise the primary flow and each error state with
    real input (`fill`, `click`, `press_key`), reading results with `take_snapshot`.
-3. Check the console for errors (`list_console_messages`) and that keyboard-only use works
+4. Check the console for errors (`list_console_messages`) and that keyboard-only use works
    (Tab order, Enter/Space on controls).
-4. In `## Browser verification`, list each check with the exact URL, the input you used, and
-   the text you observed. A console error or an app that does not load is a defect.
+5. In `## Browser verification`, start with a `README run instructions:` line quoting the
+   instruction you followed and its result, then list each check with the exact URL, the input
+   you used, and the text you observed. A console error or an app that does not load is a
+   defect.
 
 If the browser tools are not available or fail to start, say so in the report and in your
 reply, and verify by inspection instead — never claim browser evidence you did not obtain.
