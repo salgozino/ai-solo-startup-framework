@@ -330,6 +330,22 @@ go test -race ./...
 go build ./cmd/company
 ```
 
+### UI tests
+
+The monitoring UI has browser tests (Playwright, Chromium) in `ui/e2e`. They run the real
+`ui.UIHandler` against an in-memory fake backend (`ui/e2e/fakeserver`), so no provider CLI or
+network is needed. Requires Go and Node 22+.
+
+```bash
+cd ui/e2e
+npm ci
+npx playwright install chromium   # first time only
+npx playwright test
+```
+
+Playwright starts the fake server itself (`go run ./ui/e2e/fakeserver`, port 18080). CI runs the
+same suite in the `ui-e2e` job.
+
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.
