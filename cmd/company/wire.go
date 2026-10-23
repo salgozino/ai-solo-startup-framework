@@ -84,6 +84,13 @@ type modelProber interface {
 	ProbeModel(ctx context.Context) error
 }
 
+// mcpProber is implemented by adapters that probe their agent's declared MCP servers at
+// startup (pi: the exact --tools allowlist is built from the probed tool lists). Each
+// server is bounded by the adapter's own probe timeout.
+type mcpProber interface {
+	ProbeMCP(ctx context.Context) error
+}
+
 // agentRuntime groups the live objects for a single materialized agent.
 type agentRuntime struct {
 	sup    *supervisor.Supervisor
@@ -401,6 +408,12 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 				probeCancel()
 				if probeErr != nil {
 					return nil, fmt.Errorf("agent %q model probe failed: %w", agCfg.Name, probeErr)
+				}
+			}
+			// Same abort-before-bind guarantee for declared MCP servers.
+			if prober, ok := prov.(mcpProber); ok {
+				if probeErr := prober.ProbeMCP(context.Background()); probeErr != nil {
+					return nil, fmt.Errorf("agent %q mcp probe failed: %w", agCfg.Name, probeErr)
 				}
 			}
 		}

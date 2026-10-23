@@ -74,7 +74,7 @@ All agents run in **isolated mode** by default, independent of the user's local 
 
 | Provider | Isolation flags |
 |----------|----------------|
-| pi | `-ne --no-session --no-skills --no-prompt-templates --no-context-files --no-approve --offline` — always applied; with MCP also `-e builtin:mcp` + the adapter's own extension and `--tools read,bash,edit,write,mcp__framework__*` |
+| pi | `-ne --no-session --no-skills --no-prompt-templates --no-context-files --no-approve --offline` — always applied; with MCP also `-e builtin:mcp` + the adapter's own extension and `--tools read,bash,edit,write,mcp__framework__<kind>,...` (exact tool names, never a prefix pattern) |
 | Claude Code | `--no-session-persistence --setting-sources "" --disable-slash-commands` — always applied |
 | OpenCode | `--pure` — always applied |
 
@@ -123,17 +123,25 @@ agents:
         args: ["chrome-devtools-mcp", "--headless", "--isolated"]
 ```
 
-- Server names must match `^[a-z0-9][a-z0-9_-]*$`, cannot be `framework`, and cannot contain
-  `__` (also after mapping `-` to `_`), pi's server/tool delimiter; two names that differ only in
-  `-` and `_` are rejected (pi treats them as the same server); `command` is
+- Server names must match `^[a-z0-9][a-z0-9_-]*$` and cannot be `framework`; two names that
+  differ only in `-` and `_` are rejected (pi treats them as the same server); `command` is
   required; unknown keys are rejected. `mcp_servers` is rejected for any provider other than `pi`.
-- The adapter registers each server on every task invocation and adds its tools to the
-  `--tools` allowlist. pi names them `mcp__<name>__<tool>` with `-` replaced by `_`, so the
-  server above exposes `mcp__chrome_devtools__*`. The adapter also passes
-  `--exclude-tools mcp__<name>__*__*`: without it, an ambient server named e.g.
-  `chrome_devtools__prod` would match the same prefix. A declared server's own tool whose name
-  contains `__` is hidden as well; other ambient MCP servers stay hidden. `command` and `args` are written to
-  a temporary extension file, so do not put secrets in them.
+- The `--tools` allowlist names MCP tools **exactly**, never by `mcp__<name>__*` prefix, so an
+  undeclared ambient MCP server (any name, e.g. `chrome_devtools__prod`) exposes no callable
+  tool. The framework server contributes `mcp__framework__<kind>` for every `risk_policy`
+  action kind plus `finish_task`. Each declared server is **probed once at startup**
+  (materialize): the framework spawns it, runs the MCP `initialize` handshake, lists its tools
+  (following pagination) within a 30-second bound, and closes it. Its tools are allowlisted as
+  `mcp__<name>__<tool>`, with every character outside `[A-Za-z0-9_]` in either part replaced by
+  `_` (pi's naming), so `chrome-devtools`'s `take_snapshot` is `mcp__chrome_devtools__take_snapshot`.
+  Materialize aborts, before any server binds, when a probe fails or times out, when a server
+  exposes zero tools, or when two of its tools normalize to the same name (pi would hash-suffix
+  them); each error names the server. Tools a server adds **after** startup are not callable
+  (fail closed): restart the company to pick them up. `command` and `args` are written to a
+  temporary extension file, so do not put secrets in them.
+- Residual: an ambient `~/.pi/agent/mcp.json` server with exactly the same name as a declared
+  server (or `framework`) replaces it in pi, because pi gives `mcp.json` precedence over
+  registered servers. Do not reuse those names in your own pi config.
 - **These tools are not action intents and bypass the risk policy.** The framework neither
   gates nor audits their calls; declaring a server is an explicit grant by the company owner.
 

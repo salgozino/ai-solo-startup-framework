@@ -59,7 +59,7 @@ type MCPServer struct {
 }
 
 // mcpServerName is the shape of an agent-declared MCP server name; it becomes part of the
-// pi tool prefix mcp__<name>__*.
+// exact pi tool names mcp__<name>__<tool>.
 var mcpServerName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 // DefaultProvider is the provider an agent gets when its entry omits provider.
@@ -254,11 +254,6 @@ func resolveMCPServers(raw any, provider string) (map[string]MCPServer, error) {
 		}
 		if name == "framework" {
 			return nil, fmt.Errorf("mcp_servers: server name %q is reserved for the framework's own MCP server", name)
-		}
-		// pi maps "-" to "_" in tool names and uses "__" to separate server from tool;
-		// the adapter's ambient-server exclusion relies on declared names never containing it.
-		if strings.Contains(strings.ReplaceAll(name, "-", "_"), "__") {
-			return nil, fmt.Errorf("mcp_servers: invalid server name %q: \"__\" is pi's tool namespace delimiter", name)
 		}
 		entry, ok := v.(map[string]any)
 		if !ok {

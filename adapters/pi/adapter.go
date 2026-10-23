@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/salgozino/ai-solo-startup-framework/core/address"
@@ -146,6 +147,9 @@ type Options struct {
 	// MCPServers are the agent's own stdio MCP servers (pi-only mcp_servers), registered on
 	// every invocation next to (or, without MCPRegistry, instead of) the framework server.
 	MCPServers map[string]MCPServer
+	// MCPProbeTimeout bounds ProbeMCP's probe of each declared server; zero uses
+	// defaultMCPProbeTimeout.
+	MCPProbeTimeout time.Duration
 }
 
 // Adapter implements port.Provider by running an ephemeral pi CLI process per task.
@@ -166,6 +170,9 @@ type Adapter struct {
 	mcpHealthCheck    func() error
 	mcpServers        map[string]MCPServer
 	mcpServerNames    []string // sorted keys of mcpServers
+	mcpProbeTimeout   time.Duration
+	mcpMu             sync.RWMutex
+	mcpTools          map[string][]string // server -> exact pi tool names, set by ProbeMCP
 }
 
 // New returns an Adapter that invokes piBin as the pi CLI.
@@ -189,7 +196,12 @@ func New(piBin string, opts Options, model string, systemPromptPath string, exte
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	probeTimeout := opts.MCPProbeTimeout
+	if probeTimeout <= 0 {
+		probeTimeout = defaultMCPProbeTimeout
+	}
 	return &Adapter{
+		mcpProbeTimeout:   probeTimeout,
 		mcpServers:        opts.MCPServers,
 		mcpServerNames:    names,
 		piBin:             piBin,
@@ -234,6 +246,10 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 	}
 	for _, ext := range a.extensions {
 		args = append(args, "-e", ext)
+	}
+
+	if err := a.requireProbed(); err != nil {
+		return port.ProviderResult{}, err
 	}
 
 	var handle Drainer
@@ -357,47 +373,40 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 	return result, nil
 }
 
-// toolsAllowlist is the --tools value: the built-ins, the framework server when wired, and
-// mcp__<name>__* for each declared server (sorted). Ambient servers stay hidden.
-//
-// pi names a server's tools mcp__<server>__<tool> with every character other than
-// letters, digits and "_" replaced by "_" (docs/mcp.md), so server "chrome-devtools"
-// exposes mcp__chrome_devtools__*. Config only admits [a-z0-9_-], so "-" is the one
-// character to map; an unmapped pattern would match nothing and hide every tool.
+// requireProbed fails closed when declared servers were never probed: the allowlist names
+// their tools exactly, so without a probe there is nothing safe to allow.
+func (a *Adapter) requireProbed() error {
+	a.mcpMu.RLock()
+	defer a.mcpMu.RUnlock()
+	for _, name := range a.mcpServerNames {
+		if _, ok := a.mcpTools[name]; !ok {
+			return fmt.Errorf("pi: mcp server %q was not probed; call ProbeMCP at startup", name)
+		}
+	}
+	return nil
+}
+
+// toolsAllowlist is the --tools value: the built-ins, then EXACT MCP tool names, never a
+// mcp__<server>__* prefix (a prefix would also match an undeclared ambient server such as
+// "<name>__x"). Framework tools are known statically (policy kinds + finish_task);
+// declared servers' tools come from the startup probe (ProbeMCP), in server-name order.
+// Tools a server adds after the probe are therefore not callable.
 func (a *Adapter) toolsAllowlist(withFramework bool) string {
 	parts := []string{"read,bash,edit,write"}
 	if withFramework {
-		parts = append(parts, "mcp__framework__*")
+		parts = append(parts, frameworkTools(a.policyActionKinds)...)
 	}
+	a.mcpMu.RLock()
+	defer a.mcpMu.RUnlock()
 	for _, name := range a.mcpServerNames {
-		parts = append(parts, toolPrefix(name)+"*")
+		parts = append(parts, a.mcpTools[name]...)
 	}
 	return strings.Join(parts, ",")
 }
 
-// toolSelection is the --tools argv, plus --exclude-tools when servers are declared.
-//
-// mcp__<name>__* alone would also match an ambient server named "<name>__x", whose tools
-// are mcp__<name>__x__<tool>, and make them callable outside the risk policy. pi applies
-// --exclude-tools after every other selection, so excluding mcp__<name>__*__* hides that
-// nested namespace. Config rejects "__" in declared names, so it never hides another
-// declared server; a declared server's own tool whose name contains "__" is hidden too,
-// which fails closed.
+// toolSelection is the --tools argv.
 func (a *Adapter) toolSelection(withFramework bool) []string {
-	args := []string{"--tools", a.toolsAllowlist(withFramework)}
-	if len(a.mcpServerNames) == 0 {
-		return args
-	}
-	excl := make([]string, 0, len(a.mcpServerNames))
-	for _, name := range a.mcpServerNames {
-		excl = append(excl, toolPrefix(name)+"*__*")
-	}
-	return append(args, "--exclude-tools", strings.Join(excl, ","))
-}
-
-// toolPrefix is the mcp__<server>__ prefix pi gives a declared server's tools.
-func toolPrefix(name string) string {
-	return "mcp__" + strings.ReplaceAll(name, "-", "_") + "__"
+	return []string{"--tools", a.toolsAllowlist(withFramework)}
 }
 
 // writeExtensionFile writes the static extension source to a 0600 temp file ending in
