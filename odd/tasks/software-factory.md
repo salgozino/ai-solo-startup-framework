@@ -49,6 +49,20 @@ framework fixes found while running it. Branch: `feat/software-factory` in workt
   - These tools are NOT action intents and bypass the risk policy: README and AGENTS.md document
     the field, the pi-only restriction, and that declaring a server is an explicit grant by the
     company owner.
+- S6 — User decision on R1: "Nombres exactos de tools (recomendado)". The pi adapter's
+  `--tools` allowlist names MCP tools exactly, never by `mcp__<server>__*` prefix:
+  - framework: `mcp__framework__<kind>` for every policy action kind plus the control tools
+    (`finish_task`), known statically.
+  - each declared `mcp_servers` entry: probed once at materialize (stdio MCP `initialize` +
+    `tools/list`, following pagination, bounded timeout), and its tools listed as
+    `mcp__<server>__<tool>` using pi's normalization (every char outside `[A-Za-z0-9_]` -> `_`).
+  - Materialize fails with a named error when a probe fails/times out, returns zero tools, or two
+    tools of one server normalize to the same name (pi would hash-suffix them).
+  - No `--exclude-tools`; the `__` declared-name rule from dc9232a is dropped (no longer needed);
+    the `-`/`_` collision rule stays. A declared server's tools containing `__` are callable again.
+  - An undeclared ambient server (any name, e.g. `github_`, `github__x`) exposes no callable tool.
+  - Residual, documented: an ambient `mcp.json` server with exactly the same name as a declared or
+    the framework server replaces it in pi (pi: mcp.json wins over registered servers).
 - S5 — The example company lives in the worktree under `examples/software-factory/`
   (factory.yaml, agents/*.md for ceo, product-owner, ux-designer, tech-lead, engineer, qa,
   security-reviewer, e2e.sh, e2e_check.py, README.md). The QA agent declares a browser MCP server
@@ -59,6 +73,7 @@ framework fixes found while running it. Branch: `feat/software-factory` in workt
 
 - T1 [S2,S3] supervisor + transport/mcp + agents/ceo.md: phantom escalation fix and finish rejection, TDD — gentle-ai-worker — commit: 976bc81 (done)
 - T2 [S4] config + adapters/pi + README/AGENTS.md: per-agent mcp_servers (pi), TDD — gentle-ai-worker — commit: 9967648 (done)
+- T4 [S6] adapters/pi + config + docs: exact MCP tool allowlist with startup probe, TDD — gentle-ai-worker — commit: fix(pi) exact allowlist (done)
 - T3 [S5] examples/software-factory: add the company, QA browser server + prompt, run e2e — inline — commit: see git log (feat(examples)) (done)
 
 ## Log
@@ -97,3 +112,24 @@ framework fixes found while running it. Branch: `feat/software-factory` in workt
   fill_form, take_snapshot x2, list_console_messages against http://127.0.0.1:8765/); security
   APPROVED; node --test 8/8; telegram delivered. No fix cycle was needed, so the two-delegations-
   in-one-turn re-verification path was NOT exercised live.
+- L11 (native review review-424ea93c284fe577, lenses risk/readability/reliability, tier high):
+  BLOCKER R1-ambient-prefix (adapters/pi/adapter.go:371): `mcp__<name>__*` also matches tools of an
+  undeclared ambient server named `<name>__x`, exposing them outside the risk policy. Verified live
+  (31 leaked tools). Bounded correction dc9232a (--exclude-tools mcp__<name>__*__* + reject `__`
+  in declared names) cut that to 0, but the targeted validator REJECTED it -> state `escalated`:
+  an ambient server named `<name>_` (trailing `_`) still leaks (`mcp__github___delete_repository`),
+  and declared tools containing `__` are now hidden (regression). Prefix matching is ambiguous by
+  construction: needs a design decision (exact tool ownership). Same latent issue exists on master
+  for `mcp__framework__*` (base-only).
+- L13 (user decision): "Nombres exactos de tools (recomendado)" -> S6, T4.
+- L14 (T4 evidence): ProbeMCP via go-sdk CommandTransport + ClientSession.Tools (paginated);
+  exact names for framework (policy kinds + finish_task) and declared servers; named errors for
+  probe failure/timeout/zero tools/normalization collision; RunTask fails closed if unprobed.
+  RED->GREEN per rule (adapter, config `__` rule removed, wire probe aborts materialize). Live:
+  chrome-devtools probe 0.95s, 32 tools, --tools 1204 chars.
+- L15 (race): full -race run flagged a data race in T1's TestResume_NextRoundReportsWorkingNotInputRequired:
+  test-only (unsynchronized taskID/recDuring between the test goroutine and the state-change
+  callback/provider hook, working_state_test.go:69 vs :81). Guarded with the test's mutex; 600
+  runs (-race -cpu 1,2,4) clean afterwards (one earlier post-fix batch reported 2 hits whose log
+  was not kept and did not reproduce). Full suite -race green.
+- L12 (CI): master CI flakes are pre-existing; fixed separately in PR #109 (branch fix/flaky-ci).
