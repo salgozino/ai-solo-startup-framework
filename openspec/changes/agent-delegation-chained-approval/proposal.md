@@ -1,3 +1,5 @@
+> Status (2026-10-02): superseded as an SDD change. Executed under ODD as Slice 8 (chained approval) of `odd/tasks/ceo-orchestration-loop.md` on the `feat/ceo-orchestration-loop` chain. This file stays as that slice's read-only design source.
+
 # Proposal: Chained Approval for Delegated Peer Escalations
 
 Make a peer's own escalation resolvable. `agent-delegation-over-a2a` ships delegation with a

@@ -5,6 +5,11 @@ A framework for running startups entirely by AI agents. You declare your company
 - YAML to define a new company.
 - Markdown to define the skills of each agent inside of a company
 - A2A protocol to build the communication between agents (Linux Foundation)
+- We follow ODD (Organic Driven Development): every feature is tracked in `odd/tasks/<feature-name>.md`
+  (objective, scope, constraints, tasks, progress log), mirrored to Engram under `odd/<feature-name>/tasks`.
+  TDD stays mandatory; each task closes with a work-unit Conventional Commit.
+  `openspec/` is a frozen, read-only historical record of the pre-2026-10-02 SDD era,
+  consulted as design reference only.
 
 # How to build
 go build ./cmd/company
