@@ -431,9 +431,20 @@ func TestClient_DelegateDoesNotWaitForPeer(t *testing.T) {
 		t.Error("expected a non-empty PeerTaskID to poll")
 	}
 	// The peer keeps running after the delegation request returned.
-	got, err := c.PeerTaskState(context.Background(), "engineer", delegated.PeerTaskID)
-	if err != nil {
-		t.Fatalf("PeerTaskState: %v", err)
+	// The peer may still be SUBMITTED right after Delegate returns: wait, bounded,
+	// for it to reach WORKING.
+	var got port.DelegationResult
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var err error
+		got, err = c.PeerTaskState(context.Background(), "engineer", delegated.PeerTaskID)
+		if err != nil {
+			t.Fatalf("PeerTaskState: %v", err)
+		}
+		if got.State == string(sdka2a.TaskStateWorking) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	if got.State != string(sdka2a.TaskStateWorking) {
 		t.Errorf("peer state = %q, want WORKING while the provider is gated", got.State)
