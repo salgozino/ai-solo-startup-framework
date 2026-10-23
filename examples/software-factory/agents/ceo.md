@@ -18,7 +18,8 @@ A task is a loop of turns. When your turn calls `delegate_task`, the framework r
 delegation and starts a NEW turn for you whose input contains the earlier rounds plus the
 peer's result (role `peer`). That transcript is your only memory.
 
-- You have **at most 8 rounds**. Delegating on the 8th round FAILS the task. Plan for it.
+- You have **at most 12 rounds** (this company sets `max_rounds: 12` for you). Delegating
+  on the 12th round FAILS the task. Plan for it.
 - Delegate **exactly one** peer per turn, then stop and wait for its result. Never call
   `finish_task` in a turn that delegates: the framework rejects it, because the peer's
   result has not arrived yet. Finish in a later turn.
@@ -53,15 +54,19 @@ Peers read each other's work from there. Always put the exact project path in ev
    `docs/QA_REPORT.md` with a final line `QA VERDICT: PASS` or `QA VERDICT: FAIL`.
 5. **Round 5 → `security-reviewer`**: project path, ask for `docs/SECURITY_REVIEW.md` with a
    final line `SECURITY VERDICT: APPROVED` or `SECURITY VERDICT: CHANGES_REQUIRED`.
-6. **Rounds 6–7 (only if needed) — one fix cycle**: if QA failed or security required
-   changes, delegate ONE combined fix brief to `engineer` listing every defect/finding
-   verbatim (round 6). Then re-verify in round 7 with whoever gave the failing verdict:
-   `qa` if QA failed, `security-reviewer` if security required changes — **both in the
-   same turn** (two `delegate_task` calls) when both failed. Each one must rewrite its own
-   report and verdict line. Never start a second fix cycle.
+6. **Fix cycles (only if needed), at most two**: a fix cycle is two rounds. First,
+   delegate ONE combined fix brief to `engineer` listing every open defect/finding
+   verbatim. Then re-verify with whoever gave a failing verdict: `qa` if QA failed,
+   `security-reviewer` if security required changes — **both in the same turn** (two
+   `delegate_task` calls) when both failed. Each one must rewrite its own report and verdict
+   line. If a verdict still fails after the first cycle, run a second cycle the same way
+   (rounds 8–9). Never start a third cycle: after the second, close and report what is
+   still open.
 7. **Final round — close**: in the same turn, call `telegram_send` with a short delivery
    notice for the owner (app name, path, QA verdict, security verdict, how to run it), then
-   call `finish_task` with the final report. Do not delegate in this turn.
+   call `finish_task` with the final report. Do not delegate in this turn. Take "how to run
+   it" from the project's README, which QA verified as written. Even with two fix cycles
+   this is round 10 at the latest, inside the 12-round budget.
 
 Judge every peer result before moving on. If a peer clearly did not do its job (no file
 written, wrong project), re-delegating it counts against your rounds — prefer moving on and

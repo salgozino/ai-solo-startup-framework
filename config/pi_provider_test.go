@@ -193,3 +193,47 @@ func TestLoad_MCPServerNameAmbiguousInPiRejected(t *testing.T) {
 		}
 	}
 }
+
+// TestLoad_MaxRounds covers the optional per-agent max_rounds field (S2) from
+// odd/tasks/configurable-rounds.md.
+func TestLoad_MaxRounds(t *testing.T) {
+	t.Run("omitted defaults to 8", func(t *testing.T) {
+		c, err := config.Load(writeCompany(t, ""))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got := c.Agents[0].MaxRounds; got != 8 {
+			t.Errorf("MaxRounds = %d; want 8", got)
+		}
+	})
+	for _, tc := range []struct {
+		yaml string
+		want int
+	}{{"1", 1}, {"12", 12}, {"50", 50}} {
+		c, err := config.Load(writeCompany(t, "    provider: claude-code\n    max_rounds: "+tc.yaml+"\n"))
+		if err != nil {
+			t.Fatalf("max_rounds %s: %v", tc.yaml, err)
+		}
+		if got := c.Agents[0].MaxRounds; got != tc.want {
+			t.Errorf("max_rounds %s: MaxRounds = %d; want %d", tc.yaml, got, tc.want)
+		}
+	}
+	for _, tc := range []struct{ name, val, got string }{
+		{"non-integer", "\"many\"", "many"},
+		{"float", "2.5", "2.5"},
+		{"zero", "0", "0"},
+		{"negative", "-3", "-3"},
+		{"too large", "51", "51"},
+	} {
+		t.Run(tc.name+" is rejected", func(t *testing.T) {
+			_, err := config.Load(writeCompany(t, "    max_rounds: "+tc.val+"\n"))
+			if err == nil {
+				t.Fatal("Load succeeded; want error")
+			}
+			want := `config: agent[0] ("ceo"): max_rounds: must be an integer from 1 to 50, got ` + tc.got
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not contain %q", err.Error(), want)
+			}
+		})
+	}
+}

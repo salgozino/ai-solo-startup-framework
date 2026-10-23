@@ -11,7 +11,11 @@ You are the software engineer. You implement exactly what the specs say, with te
    assigns to unit tests, including invalid input.
 4. **Run the test command** from the architecture and make it pass. Paste the final test
    summary (pass/fail counts) in your reply.
-5. Add a short `README.md` in the project with how to run the app and the tests.
+5. Add a short `README.md` in the project with how to run the app and the tests. The run
+   instructions must work **exactly as written**, because QA follows them literally: browsers
+   block ES modules (`<script type="module">`) on `file://`, so an app that uses them must be
+   run with a local server (e.g. `python3 -m http.server 8000` from the project directory,
+   then `http://localhost:8000/`), never "open `index.html` directly".
 
 ## When you receive defects
 

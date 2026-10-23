@@ -46,6 +46,8 @@ type AgentConfig struct {
 	Model        string   `yaml:"model,omitempty"`
 	SystemPrompt string   `yaml:"system_prompt,omitempty"` // abs path after Load()
 	Extensions   []string `yaml:"extensions,omitempty"`    // abs paths or builtin:<name> after Load()
+	// MaxRounds caps the agent's provider-round loop; Load fills DefaultMaxRounds when omitted.
+	MaxRounds int `yaml:"max_rounds,omitempty"`
 	// MCPServers (pi only) declares the agent's own stdio MCP servers by name. Their tools
 	// are not action intents and bypass the risk policy: declaring one is an explicit grant
 	// by the company owner.
@@ -149,7 +151,7 @@ func Load(path string) (*CompanyConfig, error) {
 		// Reject any other unknown field.
 		for k := range a {
 			switch k {
-			case "name", "role", "provider", "model", "system_prompt", "extensions", "mcp_servers":
+			case "name", "role", "provider", "model", "system_prompt", "extensions", "mcp_servers", "max_rounds":
 				// valid fields
 			default:
 				return nil, fmt.Errorf("config: agent[%d] (%q): unknown field %q", i, name, k)
@@ -190,6 +192,11 @@ func Load(path string) (*CompanyConfig, error) {
 			return nil, fmt.Errorf("config: agent[%d] (%q): %w", i, name, err)
 		}
 
+		maxRounds, err := resolveMaxRounds(a["max_rounds"])
+		if err != nil {
+			return nil, fmt.Errorf("config: agent[%d] (%q): %w", i, name, err)
+		}
+
 		agents = append(agents, AgentConfig{
 			Name:         name,
 			Role:         role,
@@ -198,6 +205,7 @@ func Load(path string) (*CompanyConfig, error) {
 			SystemPrompt: systemPrompt,
 			Extensions:   extensions,
 			MCPServers:   mcpServers,
+			MaxRounds:    maxRounds,
 		})
 	}
 
@@ -307,6 +315,25 @@ func resolveMCPServers(raw any, provider string) (map[string]MCPServer, error) {
 		seen[key] = name
 	}
 	return out, nil
+}
+
+// DefaultMaxRounds is the provider-round cap of an agent that omits max_rounds.
+const DefaultMaxRounds = 8
+
+// maxRoundsLimit is the largest max_rounds an agent may declare.
+const maxRoundsLimit = 50
+
+// resolveMaxRounds validates an agent's raw max_rounds value: absent -> DefaultMaxRounds,
+// otherwise an integer from 1 to maxRoundsLimit.
+func resolveMaxRounds(raw any) (int, error) {
+	if raw == nil {
+		return DefaultMaxRounds, nil
+	}
+	n, ok := raw.(int)
+	if !ok || n < 1 || n > maxRoundsLimit {
+		return 0, fmt.Errorf("max_rounds: must be an integer from 1 to %d, got %v", maxRoundsLimit, raw)
+	}
+	return n, nil
 }
 
 // resolveExtensions validates an agent's raw extensions value and returns the entries

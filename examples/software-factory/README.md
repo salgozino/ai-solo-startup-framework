@@ -23,9 +23,13 @@ human ─▶ ceo ─▶ product-owner ─▶ ux-designer
              ─▶ engineer
              ─▶ qa
              ─▶ security-reviewer
-             ─▶ (one fix cycle if needed: engineer ─▶ qa)
+             ─▶ (up to two fix cycles: engineer ─▶ qa and/or security-reviewer)
              ─▶ telegram_send + finish_task
 ```
+
+The CEO runs with `max_rounds: 12`: five phases, up to two fix cycles of two rounds each, and
+the closing round fit with room to spare. When both QA and security fail, the CEO re-verifies
+with both in the same turn.
 
 The CEO delegates each phase directly instead of chaining them (tech-lead ─▶ engineer ─▶ qa):
 a delegation's 10-minute timeout covers the peer's whole run, so a chain would make the
@@ -39,8 +43,9 @@ All agents share the working directory the company starts from. Projects are wri
 The `qa` agent declares its own MCP server in `factory.yaml` (`mcp_servers`, pi only):
 [chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp) in headless,
 isolated mode, run with `npx --offline`, so it must already be in your npx cache
-(`npx -y chrome-devtools-mcp@latest --help` once, online). QA serves the project with
-`python3 -m http.server` and drives the app through the browser tools.
+(`npx -y chrome-devtools-mcp@latest --help` once, online). QA first follows the project
+README's run instructions exactly as written (a `file://` instruction included), then serves
+the project with `python3 -m http.server` and drives the app through the browser tools.
 
 Those browser tools are not action intents and do not pass through the risk policy:
 declaring the server is your explicit grant to that agent.
@@ -65,7 +70,8 @@ task to finish, and checks that:
 - the CEO delegated to every pipeline role and the product owner delegated to UX,
 - every task completed,
 - every artifact exists and the QA/security reports end with a passing verdict,
-- the QA report has a `## Browser verification` section against the served app,
+- the QA report has a `## Browser verification` section against the served app, starting with
+  the README run instructions QA followed,
 - `node --test` passes in the delivered project,
 - the Telegram notice was delivered.
 
