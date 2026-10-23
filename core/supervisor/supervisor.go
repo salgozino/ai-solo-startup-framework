@@ -274,10 +274,21 @@ func (s *Supervisor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContex
 
 		// Persist task as WORKING.
 		rec := TaskRecord{
-			TaskID: taskID,
-			State:  string(a2a.TaskStateWorking),
-			Input:  input,
-			Owner:  string(s.cfg.Addr),
+			TaskID:    taskID,
+			State:     string(a2a.TaskStateWorking),
+			Input:     input,
+			Owner:     string(s.cfg.Addr),
+			ContextID: execCtx.ContextID,
+		}
+		if refs := execCtx.Message.ReferenceTasks; len(refs) > 0 {
+			var err error
+			if rec, err = s.seedFollowUp(rec, refs); err != nil {
+				s.log(taskID).Error("followup.refused", "error", err)
+				rec.Output = err.Error()
+				s.markFailed(rec)
+				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
+				return
+			}
 		}
 		if err := s.cfg.Store.Save(s.cfg.Addr, rec); err != nil {
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, errorMessage(err)), nil) //nolint
@@ -473,6 +484,46 @@ func (s *Supervisor) resumeFromPeer(
 	s.runRounds(ctx, execCtx, yield, rec, true)
 }
 
+// seedFollowUp turns a new task into the follow-up of the one task its message
+// references. A2A forbids messages to a terminal task, so the client's answer to
+// a finished task arrives as a new task instead; it inherits the followed task's
+// whole transcript (which already holds the chain before it), that task's
+// outcome, and then the client's message. The followed record is only read.
+func (s *Supervisor) seedFollowUp(rec TaskRecord, refs []a2a.TaskID) (TaskRecord, error) {
+	if len(refs) != 1 {
+		return rec, fmt.Errorf("supervisor: follow-up must reference exactly one task, got %d", len(refs))
+	}
+	id := string(refs[0])
+	prev, err := s.cfg.Store.Load(s.cfg.Addr, id)
+	if errors.Is(err, ErrTaskNotFound) {
+		return rec, fmt.Errorf("supervisor: follow-up of unknown task %q", id)
+	}
+	if err != nil {
+		return rec, fmt.Errorf("supervisor: follow-up of task %q: %w", id, err)
+	}
+	if !a2a.TaskState(prev.State).Terminal() {
+		return rec, fmt.Errorf("supervisor: follow-up of task %q: task is not terminal (%s)", id, prev.State)
+	}
+
+	turns := append([]port.ContextMessage(nil), prev.Turns...)
+	if len(turns) == 0 {
+		// Records written before transcripts existed still carry their input.
+		turns = append(turns, port.ContextMessage{Role: "user", Content: prev.Input, At: time.Now()})
+	}
+	outcome := fmt.Sprintf("previous task %q ended in state %s with no output", id, prev.State)
+	if prev.Output != "" {
+		outcome = fmt.Sprintf("previous task %q ended in state %s with output:\n%s", id, prev.State, prev.Output)
+	}
+	turns = append(turns, port.ContextMessage{Role: "system", Content: outcome, At: time.Now()})
+	rec.BaseTurns = len(turns)
+	rec.Turns = append(turns, port.ContextMessage{Role: "user", Content: rec.Input, At: time.Now()})
+	rec.FollowUpOf = id
+	if rec.ContextID == "" {
+		rec.ContextID = prev.ContextID
+	}
+	return rec, nil
+}
+
 // executeWithPolicy starts a task's provider loop from its first round.
 func (s *Supervisor) executeWithPolicy(
 	ctx context.Context,
@@ -514,7 +565,7 @@ func (s *Supervisor) runRounds(
 			if len(rec.Turns) > 1 {
 				input = contextText(assembleBoundedContext(rec.Turns, s.effectiveBudget()))
 			}
-			log.Info("runtask.start", "round", assistantTurns(rec.Turns)+1)
+			log.Info("runtask.start", "round", rec.rounds()+1)
 			result, err := s.cfg.Provider.RunTask(ctx, rec.TaskID, input)
 			if err != nil {
 				log.Error("runtask.failed", "error", err)
@@ -565,7 +616,7 @@ func (s *Supervisor) runRounds(
 			return
 		}
 		s.notify()
-		if assistantTurns(rec.Turns) >= s.MaxRounds() {
+		if rec.rounds() >= s.MaxRounds() {
 			rec.Output = fmt.Sprintf("supervisor: provider round limit (%d) exhausted after delegation", s.MaxRounds())
 			s.markFailed(rec)
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, outputMessage(rec.Output)), nil) //nolint
@@ -580,6 +631,15 @@ func (s *Supervisor) runRounds(
 	_ = s.cfg.Store.Save(s.cfg.Addr, rec)
 	s.notify()
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, outputMessage(rec.Output)), nil) //nolint
+}
+
+// rounds counts the provider rounds this task spent, excluding the ones a
+// follow-up inherited from the chain it follows.
+func (r TaskRecord) rounds() int {
+	if r.BaseTurns > len(r.Turns) {
+		return 0
+	}
+	return assistantTurns(r.Turns[r.BaseTurns:])
 }
 
 // assistantTurns counts the provider rounds already spent on a transcript.
