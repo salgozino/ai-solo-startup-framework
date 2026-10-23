@@ -28,6 +28,75 @@ function displayLabel(state) {
   return STATE_LABELS[state] || state || '—';
 }
 
+// buildTree groups tasks into nodes {task, children}. A task listed as a
+// delegation of another listed task becomes that task's child (delegation
+// order, recursively) and is not repeated at top level; a child whose parent
+// is not listed stays top-level. Top-level order is newest first.
+function buildTree(tasks) {
+  var byId = {};
+  tasks.forEach(function(t) { if (!(t.task_id in byId)) byId[t.task_id] = t; });
+  var isChild = {};
+  tasks.forEach(function(t) {
+    (t.delegations || []).forEach(function(d) {
+      var c = byId[d.task_id];
+      if (c && c !== t) isChild[d.task_id] = true;
+    });
+  });
+  var seen = {};
+  function node(t) {
+    seen[t.task_id] = true;
+    var children = [];
+    (t.delegations || []).forEach(function(d) {
+      var c = byId[d.task_id];
+      if (c && c !== t && !seen[c.task_id]) children.push(node(c));
+    });
+    return { task: t, children: children };
+  }
+  return tasks.slice().reverse().filter(function(t) {
+    return !isChild[t.task_id];
+  }).map(node);
+}
+
+function renderNode(n) {
+  var kids = n.children.length
+    ? '<div class="task-children">' + n.children.map(renderNode).join('') + '</div>'
+    : '';
+  return '<div class="task-node">' + renderCard(n.task) + kids + '</div>';
+}
+
+function renderCard(t) {
+  const key = t.verdict_id || t.task_id;
+  const label  = displayLabel(t.state);
+  const isInput = t.state === 'TASK_STATE_INPUT_REQUIRED' && !t.awaiting_peer;
+  const waiting = t.awaiting_peer
+    ? `<div class="task-awaiting">Awaiting ${escHtml(t.awaiting_peer)}${t.awaiting_peer_approval ? "'s human approval" : ''}</div>`
+    : '';
+  const actions = isInput
+    ? `<div class="task-actions">
+         <button class="btn btn-approve" onclick="verdict('${key}','approve')">Approve</button>
+         <button class="btn btn-reject"  onclick="verdict('${key}','reject')">Reject</button>
+       </div>`
+    : '';
+  const outputHtml = t.output
+    ? `<div class="task-output" id="output-${key}">
+         <div class="task-output-header" onclick="toggleOutput('${key}')">
+           <span class="task-output-toggle">▶</span> Agent output
+         </div>
+         <div class="task-output-body"><pre>${escHtml(t.output)}</pre></div>
+       </div>`
+    : '';
+  return `<div class="task-card" id="task-${key}">
+    <div class="task-header">
+      <span class="task-id">${escHtml(t.agent ? t.agent + ' · ' : '')}${escHtml(t.task_id)}</span>
+      <span class="task-state task-state-${label}">${label}</span>
+    </div>
+    <div class="task-input">${escHtml(t.input || '')}</div>
+    ${waiting}
+    ${outputHtml}
+    ${actions}
+  </div>`;
+}
+
 function renderTasks(tasks) {
   if (!tasks || tasks.length === 0) {
     taskList.innerHTML = '<p class="empty">No tasks.</p>';
@@ -42,39 +111,7 @@ function renderTasks(tasks) {
       openOutputs[container.id] = true;
     }
   });
-  // Reverse so newest tasks appear first.
-  taskList.innerHTML = tasks.slice().reverse().map(function(t) {
-    const key = t.verdict_id || t.task_id;
-    const label  = displayLabel(t.state);
-    const isInput = t.state === 'TASK_STATE_INPUT_REQUIRED' && !t.awaiting_peer;
-    const waiting = t.awaiting_peer
-      ? `<div class="task-awaiting">Awaiting ${escHtml(t.awaiting_peer)}${t.awaiting_peer_approval ? "'s human approval" : ''}</div>`
-      : '';
-    const actions = isInput
-      ? `<div class="task-actions">
-           <button class="btn btn-approve" onclick="verdict('${key}','approve')">Approve</button>
-           <button class="btn btn-reject"  onclick="verdict('${key}','reject')">Reject</button>
-         </div>`
-      : '';
-    const outputHtml = t.output
-      ? `<div class="task-output" id="output-${key}">
-           <div class="task-output-header" onclick="toggleOutput('${key}')">
-             <span class="task-output-toggle">▶</span> Agent output
-           </div>
-           <div class="task-output-body"><pre>${escHtml(t.output)}</pre></div>
-         </div>`
-      : '';
-    return `<div class="task-card" id="task-${key}">
-      <div class="task-header">
-        <span class="task-id">${escHtml(t.agent ? t.agent + ' · ' : '')}${escHtml(t.task_id)}</span>
-        <span class="task-state task-state-${label}">${label}</span>
-      </div>
-      <div class="task-input">${escHtml(t.input || '')}</div>
-      ${waiting}
-      ${outputHtml}
-      ${actions}
-    </div>`;
-  }).join('');
+  taskList.innerHTML = buildTree(tasks).map(renderNode).join('');
   // Restore open toggles after re-render.
   Object.keys(openOutputs).forEach(function(id) {
     var container = document.getElementById(id);

@@ -67,8 +67,22 @@ type TaskRecord struct {
 	// peer wait must not re-invoke the provider after the resume. Cleared once the
 	// turn's intents have all run. Zero-value safe.
 	FinishRequested bool `json:"finish_requested,omitempty"`
+	// Delegations lists, in the order they were made, every peer task this task
+	// created through delegate_task, whatever became of it (completed, still
+	// running, escalated, failed). It is the parent-side link the UI uses to nest
+	// a delegated task under the task that delegated it. Zero-value safe: a nil
+	// slice means no delegation, which is how every record written before this
+	// field existed reads back.
+	Delegations []Delegation `json:"delegations,omitempty"`
 	// Output is the result produced by the provider when the task completes.
 	Output string `json:"output,omitempty"`
+}
+
+// Delegation is one peer task created by a delegate_task intent: the role that
+// fulfilled it and the task id the peer assigned.
+type Delegation struct {
+	Role   string `json:"role"`
+	TaskID string `json:"task_id"`
 }
 
 // PendingIntent is the persisted form of a port.ActionIntent. It carries the
@@ -84,6 +98,16 @@ type PendingIntent struct {
 	// Target is the peer role addressed by the intent, empty for kinds that
 	// address no peer.
 	Target string `json:"target,omitempty"`
+}
+
+// recordDelegation appends the peer task a delegation produced, if it produced
+// one. Outcomes of non-delegation actions and of delegations that never reached a
+// peer carry no task id and leave the record untouched.
+func (r *TaskRecord) recordDelegation(o actionOutcome) {
+	if o.PeerTaskID == "" {
+		return
+	}
+	r.Delegations = append(r.Delegations, Delegation{Role: o.PeerRole, TaskID: o.PeerTaskID})
 }
 
 // ErrTaskNotFound is returned by Store.Load when the task does not exist.

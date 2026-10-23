@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -266,6 +267,40 @@ func TestCompanyUI_AwaitingPeerApprovalIsExposed(t *testing.T) {
 	}
 }
 
+// S3: a task's delegations reach the task list JSON as {role, task_id}, in order,
+// and a task without delegations carries no key.
+func TestCompanyUI_DelegationsAreExposed(t *testing.T) {
+	runtimes, _ := uiRuntimesWith(t, map[string][]supervisor.TaskRecord{"ceo": {{
+		TaskID: "ceo-parent", State: string(sdka2a.TaskStateCompleted), Input: "go",
+		Delegations: []supervisor.Delegation{{Role: "engineer", TaskID: "P1"}, {Role: "qa", TaskID: "P2"}},
+	}}}, "ceo", "engineer")
+	h := newCompanyUIHandler(runtimes)
+	defer h.Shutdown()
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/tasks", nil))
+	var payload struct {
+		Tasks []map[string]any `json:"tasks"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range payload.Tasks {
+		if task["task_id"] == "ceo-parent" {
+			want := []any{map[string]any{"role": "engineer", "task_id": "P1"}, map[string]any{"role": "qa", "task_id": "P2"}}
+			if !reflect.DeepEqual(task["delegations"], want) {
+				t.Fatalf("delegations = %v, want %v", task["delegations"], want)
+			}
+			continue
+		}
+		if _, ok := task["delegations"]; ok {
+			t.Errorf("a task without delegations must omit the key: %v", task)
+		}
+	}
+}
+
 // Compat: the pre-Slice-8 UI JSON still decodes, and the new fields stay out of it.
 func TestUITaskRecord_PreChangeJSONCompat(t *testing.T) {
 	var rec ui.TaskRecord
@@ -273,7 +308,7 @@ func TestUITaskRecord_PreChangeJSONCompat(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, _ := json.Marshal(rec)
-	if strings.Contains(string(out), "awaiting_peer") {
+	if strings.Contains(string(out), "awaiting_peer") || strings.Contains(string(out), "delegations") {
 		t.Errorf("omitempty must keep awaiting_peer* out of %s", out)
 	}
 }
