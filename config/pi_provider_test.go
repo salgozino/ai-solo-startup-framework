@@ -169,6 +169,8 @@ func TestLoad_MCPServers(t *testing.T) {
 		{"unknown key", "    mcp_servers:\n      a:\n        command: x\n        env: {A: b}\n", `mcp_servers["a"]: unknown field "env"`},
 		{"not a map", "    mcp_servers: [a]\n", `mcp_servers: must be a map of server name to {command, args}`},
 		{"args not strings", "    mcp_servers:\n      a:\n        command: x\n        args: [1]\n", `mcp_servers["a"]: args must be a list of strings`},
+		{"double underscore name", "    mcp_servers:\n      github__prod:\n        command: x\n", `mcp_servers: invalid server name "github__prod": "__" is pi's tool namespace delimiter`},
+		{"double underscore after dash mapping", "    mcp_servers:\n      a-_b:\n        command: x\n", `mcp_servers: invalid server name "a-_b": "__" is pi's tool namespace delimiter`},
 		{"names differing only in dash and underscore", "    mcp_servers:\n      a_b:\n        command: x\n      a-b:\n        command: y\n", `mcp_servers: server names "a-b" and "a_b" collide: pi treats "-" and "_" in server names as the same character`},
 	}
 	for _, tc := range rejects {

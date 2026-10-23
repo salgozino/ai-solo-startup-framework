@@ -48,12 +48,16 @@ The provider adapters drive external agent CLIs as subprocesses and parse their 
   (resolved against company.yaml, must exist) or `builtin:<name>`. Package sources (`npm:`,
   `git:`, URLs) are rejected at load because `pi -e npm:<pkg>` is silently ignored (verified).
   Per-agent `mcp_servers:` (pi only; name -> `{command, args}`, name `^[a-z0-9][a-z0-9_-]*$`
-  and not `framework`; names equal after `-`->`_` collide in pi and are rejected) registers each stdio server through `pi.registerMcpServer(name,
+  and not `framework`; names equal after `-`->`_` collide in pi and are rejected; no `__` after
+  that mapping) registers each stdio server through `pi.registerMcpServer(name,
   {command, args, exposure: "direct"})` in the same temp extension (verified against pi 1.2.0
   `docs/extensions.md`: stdio `command`/`args` are accepted) and appends `mcp__<name>__*` to the
   `--tools` allowlist with `-` mapped to `_`: pi names tools `mcp__<server>__<tool>` replacing
   every non `[A-Za-z0-9_]` character with `_` (`docs/mcp.md`), so `chrome-devtools` exposes
-  `mcp__chrome_devtools__*`; the unmapped pattern matches nothing (verified: zero tools). Without `mcp_servers` argv and extension are byte-identical. These tools
+  `mcp__chrome_devtools__*`; the unmapped pattern matches nothing (verified: zero tools). The
+  prefix alone also matches an ambient server named `<name>__x` (`mcp__<name>__x__<tool>`), so
+  the adapter passes `--exclude-tools mcp__<name>__*__*` (pi applies exclusions after every other
+  selection; verified live: 31 leaked nested tools -> 0). Declared tools containing `__` are hidden too. Without `mcp_servers` argv and extension are byte-identical. These tools
   are NOT action intents and bypass the risk policy: declaring a server is an explicit grant by
   the company owner. Command/args live in the extension file, never put secrets there.
   `ProbeModel` checks the configured model against `pi -ne [-e ...] --offline --list-models`.

@@ -123,12 +123,16 @@ agents:
         args: ["chrome-devtools-mcp", "--headless", "--isolated"]
 ```
 
-- Server names must match `^[a-z0-9][a-z0-9_-]*$` and cannot be `framework`; two names that
-  differ only in `-` and `_` are rejected (pi treats them as the same server); `command` is
+- Server names must match `^[a-z0-9][a-z0-9_-]*$`, cannot be `framework`, and cannot contain
+  `__` (also after mapping `-` to `_`), pi's server/tool delimiter; two names that differ only in
+  `-` and `_` are rejected (pi treats them as the same server); `command` is
   required; unknown keys are rejected. `mcp_servers` is rejected for any provider other than `pi`.
 - The adapter registers each server on every task invocation and adds its tools to the
   `--tools` allowlist. pi names them `mcp__<name>__<tool>` with `-` replaced by `_`, so the
-  server above exposes `mcp__chrome_devtools__*`; other ambient MCP servers stay hidden. `command` and `args` are written to
+  server above exposes `mcp__chrome_devtools__*`. The adapter also passes
+  `--exclude-tools mcp__<name>__*__*`: without it, an ambient server named e.g.
+  `chrome_devtools__prod` would match the same prefix. A declared server's own tool whose name
+  contains `__` is hidden as well; other ambient MCP servers stay hidden. `command` and `args` are written to
   a temporary extension file, so do not put secrets in them.
 - **These tools are not action intents and bypass the risk policy.** The framework neither
   gates nor audits their calls; declaring a server is an explicit grant by the company owner.

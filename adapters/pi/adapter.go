@@ -244,7 +244,8 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 			return port.ProviderResult{}, fmt.Errorf("pi: mcp extension: %w", err)
 		}
 		defer os.Remove(extPath)
-		args = append(args, "-e", "builtin:mcp", "-e", extPath, "--tools", a.toolsAllowlist(false))
+		args = append(args, "-e", "builtin:mcp", "-e", extPath)
+		args = append(args, a.toolSelection(false)...)
 	}
 	if a.mcpRegistry != nil {
 		// Consult the MCP server's health before ever spawning the subprocess; see
@@ -268,7 +269,8 @@ func (a *Adapter) RunTask(ctx context.Context, taskID string, input string) (por
 		}
 		defer os.Remove(extPath)
 
-		args = append(args, "-e", "builtin:mcp", "-e", extPath, "--tools", a.toolsAllowlist(true))
+		args = append(args, "-e", "builtin:mcp", "-e", extPath)
+		args = append(args, a.toolSelection(true)...)
 		mcpEnv = []string{"ASF_MCP_URL=http://" + a.mcpServerAddr, "ASF_MCP_TOKEN=" + token}
 	}
 
@@ -368,9 +370,34 @@ func (a *Adapter) toolsAllowlist(withFramework bool) string {
 		parts = append(parts, "mcp__framework__*")
 	}
 	for _, name := range a.mcpServerNames {
-		parts = append(parts, "mcp__"+strings.ReplaceAll(name, "-", "_")+"__*")
+		parts = append(parts, toolPrefix(name)+"*")
 	}
 	return strings.Join(parts, ",")
+}
+
+// toolSelection is the --tools argv, plus --exclude-tools when servers are declared.
+//
+// mcp__<name>__* alone would also match an ambient server named "<name>__x", whose tools
+// are mcp__<name>__x__<tool>, and make them callable outside the risk policy. pi applies
+// --exclude-tools after every other selection, so excluding mcp__<name>__*__* hides that
+// nested namespace. Config rejects "__" in declared names, so it never hides another
+// declared server; a declared server's own tool whose name contains "__" is hidden too,
+// which fails closed.
+func (a *Adapter) toolSelection(withFramework bool) []string {
+	args := []string{"--tools", a.toolsAllowlist(withFramework)}
+	if len(a.mcpServerNames) == 0 {
+		return args
+	}
+	excl := make([]string, 0, len(a.mcpServerNames))
+	for _, name := range a.mcpServerNames {
+		excl = append(excl, toolPrefix(name)+"*__*")
+	}
+	return append(args, "--exclude-tools", strings.Join(excl, ","))
+}
+
+// toolPrefix is the mcp__<server>__ prefix pi gives a declared server's tools.
+func toolPrefix(name string) string {
+	return "mcp__" + strings.ReplaceAll(name, "-", "_") + "__"
 }
 
 // writeExtensionFile writes the static extension source to a 0600 temp file ending in

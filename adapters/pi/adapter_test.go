@@ -619,6 +619,11 @@ func TestRunTask_MCPServersRegisteredAndAllowlisted(t *testing.T) {
 	if tools, _ := valueAfter(args, "--tools"); tools != "read,bash,edit,write,mcp__framework__*,mcp__alpha__*,mcp__chrome_devtools__*" {
 		t.Errorf("--tools = %q", tools)
 	}
+	// An ambient server named e.g. "alpha__prod" exposes mcp__alpha__prod__<tool>, which
+	// mcp__alpha__* also matches; the nested namespace is excluded so it stays hidden.
+	if excl, _ := valueAfter(args, "--exclude-tools"); excl != "mcp__alpha__*__*,mcp__chrome_devtools__*__*" {
+		t.Errorf("--exclude-tools = %q", excl)
+	}
 	for _, want := range []string{
 		`pi.registerMcpServer("framework"`,
 		`pi.registerMcpServer("alpha", {"command":"/bin/alpha","args":[],"exposure":"direct"});`,
@@ -637,6 +642,9 @@ func TestRunTask_MCPServersWithoutFrameworkMCP(t *testing.T) {
 	args, ext := runWithServers(t, map[string]pi.MCPServer{"a": {Command: "x"}}, false)
 	if tools, _ := valueAfter(args, "--tools"); tools != "read,bash,edit,write,mcp__a__*" {
 		t.Errorf("--tools = %q", tools)
+	}
+	if excl, _ := valueAfter(args, "--exclude-tools"); excl != "mcp__a__*__*" {
+		t.Errorf("--exclude-tools = %q", excl)
 	}
 	if contains(args, "builtin:mcp") == false {
 		t.Errorf("expected -e builtin:mcp, got %v", args)

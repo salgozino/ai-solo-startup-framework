@@ -255,6 +255,11 @@ func resolveMCPServers(raw any, provider string) (map[string]MCPServer, error) {
 		if name == "framework" {
 			return nil, fmt.Errorf("mcp_servers: server name %q is reserved for the framework's own MCP server", name)
 		}
+		// pi maps "-" to "_" in tool names and uses "__" to separate server from tool;
+		// the adapter's ambient-server exclusion relies on declared names never containing it.
+		if strings.Contains(strings.ReplaceAll(name, "-", "_"), "__") {
+			return nil, fmt.Errorf("mcp_servers: invalid server name %q: \"__\" is pi's tool namespace delimiter", name)
+		}
 		entry, ok := v.(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("mcp_servers[%q]: must be a map with command and optional args", name)
