@@ -50,10 +50,18 @@ func TestResume_NextRoundReportsWorkingNotInputRequired(t *testing.T) {
 		}
 	})
 
+	// taskID, recDuring and notified are shared with the supervisor's goroutines
+	// (provider hook, state-change callback); nmu guards all three.
 	var co *delegationCompany
+	var nmu sync.Mutex
 	var taskID sdka2a.TaskID
 	var recDuring supervisor.TaskRecord
 	var notified []string
+	currentTask := func() sdka2a.TaskID {
+		nmu.Lock()
+		defer nmu.Unlock()
+		return taskID
+	}
 	ceoProv := &probeProvider{Provider: &fake.Provider{
 		ReturnRunResults: []port.ProviderResult{
 			{Output: "delegating", ActionIntents: []port.ActionIntent{delegateTaskIntentTo("engineer", "build X")}},
@@ -61,15 +69,18 @@ func TestResume_NextRoundReportsWorkingNotInputRequired(t *testing.T) {
 		},
 	}}
 	ceoProv.hook = func() {
-		recDuring, _ = co.ceoStore.Load(co.ceoSup.Addr(), string(taskID))
+		rec, _ := co.ceoStore.Load(co.ceoSup.Addr(), string(currentTask()))
+		nmu.Lock()
+		recDuring = rec
+		nmu.Unlock()
 	}
 	co = startDelegationCompany(t, tenant, ceoProv, engineerProv, 0)
-	var nmu sync.Mutex
 	co.ceoSup.SetOnStateChange(func() {
-		if taskID == "" {
+		id := currentTask()
+		if id == "" {
 			return
 		}
-		rec, err := co.ceoStore.Load(co.ceoSup.Addr(), string(taskID))
+		rec, err := co.ceoStore.Load(co.ceoSup.Addr(), string(id))
 		if err == nil {
 			nmu.Lock()
 			notified = append(notified, rec.State)
@@ -78,7 +89,9 @@ func TestResume_NextRoundReportsWorkingNotInputRequired(t *testing.T) {
 	})
 
 	task := sendCEOTaskBounded(t, co.ceoSrv, tenant, "please delegate")
+	nmu.Lock()
 	taskID = task.ID
+	nmu.Unlock()
 	if task.Status.State != sdka2a.TaskStateInputRequired {
 		t.Fatalf("state = %v, want parked", task.Status.State)
 	}
@@ -88,14 +101,14 @@ func TestResume_NextRoundReportsWorkingNotInputRequired(t *testing.T) {
 	if final.Status.State != sdka2a.TaskStateCompleted || textOf(final.Status.Message) != "wrap up" {
 		t.Fatalf("final = %v/%q, want COMPLETED/wrap up", final.Status.State, textOf(final.Status.Message))
 	}
+	nmu.Lock()
+	defer nmu.Unlock()
 	if recDuring.State != string(sdka2a.TaskStateWorking) {
 		t.Errorf("record state during round 2 = %q, want TASK_STATE_WORKING", recDuring.State)
 	}
 	if recDuring.AwaitingPeerTaskID != "" || recDuring.PendingIntentKind != "" {
 		t.Errorf("record during round 2 = %+v, want no awaiting peer / pending intent", recDuring)
 	}
-	nmu.Lock()
-	defer nmu.Unlock()
 	sawWorking := false
 	for _, s := range notified {
 		if s == string(sdka2a.TaskStateWorking) {
