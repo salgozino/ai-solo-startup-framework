@@ -182,12 +182,14 @@ func TestLoad_MCPServers(t *testing.T) {
 }
 
 // S6: the "__" server-name rule is gone (exact tool names make it unnecessary).
-func TestLoad_MCPServerNameWithDoubleUnderscoreAccepted(t *testing.T) {
-	cfg, err := config.Load(writeCompany(t, "    mcp_servers:\n      github__prod:\n        command: x\n"))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if _, ok := cfg.Agents[0].MCPServers["github__prod"]; !ok {
-		t.Errorf("servers = %v", cfg.Agents[0].MCPServers)
+// pi flattens tools to mcp__<server>__<tool>; a server name with "__" or a trailing "_"
+// (after mapping "-" to "_") would let another server/tool pair produce the same name.
+func TestLoad_MCPServerNameAmbiguousInPiRejected(t *testing.T) {
+	for name, normalized := range map[string]string{"github__prod": "github__prod", "a-_b": "a__b", "tail_": "tail_", "tail-": "tail_"} {
+		_, err := config.Load(writeCompany(t, "    mcp_servers:\n      "+name+":\n        command: x\n"))
+		want := `mcp_servers: invalid server name "` + name + `": its pi name "` + normalized + `" must not contain "__" or end with "_"`
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err = %v\nwant it to contain %q", name, err, want)
+		}
 	}
 }

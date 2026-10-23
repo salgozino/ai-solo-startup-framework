@@ -67,6 +67,10 @@ func TestProbeMCP_FailureModesNamedExactly(t *testing.T) {
 			`pi: mcp server "srv" exposes no tools`},
 		{"collision", pi.MCPServer{Command: bin, Args: []string{"collide"}},
 			`pi: mcp server "srv" tools "a-b" and "a_b" both normalize to "mcp__srv__a_b"; pi would hash-suffix one of them`},
+		{"tool with double underscore", pi.MCPServer{Command: bin, Args: []string{"dunder"}},
+			`pi: mcp server "srv" tool "do__thing" is ambiguous in pi's flat tool namespace: its normalized name "do__thing" must not contain "__" or start with "_"`},
+		{"tool with leading underscore", pi.MCPServer{Command: bin, Args: []string{"leading"}},
+			`pi: mcp server "srv" tool "_x" is ambiguous in pi's flat tool namespace: its normalized name "_x" must not contain "__" or start with "_"`},
 		{"timeout", pi.MCPServer{Command: bin, Args: []string{"hang"}},
 			`pi: mcp server "srv" probe timed out after 500ms`},
 	}
@@ -86,6 +90,32 @@ func TestProbeMCP_FailureModesNamedExactly(t *testing.T) {
 		if err == nil || !strings.HasPrefix(err.Error(), `pi: mcp server "srv" probe failed: `) {
 			t.Errorf("%s: err = %v", name, err)
 		}
+	}
+}
+
+// R3 regression: "alpha"+"do__thing" and "alpha__do"+"thing" would both flatten to
+// mcp__alpha__do__thing. The server name is rejected before any probe runs.
+func TestProbeMCP_AmbiguousServerNameRejected(t *testing.T) {
+	bin := fakeMCP(t)
+	for name, want := range map[string]string{
+		"alpha__do": `pi: mcp server "alpha__do" is ambiguous in pi's flat tool namespace: its normalized name "alpha__do" must not contain "__" or end with "_"`,
+		"alpha-_do": `pi: mcp server "alpha-_do" is ambiguous in pi's flat tool namespace: its normalized name "alpha__do" must not contain "__" or end with "_"`,
+		"alpha_":    `pi: mcp server "alpha_" is ambiguous in pi's flat tool namespace: its normalized name "alpha_" must not contain "__" or end with "_"`,
+	} {
+		servers := map[string]pi.MCPServer{"alpha": {Command: bin, Args: []string{"thing"}}, name: {Command: bin, Args: []string{"thing"}}}
+		err := probeAdapter(t, 5*time.Second, servers).ProbeMCP(context.Background())
+		if err == nil || err.Error() != want {
+			t.Errorf("%s: err = %v\nwant %q", name, err, want)
+		}
+	}
+}
+
+// A policy kind is a framework tool name, so it must parse unambiguously too.
+func TestProbeMCP_AmbiguousPolicyKindRejected(t *testing.T) {
+	a := pi.New("pi-unused", pi.Options{PolicyActionKinds: []string{"telegram_send", "send__all"}}, "", "", nil)
+	want := `pi: policy action kind "send__all" is ambiguous in pi's flat tool namespace: its normalized name "send__all" must not contain "__" or start with "_"`
+	if err := a.ProbeMCP(context.Background()); err == nil || err.Error() != want {
+		t.Fatalf("err = %v\nwant %q", err, want)
 	}
 }
 

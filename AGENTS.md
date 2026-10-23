@@ -48,7 +48,8 @@ The provider adapters drive external agent CLIs as subprocesses and parse their 
   (resolved against company.yaml, must exist) or `builtin:<name>`. Package sources (`npm:`,
   `git:`, URLs) are rejected at load because `pi -e npm:<pkg>` is silently ignored (verified).
   Per-agent `mcp_servers:` (pi only; name -> `{command, args}`, name `^[a-z0-9][a-z0-9_-]*$`
-  and not `framework`; names equal after `-`->`_` collide in pi and are rejected) registers each
+  and not `framework`; names equal after `-`->`_` collide in pi and are rejected; after that
+  mapping no `__` and no trailing `_`) registers each
   stdio server through `pi.registerMcpServer(name, {command, args, exposure: "direct"})` in the
   same temp extension (verified against pi 1.2.0 `docs/extensions.md`: stdio `command`/`args` are
   accepted). The `--tools` allowlist names MCP tools EXACTLY, never `mcp__<server>__*`: a prefix
@@ -63,9 +64,12 @@ The provider adapters drive external agent CLIs as subprocesses and parse their 
   (`mcp.CommandTransport` + `Client.Connect` + `ClientSession.Tools`, which follows
   `nextCursor`), bounded by `Options.MCPProbeTimeout` (30s default) per server, then closes it.
   Named failures: probe failed/timed out, zero tools, two tools of one server normalizing to the
-  same name (pi would hash-suffix them). `RunTask` fails closed if declared servers were never
-  probed. Tools a server adds after startup are not callable. A declared server's tool whose name
-  contains `__` is allowlisted normally. Residual: an ambient `mcp.json` server with exactly the
+  same name (pi would hash-suffix them), and an ambiguous name: a normalized server with `__` or a
+  trailing `_`, or a normalized tool / policy kind with `__` or a leading `_`. Those rules make the
+  separator the only `__` in `mcp__<server>__<tool>`, so the flat name parses one way and no other
+  server/tool pair (declared or ambient) can produce it (native review R1-ambiguous-tool-ownership,
+  R3-cross-server-tool-collision). `RunTask` fails closed if declared servers were never
+  probed. Tools a server adds after startup are not callable. Residual: an ambient `mcp.json` server with exactly the
   same name as a declared/framework server replaces it in pi (mcp.json wins over registered
   servers). Without `mcp_servers` the extension is byte-identical and only the framework part of
   `--tools` changed (prefix -> exact names). These tools

@@ -621,10 +621,9 @@ func TestRunTask_MCPServersRegisteredAndAllowlisted(t *testing.T) {
 	args, ext := runWithServers(t, servers, true)
 
 	// Exact names only, never a prefix pattern: framework first, then each server in name
-	// order with its tools sorted; "-" and every non [A-Za-z0-9_] char became "_", and a
-	// tool whose own name contains "__" stays callable.
+	// order with its tools sorted; "-" and every non [A-Za-z0-9_] char became "_".
 	const wantTools = "read,bash,edit,write,mcp__framework__finish_task," +
-		"mcp__alpha__do__thing,mcp__alpha__list_files,mcp__alpha__plain," +
+		"mcp__alpha__list_files,mcp__alpha__plain," +
 		"mcp__chrome_devtools__t1,mcp__chrome_devtools__t2,mcp__chrome_devtools__t3,mcp__chrome_devtools__t4,mcp__chrome_devtools__t5"
 	if tools, _ := valueAfter(args, "--tools"); tools != wantTools {
 		t.Errorf("--tools = %q\nwant      %q", tools, wantTools)

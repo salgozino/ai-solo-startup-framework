@@ -28,10 +28,16 @@ func main() {
 	opts := &gomcp.ServerOptions{}
 	switch mode {
 	case "basic":
-		names = []string{"list-files", "do__thing", "plain"}
+		names = []string{"list-files", "plain"}
 	case "paged":
 		names = []string{"t1", "t2", "t3", "t4", "t5"}
 		opts.PageSize = 2
+	case "dunder":
+		names = []string{"ok", "do__thing"}
+	case "leading":
+		names = []string{"_x"}
+	case "thing":
+		names = []string{"thing"}
 	case "collide-free":
 		names = []string{"only"}
 	case "collide":

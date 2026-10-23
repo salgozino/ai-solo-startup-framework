@@ -123,8 +123,9 @@ agents:
         args: ["chrome-devtools-mcp", "--headless", "--isolated"]
 ```
 
-- Server names must match `^[a-z0-9][a-z0-9_-]*$` and cannot be `framework`; two names that
-  differ only in `-` and `_` are rejected (pi treats them as the same server); `command` is
+- Server names must match `^[a-z0-9][a-z0-9_-]*$`, cannot be `framework`, and, after mapping
+  `-` to `_`, must not contain `__` or end with `_`; two names that differ only in `-` and `_`
+  are rejected (pi treats them as the same server); `command` is
   required; unknown keys are rejected. `mcp_servers` is rejected for any provider other than `pi`.
 - The `--tools` allowlist names MCP tools **exactly**, never by `mcp__<name>__*` prefix, so an
   undeclared ambient MCP server (any name, e.g. `chrome_devtools__prod`) exposes no callable
@@ -135,8 +136,11 @@ agents:
   `mcp__<name>__<tool>`, with every character outside `[A-Za-z0-9_]` in either part replaced by
   `_` (pi's naming), so `chrome-devtools`'s `take_snapshot` is `mcp__chrome_devtools__take_snapshot`.
   Materialize aborts, before any server binds, when a probe fails or times out, when a server
-  exposes zero tools, or when two of its tools normalize to the same name (pi would hash-suffix
-  them); each error names the server. Tools a server adds **after** startup are not callable
+  exposes zero tools, when two of its tools normalize to the same name (pi would hash-suffix
+  them), or when a normalized tool name (or a `risk_policy` action kind) contains `__` or starts
+  with `_`; each error names the server or kind. These name rules keep `mcp__<server>__<tool>`
+  parseable one way, so no other server/tool pair, declared or ambient, can produce an
+  allowlisted name. Tools a server adds **after** startup are not callable
   (fail closed): restart the company to pick them up. `command` and `args` are written to a
   temporary extension file, so do not put secrets in them.
 - Residual: an ambient `~/.pi/agent/mcp.json` server with exactly the same name as a declared
