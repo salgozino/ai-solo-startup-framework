@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,6 +22,11 @@ type stubSupervisor struct {
 	verdErr    error // if non-nil, PostVerdict returns this error
 	sendErr    error // if non-nil, SendTask returns this error
 	sendCalled bool  // set to true after SendTask is called
+
+	followErr    error // if non-nil, FollowUp returns this error
+	followCalls  int
+	followTaskID string
+	followText   string
 }
 
 func (s *stubSupervisor) StatusStr() string { return s.state }
@@ -35,6 +42,12 @@ func (s *stubSupervisor) PostVerdict(taskID string, approve bool) error {
 func (s *stubSupervisor) SendTask(text string) error {
 	s.sendCalled = true
 	return s.sendErr
+}
+
+func (s *stubSupervisor) FollowUp(taskID, text string) error {
+	s.followCalls++
+	s.followTaskID, s.followText = taskID, text
+	return s.followErr
 }
 
 // buildHandler wires a UIHandler into an httptest server and returns the server.
@@ -384,5 +397,90 @@ func TestSendTaskEmptyMessage(t *testing.T) {
 	}
 	if sup.sendCalled {
 		t.Fatal("SendTask should not be called for empty message")
+	}
+}
+
+func postFollowUp(t *testing.T, srv *httptest.Server, body string) *http.Response {
+	t.Helper()
+	resp, err := http.Post(srv.URL+"/api/follow-up", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+func TestFollowUpSuccess(t *testing.T) {
+	sup := &stubSupervisor{}
+	srv := buildHandler(sup)
+	defer srv.Close()
+
+	resp := postFollowUp(t, srv, `{"task_id":"T1","message":"  change X  "}`)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("want 202, got %d", resp.StatusCode)
+	}
+	if sup.followTaskID != "T1" || sup.followText != "change X" {
+		t.Fatalf("FollowUp got (%q, %q)", sup.followTaskID, sup.followText)
+	}
+	var payload struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil || !payload.OK {
+		t.Fatalf("want {ok:true}, got %+v (%v)", payload, err)
+	}
+}
+
+func TestFollowUpRefusals(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		err  error
+		want int
+	}{
+		{"invalid json", `{`, nil, http.StatusBadRequest},
+		{"empty task id", `{"task_id":"","message":"x"}`, nil, http.StatusBadRequest},
+		{"blank message", `{"task_id":"T1","message":"   "}`, nil, http.StatusBadRequest},
+		{"not found", `{"task_id":"T1","message":"x"}`, ui.ErrTaskNotFound, http.StatusNotFound},
+		{"not terminal", `{"task_id":"T1","message":"x"}`, ui.ErrNotTerminal, http.StatusConflict},
+		{"wrapped not terminal", `{"task_id":"T1","message":"x"}`, fmt.Errorf("task T1: %w", ui.ErrNotTerminal), http.StatusConflict},
+		{"other error", `{"task_id":"T1","message":"x"}`, errors.New("boom"), http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sup := &stubSupervisor{followErr: tc.err}
+			srv := buildHandler(sup)
+			defer srv.Close()
+			resp := postFollowUp(t, srv, tc.body)
+			if resp.StatusCode != tc.want {
+				t.Fatalf("want %d, got %d", tc.want, resp.StatusCode)
+			}
+			if tc.err == nil && sup.followCalls != 0 {
+				t.Fatal("FollowUp reached supervisor on invalid request")
+			}
+		})
+	}
+}
+
+func TestFollowUpMethodNotAllowed(t *testing.T) {
+	srv := buildHandler(&stubSupervisor{})
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/api/follow-up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("want 405, got %d", resp.StatusCode)
+	}
+}
+
+func TestTaskRecordFollowUpOfJSON(t *testing.T) {
+	b, _ := json.Marshal(ui.TaskRecord{TaskID: "t2", FollowUpOf: "t1"})
+	if !strings.Contains(string(b), `"follow_up_of":"t1"`) {
+		t.Fatalf("missing follow_up_of in %s", b)
+	}
+	b, _ = json.Marshal(ui.TaskRecord{TaskID: "t2"})
+	if strings.Contains(string(b), "follow_up_of") {
+		t.Fatalf("follow_up_of must be omitted when empty: %s", b)
 	}
 }

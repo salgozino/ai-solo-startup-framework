@@ -79,11 +79,17 @@ func TestServer_ToolRegistryMirrorsPolicy(t *testing.T) {
 		t.Fatalf("ListTools: %v", err)
 	}
 
-	if len(result.Tools) != 1 {
-		t.Fatalf("expected 1 tool, got %d", len(result.Tools))
+	// Deliberately narrowed (Slice 4): every *action* tool mirrors the policy, plus the
+	// fixed control tool finish_task. Replacement coverage: TestFinishTask_* in finish_test.go.
+	if len(result.Tools) != 2 {
+		t.Fatalf("expected telegram_send + finish_task, got %d tools", len(result.Tools))
 	}
-	if result.Tools[0].Name != "telegram_send" {
-		t.Errorf("tool name: expected %q, got %q", "telegram_send", result.Tools[0].Name)
+	got := map[string]bool{}
+	for _, tool := range result.Tools {
+		got[tool.Name] = true
+	}
+	if !got["telegram_send"] || !got["finish_task"] {
+		t.Errorf("tool names = %v, want telegram_send and finish_task", got)
 	}
 }
 
@@ -100,16 +106,24 @@ func TestServer_ToolDescription_DiscloseContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(result.Tools) == 0 {
-		t.Fatal("no tools returned")
+	// Only the policy-derived action tool carries the record-not-execute disclosure;
+	// finish_task is a control tool with its own description.
+	var action *gomcp.Tool
+	for _, tool := range result.Tools {
+		if tool.Name == "telegram_send" {
+			action = tool
+		}
+	}
+	if action == nil {
+		t.Fatal("telegram_send not returned")
 	}
 
-	desc := strings.ToLower(result.Tools[0].Description)
+	desc := strings.ToLower(action.Description)
 	if !strings.Contains(desc, "records") || !strings.Contains(desc, "intent") {
-		t.Errorf("tool description missing 'records intent': %q", result.Tools[0].Description)
+		t.Errorf("tool description missing 'records intent': %q", action.Description)
 	}
 	if !strings.Contains(desc, "does not") {
-		t.Errorf("tool description missing 'does not': %q", result.Tools[0].Description)
+		t.Errorf("tool description missing 'does not': %q", action.Description)
 	}
 }
 
