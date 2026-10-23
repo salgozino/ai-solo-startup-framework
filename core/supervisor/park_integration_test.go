@@ -88,7 +88,7 @@ func gatedCompany(t *testing.T, tenant string) (*delegationCompany, *fake.Provid
 // a live execution: it is cancellable.
 func TestPark_ParkedCEOTaskIsCancellableWhilePeerRuns(t *testing.T) {
 	tenant := "acme"
-	co, _, _ := gatedCompany(t, tenant)
+	co, ceoProv, release := gatedCompany(t, tenant)
 
 	task := sendCEOTaskBounded(t, co.ceoSrv, tenant, "please delegate")
 	if task.Status.State != sdka2a.TaskStateInputRequired {
@@ -101,6 +101,17 @@ func TestPark_ParkedCEOTaskIsCancellableWhilePeerRuns(t *testing.T) {
 	}
 	if canceled.Status.State != sdka2a.TaskStateCanceled {
 		t.Errorf("state after cancel = %v, want CANCELED", canceled.Status.State)
+	}
+
+	// The peer finishing afterwards must not resume the canceled task: its
+	// watcher is stopped (the poll interval here is 10ms, so give it many ticks).
+	release()
+	time.Sleep(300 * time.Millisecond)
+	if got := ceoProv.RunTaskCallCount(); got != 1 {
+		t.Errorf("CEO RunTask calls after cancel = %d, want 1 (task must not resume)", got)
+	}
+	if got := getTask(t, co.ceoSrv, tenant, task.ID).Status.State; got != sdka2a.TaskStateCanceled {
+		t.Errorf("state after the peer finished = %v, want still CANCELED", got)
 	}
 }
 

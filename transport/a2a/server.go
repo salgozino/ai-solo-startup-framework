@@ -150,10 +150,10 @@ func New(sup *supervisor.Supervisor, authToken string) (*Server, error) {
 		Authenticator: a2asrv.NewTaskStoreAuthenticator(),
 	})
 
-	handler := a2asrv.NewHandler(sup,
+	handler := newCancelRetryHandler(a2asrv.NewHandler(sup,
 		a2asrv.WithCallInterceptors(authInterceptor{token: authToken}, tenantInterceptor{tenant: sup.Addr().Tenant()}),
 		a2asrv.WithTaskStore(store),
-	)
+	))
 
 	// A task parked on a peer is woken by delivering a message that carries its
 	// TaskID through this same handler, exactly like a human verdict would be.
