@@ -38,3 +38,10 @@ Branch `test/ui-playwright`, stacked on `feat/client-follow-up` (PR #113); separ
 - **L4** — Parent verification: `go test ./ui/... -race` ok; `npx playwright test` 8 passed;
   mutation (`const followUp = true` in app.js) makes spec 5 fail, so eligibility is pinned.
   PR #113 merged (e8aed11); this branch rebased onto master.
+- **L5** — User: "agrega cache de playwright para reducir el timpoe del ci". Evidence (PR #94 run
+  39991374879): `playwright install --with-deps` spent 8m12s in apt ("Fetched 25.9 MB in 8min 12s
+  (52.7 kB/s)") and ~10s downloading browsers, so caching `~/.cache/ms-playwright` alone would
+  save ~10s. User chose "Contenedor oficial de Playwright (recomendado)": the `ui-e2e` job runs in
+  `mcr.microsoft.com/playwright:v1.64.1-noble` (`--user 1001`), the install step is gone, and a
+  first step fails when the image tag drifts from `@playwright/test` in `package-lock.json`
+  (checked locally for both match and drift).

@@ -57,10 +57,25 @@ jobs:
     name: UI end-to-end (Playwright)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # The official image ships Chromium and its system libraries, so the job never
+    # runs apt or downloads a browser (a slow apt mirror once cost 8 minutes here).
+    # Its tag MUST equal @playwright/test in ui/e2e/package-lock.json; the first
+    # step below fails the job when they drift.
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --user 1001
 
     steps:
       - name: Check out the merge result
         uses: actions/checkout@v4
+
+      - name: Check the image matches @playwright/test
+        run: |
+          version=$(node -p "require('./ui/e2e/package-lock.json').packages['node_modules/@playwright/test'].version")
+          if ! grep -q "mcr.microsoft.com/playwright:v${version}-noble" .github/workflows/ci.yml; then
+            echo "@playwright/test is ${version}: set the ui-e2e container image to mcr.microsoft.com/playwright:v${version}-noble"
+            exit 1
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -78,10 +93,6 @@ jobs:
       - name: Install dependencies
         working-directory: ui/e2e
         run: npm ci
-
-      - name: Install Chromium
-        working-directory: ui/e2e
-        run: npx playwright install --with-deps chromium
 
       - name: Run Playwright tests
         working-directory: ui/e2e
