@@ -26,9 +26,9 @@ OpenSpec change: `openspec/changes/client-follow-up/`.
 
 ## Tasks
 
-- [x] T1 — S2, S3, S4 (supervisor part): follow-up execution in `core/supervisor` — inline — commit: (this commit)
-- [ ] T2 — S1, S4: `POST /api/follow-up` + adapter wiring in `ui/handler.go`, `cmd/company` — inline — commit:
-- [ ] T3 — S5: UI card action and threading in `ui/app.js`, `ui/style.css`; README — inline — commit:
+- [x] T1 — S2, S3, S4 (supervisor part): follow-up execution in `core/supervisor` — inline — commit: 4e4c47c
+- [x] T2 — S1, S4: `POST /api/follow-up` + adapter wiring in `ui/handler.go`, `cmd/company` — worker — commit: feat(ui) follow-up commit (this branch, after 4e4c47c)
+- [x] T3 — S5: UI card action and threading in `ui/app.js`, `ui/style.css`; README — worker — commit: same commit as T2
 
 ## Log
 
@@ -41,3 +41,8 @@ OpenSpec change: `openspec/changes/client-follow-up/`.
 - **L3** — Evidence: a2asrv rejects messages to terminal tasks (`agentexec.go:227`);
   `ReferencedTasksLoader` reads only the in-memory a2asrv store, so the supervisor reads the
   referenced task from its own persistent `Store` instead (survives restarts).
+- **L4** — Verification: `go build ./cmd/company && go vet ./... && go test ./...` all ok;
+  `node --check ui/app.js` ok; `TestFollowUp_OverRealWire` proves the follow-up through the real
+  a2asrv handler (new task, same ContextID, followed task unchanged). Not verified: the UI in a
+  real browser. Known gap: a delegation child whose parent is not listed shows "Request changes";
+  the request returns 404 and the UI shows a failure toast.

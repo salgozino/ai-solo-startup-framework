@@ -159,3 +159,12 @@ section { margin-bottom: 2rem; }
   flex-direction: column;
   gap: 0.5rem;
 }
+
+.task-followup { margin-top: 0.75rem; }
+.task-followup-form { margin-top: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem; align-items: flex-start; }
+.task-followup-input {
+  width: 100%; box-sizing: border-box; padding: 0.5rem;
+  background: #111; color: #ddd; border: 1px solid #2a2a2a; border-radius: 4px;
+  font-family: inherit; font-size: 0.8rem; resize: vertical;
+}
+.task-followup-of { font-size: 0.75rem; color: #6ab4f5; font-family: monospace; }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"fmt"
 
 	"github.com/salgozino/ai-solo-startup-framework/ui"
 )
@@ -38,6 +39,10 @@ func (a *companyUIAdapter) ListTasks() ([]ui.TaskRecord, error) {
 		for _, task := range tasks {
 			task.Agent = agent
 			task.VerdictID = a.verdictID(agent, task.TaskID)
+			if task.FollowUpOf != "" {
+				// The UI keys tasks by verdict ID, so the link must use the same key.
+				task.FollowUpOf = a.verdictID(agent, task.FollowUpOf)
+			}
 			out = append(out, task)
 		}
 	}
@@ -58,6 +63,24 @@ func (a *companyUIAdapter) PostVerdict(id string, approve bool) error {
 	}
 	// Unknown or unqualified multi-agent IDs must never reach a supervisor.
 	return ui.ErrNotInputRequired
+}
+
+// FollowUp only serves the CEO (runtimes[0]): id is resolved with the same
+// keying as PostVerdict, and any other id — other agents' tasks included — is
+// reported as not found so it can never reach a peer supervisor.
+func (a *companyUIAdapter) FollowUp(id, text string) error {
+	ceo := a.runtimes[0]
+	tasks, err := ceo.uiAdap.ListTasks()
+	if err != nil {
+		return err
+	}
+	agent := ceo.sup.Status().Addr.Name()
+	for _, task := range tasks {
+		if a.verdictID(agent, task.TaskID) == id {
+			return ceo.uiAdap.FollowUp(task.TaskID, text)
+		}
+	}
+	return fmt.Errorf("%w: %q", ui.ErrTaskNotFound, id)
 }
 
 func newCompanyUIHandler(runtimes []*agentRuntime) *ui.UIHandler {

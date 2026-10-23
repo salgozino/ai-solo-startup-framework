@@ -312,3 +312,100 @@ func TestUITaskRecord_PreChangeJSONCompat(t *testing.T) {
 		t.Errorf("omitempty must keep awaiting_peer* out of %s", out)
 	}
 }
+
+func followUpMux(t *testing.T, names ...string) (*http.ServeMux, []*agentRuntime, []*verdictRecorder) {
+	t.Helper()
+	extra := map[string][]supervisor.TaskRecord{}
+	for _, n := range names {
+		extra[n] = []supervisor.TaskRecord{{TaskID: "done", State: string(sdka2a.TaskStateCompleted), Input: "go", Output: "result", ContextID: "ctx-" + n}}
+	}
+	runtimes, handlers := uiRuntimesWith(t, extra, names...)
+	h := newCompanyUIHandler(runtimes)
+	t.Cleanup(h.Shutdown)
+	mux := http.NewServeMux()
+	h.Register(mux)
+	return mux, runtimes, handlers
+}
+
+func postFollowUpTo(mux *http.ServeMux, id, msg string) *httptest.ResponseRecorder {
+	body, _ := json.Marshal(map[string]string{"task_id": id, "message": msg})
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("POST", "/api/follow-up", bytes.NewReader(body)))
+	return w
+}
+
+// S1/S4: a terminal CEO task accepts a follow-up: a new message references the old task.
+func TestCompanyUI_FollowUpOnTerminalCEOTask(t *testing.T) {
+	mux, runtimes, handlers := followUpMux(t, "ceo")
+	handlers[0].submitted = make(chan *sdka2a.SendMessageRequest, 1)
+	before, _ := runtimes[0].uiAdap.ListTasks()
+
+	w := postFollowUpTo(mux, "done", "  change X ")
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("follow-up: %d %s", w.Code, w.Body.String())
+	}
+	select {
+	case req := <-handlers[0].submitted:
+		m := req.Message
+		if m.TaskID != "" || m.Parts[0].Text() != "change X" || req.Tenant != "acme" {
+			t.Fatalf("wrong submission: %+v", req)
+		}
+		if len(m.ReferenceTasks) != 1 || m.ReferenceTasks[0] != "done" || m.ContextID != "ctx-ceo" {
+			t.Fatalf("missing link: refs=%v ctx=%q", m.ReferenceTasks, m.ContextID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("follow-up did not reach CEO")
+	}
+	after, _ := runtimes[0].uiAdap.ListTasks()
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("previous task was modified")
+	}
+}
+
+func TestCompanyUI_FollowUpRefusals(t *testing.T) {
+	mux, runtimes, handlers := followUpMux(t, "ceo", "engineer")
+	a := &companyUIAdapter{runtimes: runtimes}
+	engineerDone := a.verdictID("engineer", "done")
+	ceoRunning := a.verdictID("ceo", "shared-id") // seeded INPUT_REQUIRED
+	ceoDone := a.verdictID("ceo", "done")
+	cases := []struct {
+		name, id, msg string
+		want          int
+	}{
+		{"non-terminal", ceoRunning, "x", http.StatusConflict},
+		{"unknown", "unknown", "x", http.StatusNotFound},
+		{"non-CEO agent task", engineerDone, "x", http.StatusNotFound},
+		{"bare id in multi-agent", "done", "x", http.StatusNotFound},
+		{"blank message", ceoDone, "  ", http.StatusBadRequest},
+		{"empty id", "", "x", http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		if w := postFollowUpTo(mux, tc.id, tc.msg); w.Code != tc.want {
+			t.Errorf("%s: %d, want %d", tc.name, w.Code, tc.want)
+		}
+	}
+	time.Sleep(100 * time.Millisecond) // sends are async; a refusal must never produce one
+	for i, h := range handlers {
+		if len(h.requests) != 0 {
+			t.Errorf("runtime %d received %d requests from refused follow-ups", i, len(h.requests))
+		}
+	}
+	if w := postFollowUpTo(mux, ceoDone, "ok"); w.Code != http.StatusAccepted {
+		t.Errorf("CEO terminal task through qualified id: %d", w.Code)
+	}
+}
+
+func TestCompanyUI_ListTasksExposesFollowUpOf(t *testing.T) {
+	runtimes, _ := uiRuntimesWith(t, map[string][]supervisor.TaskRecord{"ceo": {
+		{TaskID: "t2", State: string(sdka2a.TaskStateWorking), FollowUpOf: "t1"},
+	}}, "ceo")
+	tasks, err := (&companyUIAdapter{runtimes: runtimes}).ListTasks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range tasks {
+		if task.TaskID == "t2" && task.FollowUpOf != "t1" {
+			t.Fatalf("FollowUpOf = %q, want t1", task.FollowUpOf)
+		}
+	}
+}

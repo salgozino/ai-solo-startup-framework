@@ -28,13 +28,29 @@ function displayLabel(state) {
   return STATE_LABELS[state] || state || '—';
 }
 
-// buildTree groups tasks into nodes {task, children}. A task listed as a
-// delegation of another listed task becomes that task's child (delegation
+// TERMINAL_STATES can be answered with a follow-up ("Request changes").
+const TERMINAL_STATES = {
+  'TASK_STATE_COMPLETED': true,
+  'TASK_STATE_FAILED':    true,
+  'TASK_STATE_REJECTED':  true,
+  'TASK_STATE_CANCELED':  true,
+};
+
+function taskKey(t) { return t.verdict_id || t.task_id; }
+
+// buildTree groups tasks into nodes {task, children, delegated}. A task listed
+// as a delegation of another listed task becomes that task's child (delegation
 // order, recursively) and is not repeated at top level; a child whose parent
-// is not listed stays top-level. Top-level order is newest first.
+// is not listed stays top-level. A task whose follow_up_of names a listed task
+// is nested under it, after its delegations. Top-level order is newest first.
+// delegated marks delegation children: only the CEO's own cards (top-level and
+// follow-up nodes) can be followed up.
 function buildTree(tasks) {
-  var byId = {};
-  tasks.forEach(function(t) { if (!(t.task_id in byId)) byId[t.task_id] = t; });
+  var byId = {}, byKey = {};
+  tasks.forEach(function(t) {
+    if (!(t.task_id in byId)) byId[t.task_id] = t;
+    if (!(taskKey(t) in byKey)) byKey[taskKey(t)] = t;
+  });
   var isChild = {};
   tasks.forEach(function(t) {
     (t.delegations || []).forEach(function(d) {
@@ -42,30 +58,42 @@ function buildTree(tasks) {
       if (c && c !== t) isChild[d.task_id] = true;
     });
   });
+  var followUps = {};
+  var isFollowUp = {};
+  tasks.forEach(function(t) {
+    var p = t.follow_up_of ? byKey[t.follow_up_of] : null;
+    if (p && p !== t) {
+      (followUps[taskKey(p)] = followUps[taskKey(p)] || []).push(t);
+      isFollowUp[taskKey(t)] = true;
+    }
+  });
   var seen = {};
-  function node(t) {
-    seen[t.task_id] = true;
+  function node(t, delegated) {
+    seen[taskKey(t)] = true;
     var children = [];
     (t.delegations || []).forEach(function(d) {
       var c = byId[d.task_id];
-      if (c && c !== t && !seen[c.task_id]) children.push(node(c));
+      if (c && c !== t && !seen[taskKey(c)]) children.push(node(c, true));
     });
-    return { task: t, children: children };
+    (followUps[taskKey(t)] || []).forEach(function(c) {
+      if (!seen[taskKey(c)]) children.push(node(c, false));
+    });
+    return { task: t, children: children, delegated: delegated };
   }
   return tasks.slice().reverse().filter(function(t) {
-    return !isChild[t.task_id];
-  }).map(node);
+    return !isChild[t.task_id] && !isFollowUp[taskKey(t)];
+  }).map(function(t) { return node(t, false); });
 }
 
 function renderNode(n) {
   var kids = n.children.length
     ? '<div class="task-children">' + n.children.map(renderNode).join('') + '</div>'
     : '';
-  return '<div class="task-node">' + renderCard(n.task) + kids + '</div>';
+  return '<div class="task-node">' + renderCard(n.task, !n.delegated) + kids + '</div>';
 }
 
-function renderCard(t) {
-  const key = t.verdict_id || t.task_id;
+function renderCard(t, canFollowUp) {
+  const key = taskKey(t);
   const label  = displayLabel(t.state);
   const isInput = t.state === 'TASK_STATE_INPUT_REQUIRED' && !t.awaiting_peer;
   const waiting = t.awaiting_peer
@@ -75,6 +103,18 @@ function renderCard(t) {
     ? `<div class="task-actions">
          <button class="btn btn-approve" onclick="verdict('${key}','approve')">Approve</button>
          <button class="btn btn-reject"  onclick="verdict('${key}','reject')">Reject</button>
+       </div>`
+    : '';
+  const followUpOf = t.follow_up_of
+    ? `<div class="task-followup-of">Follow-up of ${escHtml(t.follow_up_of)}</div>`
+    : '';
+  const followUp = canFollowUp && TERMINAL_STATES[t.state]
+    ? `<div class="task-followup">
+         <button class="btn btn-send" onclick="toggleFollowUp('${key}')">Request changes</button>
+         <div class="task-followup-form" style="display:none">
+           <textarea class="task-followup-input" rows="3" placeholder="What should change?"></textarea>
+           <button class="btn btn-send" onclick="sendFollowUp('${key}')">Send</button>
+         </div>
        </div>`
     : '';
   const outputHtml = t.output
@@ -90,10 +130,12 @@ function renderCard(t) {
       <span class="task-id">${escHtml(t.agent ? t.agent + ' · ' : '')}${escHtml(t.task_id)}</span>
       <span class="task-state task-state-${label}">${label}</span>
     </div>
+    ${followUpOf}
     <div class="task-input">${escHtml(t.input || '')}</div>
     ${waiting}
     ${outputHtml}
     ${actions}
+    ${followUp}
   </div>`;
 }
 
@@ -111,7 +153,30 @@ function renderTasks(tasks) {
       openOutputs[container.id] = true;
     }
   });
+  // Same for follow-up forms: keep the open state and typed text.
+  var openForms = {};
+  taskList.querySelectorAll('.task-followup-form').forEach(function(form) {
+    var card = form.closest('.task-card');
+    var input = form.querySelector('textarea');
+    if (card && card.id && (form.style.display !== 'none' || input.value)) {
+      openForms[card.id] = {
+        open: form.style.display !== 'none',
+        text: input.value,
+        focus: document.activeElement === input,
+      };
+    }
+  });
   taskList.innerHTML = buildTree(tasks).map(renderNode).join('');
+  Object.keys(openForms).forEach(function(id) {
+    var card = document.getElementById(id);
+    var form = card && card.querySelector('.task-followup-form');
+    if (!form) return;
+    var st = openForms[id];
+    form.style.display = st.open ? '' : 'none';
+    var input = form.querySelector('textarea');
+    input.value = st.text;
+    if (st.focus) input.focus();
+  });
   // Restore open toggles after re-render.
   Object.keys(openOutputs).forEach(function(id) {
     var container = document.getElementById(id);
@@ -137,6 +202,44 @@ function toggleOutput(taskID) {
     body.classList.add('open');
     toggle.textContent = '▼';
   }
+}
+
+function toggleFollowUp(key) {
+  var card = document.getElementById('task-' + key);
+  var form = card && card.querySelector('.task-followup-form');
+  if (!form) return;
+  form.style.display = form.style.display === 'none' ? '' : 'none';
+  if (form.style.display !== 'none') form.querySelector('textarea').focus();
+}
+
+function sendFollowUp(key) {
+  var card = document.getElementById('task-' + key);
+  if (!card) return;
+  var input = card.querySelector('.task-followup-input');
+  var btns = card.querySelectorAll('.task-followup-form .btn');
+  var msg = input.value.trim();
+  if (!msg) { showToast('Write the requested changes first', 'error'); return; }
+  btns.forEach(function(b) { b.disabled = true; });
+  fetch('/api/follow-up', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ task_id: key, message: msg }),
+  })
+    .then(function(r) {
+      if (!r.ok) throw new Error('follow-up failed');
+      return r.json();
+    })
+    .then(function() {
+      showToast('Follow-up sent', 'success');
+      input.value = '';
+      card.querySelector('.task-followup-form').style.display = 'none';
+      btns.forEach(function(b) { b.disabled = false; });
+      setTimeout(fetchTasks, 500);
+    })
+    .catch(function() {
+      showToast('Failed to send follow-up', 'error');
+      btns.forEach(function(b) { b.disabled = false; });
+    });
 }
 
 function escHtml(s) {
