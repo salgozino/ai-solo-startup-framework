@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -33,13 +35,47 @@ type CompanyConfig struct {
 //
 // SystemPrompt holds the resolved absolute path to the agent's persona file
 // after Load() validates and resolves it. Empty string means no system prompt.
+//
+// Provider defaults to DefaultProvider when omitted. Extensions is the pi-only
+// allowlist of extensions loaded on top of the adapter's isolated invocation:
+// each entry is an absolute path after Load() or a "builtin:<name>" reference.
 type AgentConfig struct {
-	Name         string `yaml:"name"`
-	Role         string `yaml:"role"`
-	Provider     string `yaml:"provider"`
-	Model        string `yaml:"model,omitempty"`
-	SystemPrompt string `yaml:"system_prompt,omitempty"` // abs path after Load()
+	Name         string   `yaml:"name"`
+	Role         string   `yaml:"role"`
+	Provider     string   `yaml:"provider"`
+	Model        string   `yaml:"model,omitempty"`
+	SystemPrompt string   `yaml:"system_prompt,omitempty"` // abs path after Load()
+	Extensions   []string `yaml:"extensions,omitempty"`    // abs paths or builtin:<name> after Load()
+	// MaxRounds caps the agent's provider-round loop; Load fills DefaultMaxRounds when omitted.
+	MaxRounds int `yaml:"max_rounds,omitempty"`
+	// MCPServers (pi only) declares the agent's own stdio MCP servers by name. Their tools
+	// are not action intents and bypass the risk policy: declaring one is an explicit grant
+	// by the company owner.
+	MCPServers map[string]MCPServer `yaml:"mcp_servers,omitempty"`
 }
+
+// MCPServer is one agent-declared stdio MCP server: the command pi spawns and its argv.
+type MCPServer struct {
+	Command string   `yaml:"command"`
+	Args    []string `yaml:"args,omitempty"`
+}
+
+// mcpServerName is the shape of an agent-declared MCP server name; it becomes part of the
+// exact pi tool names mcp__<name>__<tool>.
+var mcpServerName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+// DefaultProvider is the provider an agent gets when its entry omits provider.
+const DefaultProvider = "pi"
+
+// builtinExtensionPrefix marks a pi built-in extension reference (e.g. builtin:mcp),
+// passed to pi verbatim rather than resolved as a filesystem path.
+const builtinExtensionPrefix = "builtin:"
+
+// packageSourcePrefixes are pi package sources. pi's -e flag silently ignores them
+// (verified on pi 1.2.0: `-e npm:pi-claude-bridge` loads nothing and reports nothing),
+// so they are rejected at load time instead of producing an agent that quietly lacks
+// the extension it declared.
+var packageSourcePrefixes = []string{"npm:", "git:", "git+", "http://", "https://", "ssh://"}
 
 // GatewayConfig holds the company-level gateway declarations.
 type GatewayConfig struct {
@@ -65,6 +101,10 @@ type Policy struct {
 //   - tenant is empty
 //   - any agent entry contains unknown fields (including a gateways field)
 //   - gateways.telegram.token_env or recipient_env is not an env-var reference
+//   - an agent's extensions is set for a non-pi provider, names a package source
+//     (npm:, git:, ...), or names a path that does not exist
+//
+// An agent that omits provider gets DefaultProvider (pi).
 func Load(path string) (*CompanyConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -111,7 +151,7 @@ func Load(path string) (*CompanyConfig, error) {
 		// Reject any other unknown field.
 		for k := range a {
 			switch k {
-			case "name", "role", "provider", "model", "system_prompt":
+			case "name", "role", "provider", "model", "system_prompt", "extensions", "mcp_servers", "max_rounds":
 				// valid fields
 			default:
 				return nil, fmt.Errorf("config: agent[%d] (%q): unknown field %q", i, name, k)
@@ -120,6 +160,9 @@ func Load(path string) (*CompanyConfig, error) {
 
 		role, _ := a["role"].(string)
 		provider, _ := a["provider"].(string)
+		if provider == "" {
+			provider = DefaultProvider
+		}
 		model, _ := a["model"].(string)
 		rawPrompt, _ := a["system_prompt"].(string)
 
@@ -139,12 +182,30 @@ func Load(path string) (*CompanyConfig, error) {
 			systemPrompt = abs
 		}
 
+		extensions, err := resolveExtensions(a["extensions"], provider, basedir)
+		if err != nil {
+			return nil, fmt.Errorf("config: agent[%d] (%q): %w", i, name, err)
+		}
+
+		mcpServers, err := resolveMCPServers(a["mcp_servers"], provider)
+		if err != nil {
+			return nil, fmt.Errorf("config: agent[%d] (%q): %w", i, name, err)
+		}
+
+		maxRounds, err := resolveMaxRounds(a["max_rounds"])
+		if err != nil {
+			return nil, fmt.Errorf("config: agent[%d] (%q): %w", i, name, err)
+		}
+
 		agents = append(agents, AgentConfig{
 			Name:         name,
 			Role:         role,
 			Provider:     provider,
 			Model:        model,
 			SystemPrompt: systemPrompt,
+			Extensions:   extensions,
+			MCPServers:   mcpServers,
+			MaxRounds:    maxRounds,
 		})
 	}
 
@@ -180,4 +241,145 @@ func requireEnvRef(field, value string) error {
 		return fmt.Errorf("config: %s appears to be an inline secret value rather than an environment variable name; use the env var name (e.g. TELEGRAM_BOT_TOKEN), not the secret value itself", field)
 	}
 	return nil
+}
+
+// resolveMCPServers validates an agent's raw mcp_servers value. Absent returns nil.
+func resolveMCPServers(raw any, provider string) (map[string]MCPServer, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	if provider != DefaultProvider {
+		return nil, fmt.Errorf("mcp_servers: only supported for provider %q, got %q", DefaultProvider, provider)
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("mcp_servers: must be a map of server name to {command, args}")
+	}
+	out := make(map[string]MCPServer, len(m))
+	for name, v := range m {
+		if !mcpServerName.MatchString(name) {
+			return nil, fmt.Errorf("mcp_servers: invalid server name %q: must match ^[a-z0-9][a-z0-9_-]*$", name)
+		}
+		if name == "framework" {
+			return nil, fmt.Errorf("mcp_servers: server name %q is reserved for the framework's own MCP server", name)
+		}
+		// pi flattens tools to mcp__<server>__<tool>; with "__" or a trailing "_" in the
+		// server part another server/tool pair could produce the same name (the pi adapter
+		// checks the tool part when it probes the server).
+		if norm := strings.ReplaceAll(name, "-", "_"); strings.Contains(norm, "__") || strings.HasSuffix(norm, "_") {
+			return nil, fmt.Errorf("mcp_servers: invalid server name %q: its pi name %q must not contain \"__\" or end with \"_\"", name, norm)
+		}
+		entry, ok := v.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("mcp_servers[%q]: must be a map with command and optional args", name)
+		}
+		var srv MCPServer
+		for k, val := range entry {
+			switch k {
+			case "command":
+				srv.Command, _ = val.(string)
+			case "args":
+				list, ok := val.([]any)
+				if !ok {
+					return nil, fmt.Errorf("mcp_servers[%q]: args must be a list of strings", name)
+				}
+				for _, item := range list {
+					str, ok := item.(string)
+					if !ok {
+						return nil, fmt.Errorf("mcp_servers[%q]: args must be a list of strings", name)
+					}
+					srv.Args = append(srv.Args, str)
+				}
+			default:
+				return nil, fmt.Errorf("mcp_servers[%q]: unknown field %q", name, k)
+			}
+		}
+		if srv.Command == "" {
+			return nil, fmt.Errorf("mcp_servers[%q]: command is required", name)
+		}
+		out[name] = srv
+	}
+	// pi treats "-" and "_" in server names as the same character and rejects the
+	// second registration, so such a pair must fail at load, not on every task.
+	names := make([]string, 0, len(out))
+	for name := range out {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	seen := make(map[string]string, len(names))
+	for _, name := range names {
+		key := strings.ReplaceAll(name, "-", "_")
+		if prev, dup := seen[key]; dup {
+			return nil, fmt.Errorf("mcp_servers: server names %q and %q collide: pi treats \"-\" and \"_\" in server names as the same character", prev, name)
+		}
+		seen[key] = name
+	}
+	return out, nil
+}
+
+// DefaultMaxRounds is the provider-round cap of an agent that omits max_rounds.
+const DefaultMaxRounds = 8
+
+// maxRoundsLimit is the largest max_rounds an agent may declare.
+const maxRoundsLimit = 50
+
+// resolveMaxRounds validates an agent's raw max_rounds value: absent -> DefaultMaxRounds,
+// otherwise an integer from 1 to maxRoundsLimit.
+func resolveMaxRounds(raw any) (int, error) {
+	if raw == nil {
+		return DefaultMaxRounds, nil
+	}
+	n, ok := raw.(int)
+	if !ok || n < 1 || n > maxRoundsLimit {
+		return 0, fmt.Errorf("max_rounds: must be an integer from 1 to %d, got %v", maxRoundsLimit, raw)
+	}
+	return n, nil
+}
+
+// resolveExtensions validates an agent's raw extensions value and returns the entries
+// pi receives as -e arguments: builtin references verbatim, filesystem paths resolved
+// against basedir to absolute paths that must exist. A nil raw value yields nil.
+func resolveExtensions(raw any, provider, basedir string) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	if provider != DefaultProvider {
+		return nil, fmt.Errorf("extensions: only supported for provider %q, got %q", DefaultProvider, provider)
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("extensions: must be a list of strings")
+	}
+	resolved := make([]string, 0, len(items))
+	for j, item := range items {
+		entry, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("extensions[%d]: must be a list of strings", j)
+		}
+		if entry == "" {
+			return nil, fmt.Errorf("extensions[%d]: must not be empty", j)
+		}
+		if strings.HasPrefix(entry, builtinExtensionPrefix) {
+			resolved = append(resolved, entry)
+			continue
+		}
+		for _, prefix := range packageSourcePrefixes {
+			if strings.HasPrefix(entry, prefix) {
+				return nil, fmt.Errorf("extensions[%d]: %q: package sources are not supported; pi only loads a file or directory path (or builtin:<name>) through -e, so point to the installed extension's path instead", j, entry)
+			}
+		}
+		path := entry
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(basedir, path)
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return nil, fmt.Errorf("extensions[%d]: resolve path: %w", j, err)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return nil, fmt.Errorf("extensions[%d]: file not found: %s", j, abs)
+		}
+		resolved = append(resolved, abs)
+	}
+	return resolved, nil
 }

@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/salgozino/ai-solo-startup-framework/core/address"
+	"github.com/salgozino/ai-solo-startup-framework/core/port"
 )
 
 // TaskRecord is the unit persisted to disk for crash/restart recovery.
@@ -41,8 +42,58 @@ type TaskRecord struct {
 	// resume path runs them in order once the pending intent is approved.
 	// Zero-value safe: a nil slice means the turn had nothing left to run.
 	RemainingIntents []PendingIntent `json:"remaining_intents,omitempty"`
+	// Turns is the conversation transcript accumulated across the task's
+	// delegation rounds, oldest first. It is the per-task memory that lets a
+	// later round see what the earlier ones produced instead of restarting from
+	// the original input.
+	//
+	// Nothing writes to this field yet: this slice lands the persistence schema
+	// only, so the on-disk layout is settled before the loop that fills it.
+	// Zero-value safe: a nil slice means the task has no recorded rounds, which
+	// is exactly how every record written before this field existed reads back.
+	Turns []port.ContextMessage `json:"turns,omitempty"`
+	// AwaitingPeerRole and AwaitingPeerTaskID identify the peer task a parked task
+	// is waiting on (state INPUT_REQUIRED, no PendingIntentKind). They are what a
+	// restarted supervisor needs to re-arm the watcher, and are cleared once the
+	// peer's result is consumed. Zero-value safe: absent means no peer wait.
+	AwaitingPeerRole   string `json:"awaiting_peer_role,omitempty"`
+	AwaitingPeerTaskID string `json:"awaiting_peer_task_id,omitempty"`
+	// AwaitingPeerApproval narrows the peer wait: the peer itself escalated and is
+	// waiting for its own human's verdict (chained approval). The human approves on
+	// the peer's task; this task resumes by itself once the peer is terminal.
+	AwaitingPeerApproval bool `json:"awaiting_peer_approval,omitempty"`
+	// FinishRequested records that the turn in flight called finish_task. It only
+	// matters across a park: a turn that finished but halted on an escalation or a
+	// peer wait must not re-invoke the provider after the resume. Cleared once the
+	// turn's intents have all run. Zero-value safe.
+	FinishRequested bool `json:"finish_requested,omitempty"`
+	// Delegations lists, in the order they were made, every peer task this task
+	// created through delegate_task, whatever became of it (completed, still
+	// running, escalated, failed). It is the parent-side link the UI uses to nest
+	// a delegated task under the task that delegated it. Zero-value safe: a nil
+	// slice means no delegation, which is how every record written before this
+	// field existed reads back.
+	Delegations []Delegation `json:"delegations,omitempty"`
 	// Output is the result produced by the provider when the task completes.
 	Output string `json:"output,omitempty"`
+	// ContextID is the A2A context the task belongs to. A follow-up reuses the
+	// context of the task it follows. Zero-value safe.
+	ContextID string `json:"context_id,omitempty"`
+	// FollowUpOf is the terminal task this task follows up on: the client's answer
+	// to a finished task, executed as a new task because A2A forbids messages to a
+	// terminal one. Empty for a task that follows nothing.
+	FollowUpOf string `json:"follow_up_of,omitempty"`
+	// BaseTurns is how many leading Turns a follow-up inherited from the chain it
+	// follows. Rounds are counted after them, so inherited rounds never count
+	// toward the cap. Zero-value safe: zero means nothing was inherited.
+	BaseTurns int `json:"base_turns,omitempty"`
+}
+
+// Delegation is one peer task created by a delegate_task intent: the role that
+// fulfilled it and the task id the peer assigned.
+type Delegation struct {
+	Role   string `json:"role"`
+	TaskID string `json:"task_id"`
 }
 
 // PendingIntent is the persisted form of a port.ActionIntent. It carries the
@@ -58,6 +109,16 @@ type PendingIntent struct {
 	// Target is the peer role addressed by the intent, empty for kinds that
 	// address no peer.
 	Target string `json:"target,omitempty"`
+}
+
+// recordDelegation appends the peer task a delegation produced, if it produced
+// one. Outcomes of non-delegation actions and of delegations that never reached a
+// peer carry no task id and leave the record untouched.
+func (r *TaskRecord) recordDelegation(o actionOutcome) {
+	if o.PeerTaskID == "" {
+		return
+	}
+	r.Delegations = append(r.Delegations, Delegation{Role: o.PeerRole, TaskID: o.PeerTaskID})
 }
 
 // ErrTaskNotFound is returned by Store.Load when the task does not exist.

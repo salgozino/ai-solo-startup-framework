@@ -29,8 +29,9 @@ const bearerScheme = sdka2a.SecuritySchemeName("bearer")
 const clientSessionID = a2aclient.SessionID("delegation-client")
 
 // ErrPeerNonTerminalState reports that a peer answered a Delegate call with a
-// state that is neither terminal nor INPUT_REQUIRED (e.g. SUBMITTED, WORKING)
-// — a protocol violation under port.Delegator. Wrapped with %w so callers
+// state that is neither terminal, INPUT_REQUIRED nor running (SUBMITTED,
+// WORKING), e.g. AUTH_REQUIRED or an empty state — a protocol violation under
+// port.Delegator. Wrapped with %w so callers
 // discriminate with errors.Is, never by matching message text (issue #78).
 var ErrPeerNonTerminalState = errors.New("peer returned a non-terminal task state")
 
@@ -104,8 +105,24 @@ func (c *Client) resolvePeer(ctx context.Context, role string) (*a2aclient.Clien
 	return peer, nil
 }
 
+var _ port.FollowUpDelegator = (*Client)(nil)
+
 // Delegate implements port.Delegator.
 func (c *Client) Delegate(ctx context.Context, role, body string) (port.DelegationResult, error) {
+	return c.send(ctx, role, "", body)
+}
+
+// FollowUp implements port.FollowUpDelegator: the message joins the peer's existing
+// task (msg.TaskID) instead of opening a new one.
+func (c *Client) FollowUp(ctx context.Context, role, peerTaskID, body string) (port.DelegationResult, error) {
+	if peerTaskID == "" {
+		return port.DelegationResult{}, fmt.Errorf("transport/a2a: client: follow-up to role %q needs a peer task ID", role)
+	}
+	return c.send(ctx, role, peerTaskID, body)
+}
+
+// send delivers body to role, onto peerTaskID when it is non-empty.
+func (c *Client) send(ctx context.Context, role, peerTaskID, body string) (port.DelegationResult, error) {
 	peer, err := c.resolvePeer(ctx, role)
 	if err != nil {
 		return port.DelegationResult{}, err
@@ -116,7 +133,17 @@ func (c *Client) Delegate(ctx context.Context, role, body string) (port.Delegati
 	ctx = a2aclient.AttachSessionID(ctx, clientSessionID)
 
 	msg := sdka2a.NewMessage(sdka2a.MessageRoleUser, sdka2a.NewTextPart(body))
-	res, err := peer.SendMessage(ctx, &sdka2a.SendMessageRequest{Tenant: c.tenant, Message: msg})
+	msg.TaskID = sdka2a.TaskID(peerTaskID)
+	// ReturnImmediately: the delegating task parks instead of holding an execution
+	// open for as long as the peer works (park/resume, Slice 6), so this call must
+	// return as soon as the peer task exists. The peer's own execution is detached
+	// from this request and keeps running.
+	req := &sdka2a.SendMessageRequest{
+		Tenant:  c.tenant,
+		Message: msg,
+		Config:  &sdka2a.SendMessageConfig{ReturnImmediately: true},
+	}
+	res, err := peer.SendMessage(ctx, req)
 	if err != nil {
 		return port.DelegationResult{}, fmt.Errorf("transport/a2a: client: delegate to role %q: %w", role, err)
 	}
@@ -126,12 +153,16 @@ func (c *Client) Delegate(ctx context.Context, role, body string) (port.Delegati
 		return port.DelegationResult{}, fmt.Errorf("transport/a2a: client: delegate to role %q: peer returned %T, want *a2a.Task", role, res)
 	}
 
-	// port.Delegator: Delegate blocks until the peer STOPS advancing, so any
-	// state that is neither terminal nor INPUT_REQUIRED means the peer answered
-	// early — a protocol violation, never a result. TaskState.Terminal() is the
-	// SDK's own terminal set (COMPLETED, CANCELED, FAILED, REJECTED; a2a-go
-	// v2.5.0 a2a/core.go); never re-enumerate it here.
-	if state := task.Status.State; !state.Terminal() && state != sdka2a.TaskStateInputRequired {
+	// port.Delegator: Delegate returns once the peer task exists. A running state
+	// (SUBMITTED, WORKING) is the normal answer now and is waited on through
+	// PeerTaskState; terminal and INPUT_REQUIRED are returned as observed. Any other
+	// state (empty, AUTH_REQUIRED, unknown) is a protocol violation, never a result.
+	// TaskState.Terminal() is the SDK's own terminal set (COMPLETED, CANCELED,
+	// FAILED, REJECTED; a2a-go v2.5.0 a2a/core.go); never re-enumerate it here.
+	switch state := task.Status.State; {
+	case state.Terminal(), state == sdka2a.TaskStateInputRequired,
+		state == sdka2a.TaskStateSubmitted, state == sdka2a.TaskStateWorking:
+	default:
 		return port.DelegationResult{}, fmt.Errorf("transport/a2a: client: delegate to role %q: %w: %s", role, ErrPeerNonTerminalState, state)
 	}
 

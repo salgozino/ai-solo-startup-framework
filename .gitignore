@@ -26,3 +26,8 @@
 # Local configuration
 company*.yaml
 sdd/
+
+# Playwright UI tests
+ui/e2e/node_modules/
+ui/e2e/test-results/
+ui/e2e/playwright-report/

@@ -1,0 +1,81 @@
+# Software factory: a company whose product is software.
+#
+# Pipeline (orchestrated by the CEO, one delegation per round):
+#   ceo -> product-owner (-> ux-designer) -> tech-lead -> engineer -> qa
+#       -> security-reviewer -> [one fix cycle: engineer -> qa] -> telegram_send + finish
+#
+# Every agent shares the working directory the company is started from; projects are
+# written under ./workspace/<app-slug>/. Run it with ./e2e.sh from this directory.
+tenant: factory
+auth_token_env: FACTORY_A2A_TOKEN
+
+agents:
+  - name: ceo
+    role: ceo
+    # Five pipeline phases + up to two fix cycles (two rounds each) + the closing round.
+    # agents/ceo.md states the same budget.
+    max_rounds: 12
+    model: claude-bridge/claude-sonnet-5-5
+    extensions:
+      # pi-claude-bridge provides the claude-bridge/* models; adjust to your install.
+      - /home/koki/.gentle-shell/agent/npm/node_modules/pi-claude-bridge
+    system_prompt: agents/ceo.md
+  - name: product-owner
+    role: product-owner
+    model: openai/gpt-6-luna
+    system_prompt: agents/product-owner.md
+  - name: ux-designer
+    role: ux-designer
+    model: openai/gpt-6-luna
+    system_prompt: agents/ux-designer.md
+  - name: tech-lead
+    role: tech-lead
+    model: openai/gpt-6-luna
+    system_prompt: agents/tech-lead.md
+  - name: engineer
+    role: engineer
+    model: openai/gpt-6-luna
+    system_prompt: agents/engineer.md
+  - name: qa
+    role: qa
+    model: openai/gpt-6-luna
+    system_prompt: agents/qa.md
+    # A real headless Chrome for browser verification. These tools are not action
+    # intents: declaring the server is the owner's explicit grant to this agent.
+    # --offline keeps npx on its local cache; the browser starts in a throwaway profile.
+    # The log lands in the company's working directory; e2e.sh checks it for real use.
+    mcp_servers:
+      chrome-devtools:
+        command: npx
+        args:
+          - --offline
+          - -y
+          - chrome-devtools-mcp@latest
+          - --headless
+          - --isolated
+          - --usageStatistics=false
+          - --performanceCrux=false
+          - --logFile
+          - chrome-devtools.log
+  - name: security-reviewer
+    role: security-reviewer
+    model: openai/gpt-6-luna
+    system_prompt: agents/security-reviewer.md
+
+gateways:
+  telegram:
+    token_env: TELEGRAM_BOT_TOKEN
+    recipient_env: TELEGRAM_OWNER_ID
+
+risk_policy:
+  # Delivery notices to the owner are routine: no human approval needed.
+  telegram_send:
+    risk: safe
+    allowed_roles:
+      - ceo
+  # The CEO orchestrates the pipeline; the product owner coordinates UX.
+  delegate_task:
+    risk: safe
+    allowed_roles:
+      - ceo
+      - product-owner

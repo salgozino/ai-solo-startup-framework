@@ -1,6 +1,6 @@
 // Package main — wire.go is the ONLY file in the entire codebase that imports
-// adapters/claudecode and gateways/telegram. All other packages depend solely on
-// core/port interfaces; this file is the seam where concretes are injected.
+// adapters/claudecode, adapters/opencode, adapters/pi and gateways/telegram. All other
+// packages depend solely on core/port interfaces; this file is the seam where concretes are injected.
 package main
 
 import (
@@ -16,6 +16,7 @@ import (
 
 	"github.com/salgozino/ai-solo-startup-framework/adapters/claudecode"
 	"github.com/salgozino/ai-solo-startup-framework/adapters/opencode"
+	"github.com/salgozino/ai-solo-startup-framework/adapters/pi"
 	"github.com/salgozino/ai-solo-startup-framework/config"
 	"github.com/salgozino/ai-solo-startup-framework/core/address"
 	"github.com/salgozino/ai-solo-startup-framework/core/policy"
@@ -56,6 +57,16 @@ func (m *opencodeRegistryMinter) Mint(tenant, agent, taskID string, exp time.Tim
 	return m.reg.Mint(tenant, agent, taskID, exp)
 }
 
+// piRegistryMinter is claudeRegistryMinter's counterpart for pi.TokenMinter, for the
+// same reason opencodeRegistryMinter exists: pi.Drainer is its own distinct type.
+type piRegistryMinter struct {
+	reg *transmcp.Registry
+}
+
+func (m *piRegistryMinter) Mint(tenant, agent, taskID string, exp time.Time) (string, pi.Drainer) {
+	return m.reg.Mint(tenant, agent, taskID, exp)
+}
+
 // policyKindKeys returns the sorted-free set of action kinds declared in policies,
 // for Options.PolicyActionKinds (order is not significant to Capabilities() callers).
 func policyKindKeys(policies map[string]config.Policy) []string {
@@ -71,6 +82,13 @@ func policyKindKeys(policies map[string]config.Policy) []string {
 // no adapter package needs to import or declare this interface explicitly.
 type modelProber interface {
 	ProbeModel(ctx context.Context) error
+}
+
+// mcpProber is implemented by adapters that probe their agent's declared MCP servers at
+// startup (pi: the exact --tools allowlist is built from the probed tool lists). Each
+// server is bounded by the adapter's own probe timeout.
+type mcpProber interface {
+	ProbeMCP(ctx context.Context) error
 }
 
 // agentRuntime groups the live objects for a single materialized agent.
@@ -110,12 +128,21 @@ func (a *supervisorUIAdapter) ListTasks() ([]ui.TaskRecord, error) {
 	}
 	out := make([]ui.TaskRecord, len(recs))
 	for i, r := range recs {
+		var delegations []ui.Delegation
+		for _, d := range r.Delegations {
+			delegations = append(delegations, ui.Delegation{Role: d.Role, TaskID: d.TaskID})
+		}
 		out[i] = ui.TaskRecord{
 			TaskID:            r.TaskID,
 			State:             r.State,
 			Input:             r.Input,
 			PendingIntentKind: r.PendingIntentKind,
 			Output:            r.Output,
+
+			AwaitingPeer:         r.AwaitingPeerRole,
+			AwaitingPeerApproval: r.AwaitingPeerApproval,
+			Delegations:          delegations,
+			FollowUpOf:           r.FollowUpOf,
 		}
 	}
 	return out, nil
@@ -170,6 +197,46 @@ func (a *supervisorUIAdapter) SendTask(text string) error {
 	msg := sdka2a.NewMessage(sdka2a.MessageRoleUser, sdka2a.NewTextPart(text))
 
 	// Fire and forget: run SendMessage in background so the UI returns immediately.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		_, _ = a.handler.SendMessage(ctx, &sdka2a.SendMessageRequest{
+			Tenant:  a.tenant,
+			Message: msg,
+		})
+	}()
+	return nil
+}
+
+// FollowUp implements ui.Supervisor.
+// It refuses, before anything is sent, a task that is unknown or not terminal;
+// otherwise it submits a new task whose message references taskID and carries its
+// context, in a background goroutine like SendTask. The old task is left untouched.
+func (a *supervisorUIAdapter) FollowUp(taskID, text string) error {
+	tasks, err := a.sup.ListTasks()
+	if err != nil {
+		return err
+	}
+	var prev *supervisor.TaskRecord
+	for i := range tasks {
+		if tasks[i].TaskID == taskID {
+			prev = &tasks[i]
+			break
+		}
+	}
+	if prev == nil {
+		return fmt.Errorf("%w: %q", ui.ErrTaskNotFound, taskID)
+	}
+	if !sdka2a.TaskState(prev.State).Terminal() {
+		return fmt.Errorf("%w: %q is %s", ui.ErrNotTerminal, taskID, prev.State)
+	}
+
+	msg := sdka2a.NewMessage(sdka2a.MessageRoleUser, sdka2a.NewTextPart(text))
+	msg.ReferenceTasks = []sdka2a.TaskID{sdka2a.TaskID(taskID)}
+	if prev.ContextID != "" {
+		msg.ContextID = prev.ContextID
+	}
+
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
@@ -337,6 +404,16 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 			prov = opts.providerOverride
 		} else {
 			switch agCfg.Provider {
+			case "pi":
+				prov = pi.New("pi", pi.Options{
+					MCPRegistry:       &piRegistryMinter{reg: mcpSrv.Registry()},
+					MCPServerAddr:     mcpAddr,
+					Tenant:            cfg.Tenant,
+					AgentName:         agCfg.Name,
+					PolicyActionKinds: mcpActionKinds,
+					MCPHealthCheck:    mcpSrv.Err,
+					MCPServers:        piMCPServers(agCfg.MCPServers),
+				}, agCfg.Model, agCfg.SystemPrompt, agCfg.Extensions)
 			case "claude-code":
 				prov = claudecode.New("claude", claudecode.Options{
 					MCPRegistry:       &claudeRegistryMinter{reg: mcpSrv.Registry()},
@@ -374,6 +451,12 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 					return nil, fmt.Errorf("agent %q model probe failed: %w", agCfg.Name, probeErr)
 				}
 			}
+			// Same abort-before-bind guarantee for declared MCP servers.
+			if prober, ok := prov.(mcpProber); ok {
+				if probeErr := prober.ProbeMCP(context.Background()); probeErr != nil {
+					return nil, fmt.Errorf("agent %q mcp probe failed: %w", agCfg.Name, probeErr)
+				}
+			}
 		}
 
 		sup, err := supervisor.New(supervisor.Config{
@@ -384,6 +467,7 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 			Gateway:         gw,
 			Delegator:       delegator,
 			DelegateTimeout: opts.delegateTimeout,
+			MaxRounds:       agCfg.MaxRounds,
 			Role:            agCfg.Role,
 			PolicyConfig:    cfg.RiskPolicy,
 		})
@@ -426,4 +510,16 @@ func materializeAgents(cfg *config.CompanyConfig, opts wireOptions) (runtimes []
 	}
 
 	return runtimes, nil
+}
+
+// piMCPServers converts an agent's declared mcp_servers to the pi adapter's type.
+func piMCPServers(in map[string]config.MCPServer) map[string]pi.MCPServer {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]pi.MCPServer, len(in))
+	for name, s := range in {
+		out[name] = pi.MCPServer{Command: s.Command, Args: s.Args}
+	}
+	return out
 }

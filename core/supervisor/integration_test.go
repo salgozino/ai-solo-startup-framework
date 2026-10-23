@@ -69,14 +69,30 @@ func startDelegatingSupervisor(
 ) (*supervisor.Supervisor, *transa2a.Server) {
 	t.Helper()
 
-	addr, err := address.New(role, tenant)
-	if err != nil {
-		t.Fatalf("address.New(%q,%q): %v", role, tenant, err)
-	}
-
 	store, err := supervisor.NewStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
+	}
+	return startDelegatingSupervisorOn(t, store, role, tenant, prov, delegator, delegateTimeout, policyCfg)
+}
+
+// startDelegatingSupervisorOn is startDelegatingSupervisor over a caller-supplied
+// store, so a test can start a second supervisor on a first one's persisted tasks
+// (a simulated restart).
+func startDelegatingSupervisorOn(
+	t *testing.T,
+	store *supervisor.Store,
+	role, tenant string,
+	prov port.Provider,
+	delegator port.Delegator,
+	delegateTimeout time.Duration,
+	policyCfg map[string]config.Policy,
+) (*supervisor.Supervisor, *transa2a.Server) {
+	t.Helper()
+
+	addr, err := address.New(role, tenant)
+	if err != nil {
+		t.Fatalf("address.New(%q,%q): %v", role, tenant, err)
 	}
 
 	sup, err := supervisor.New(supervisor.Config{
@@ -89,6 +105,8 @@ func startDelegatingSupervisor(
 		DelegateTimeout: delegateTimeout,
 		Role:            role,
 		PolicyConfig:    policyCfg,
+		// Park/resume: poll a running peer quickly so tests settle in milliseconds.
+		PeerPollInterval: 10 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("supervisor.New: %v", err)
@@ -111,6 +129,9 @@ type delegationCompany struct {
 	delegator   *transa2a.Client
 	ceoSrv      *transa2a.Server
 	engineerSup *supervisor.Supervisor
+	engineerSrv *transa2a.Server
+	ceoSup      *supervisor.Supervisor
+	ceoStore    *supervisor.Store
 }
 
 // startDelegationCompany wires ceoProv and engineerProv into a real CEO/engineer
@@ -119,6 +140,13 @@ type delegationCompany struct {
 // only the CLI subprocess is faked, per repo convention. delegateTimeout of 0
 // uses the supervisor's own 10-minute default.
 func startDelegationCompany(t *testing.T, tenant string, ceoProv, engineerProv port.Provider, delegateTimeout time.Duration) *delegationCompany {
+	t.Helper()
+	return startDelegationCompanyWith(t, tenant, ceoProv, engineerProv, delegateTimeout, map[string]config.Policy{})
+}
+
+// startDelegationCompanyWith is startDelegationCompany with the engineer's own
+// risk policy, so a test can make the peer escalate.
+func startDelegationCompanyWith(t *testing.T, tenant string, ceoProv, engineerProv port.Provider, delegateTimeout time.Duration, engineerPolicy map[string]config.Policy) *delegationCompany {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("integration: skipping in -short mode")
@@ -129,7 +157,7 @@ func startDelegationCompany(t *testing.T, tenant string, ceoProv, engineerProv p
 		t.Fatalf("NewPeerDirectory: %v", err)
 	}
 
-	engineerSup, engineerSrv := startDelegatingSupervisor(t, "engineer", tenant, engineerProv, nil, 0, map[string]config.Policy{})
+	engineerSup, engineerSrv := startDelegatingSupervisor(t, "engineer", tenant, engineerProv, nil, 0, engineerPolicy)
 	if err := dir.Bind("engineer", engineerSrv.BaseURL()); err != nil {
 		t.Fatalf("dir.Bind(engineer): %v", err)
 	}
@@ -138,12 +166,16 @@ func startDelegationCompany(t *testing.T, tenant string, ceoProv, engineerProv p
 	policyCfg := map[string]config.Policy{
 		port.KindDelegateTask: {Risk: "safe", AllowedRoles: []string{"ceo"}},
 	}
-	_, ceoSrv := startDelegatingSupervisor(t, "ceo", tenant, ceoProv, delegator, delegateTimeout, policyCfg)
+	ceoStore, err := supervisor.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ceoSup, ceoSrv := startDelegatingSupervisorOn(t, ceoStore, "ceo", tenant, ceoProv, delegator, delegateTimeout, policyCfg)
 	if err := dir.Bind("ceo", ceoSrv.BaseURL()); err != nil {
 		t.Fatalf("dir.Bind(ceo): %v", err)
 	}
 
-	return &delegationCompany{delegator: delegator, ceoSrv: ceoSrv, engineerSup: engineerSup}
+	return &delegationCompany{delegator: delegator, ceoSrv: ceoSrv, engineerSup: engineerSup, engineerSrv: engineerSrv, ceoSup: ceoSup, ceoStore: ceoStore}
 }
 
 // delegateTaskIntentTo builds a delegate_task ActionIntent with the {target,
@@ -192,8 +224,8 @@ func textOf(msg *sdka2a.Message) string {
 // TestIntegration_CEODelegatesToWorkerOverRealWire, which called the worker's
 // handler directly and tolerated zero delegation calls. This test drives a
 // real delegate_task intent through the CEO's own A2A handler, over the real
-// wire, to a real engineer supervisor, and asserts the CEO's task carries the
-// engineer's terminal output — the proposal's first Success Criterion.
+// wire, to a real engineer supervisor. Slice 3 replaces raw peer-output copying
+// with a second CEO invocation and publication of the CEO's synthesized answer.
 //
 // Falsification (task 7.9): this test passes unmodified against the current
 // tree because Phases 4-6 already implement the client, the output-on-the-wire
@@ -204,50 +236,65 @@ func textOf(msg *sdka2a.Message) string {
 // want COMPLETED" and engineerProv.RunTaskCallCount() == 0, for exactly the
 // reason expected. The branch was restored before this file was committed.
 //
-// Satisfies: agent-delegation "A completed peer delegation completes the
-// delegating task with the peer's output"; tasks 7.9/7.10.
+// The original peer-output assertion is deliberately overturned by Slice 3 T9.
 func TestIntegration_CEODelegatesToEngineerOverRealWire(t *testing.T) {
 	tenant := "acme"
-	engineerProv := &fake.Provider{ReturnRunResult: port.ProviderResult{Output: "Done: implemented X"}}
-	ceoProv := &fake.Provider{ReturnRunResult: port.ProviderResult{
-		ActionIntents: []port.ActionIntent{delegateTaskIntentTo("engineer", "build X")},
+	engineerProv := &fake.Provider{ReturnRunResults: []port.ProviderResult{
+		{Output: "draft ready"}, {Output: "implementation ready"}, {Output: "validation ready"},
 	}}
+	ceoProv := &fake.Provider{
+		ReturnRunResults: []port.ProviderResult{
+			{Output: "request draft", ActionIntents: []port.ActionIntent{delegateTaskIntentTo("engineer", "build X")}},
+			{Output: "draft accepted; implement", ActionIntents: []port.ActionIntent{delegateTaskIntentTo("engineer", "build X")}},
+			{Output: "implementation accepted; validate", ActionIntents: []port.ActionIntent{delegateTaskIntentTo("engineer", "build X")}},
+		},
+		ReturnRunResult: port.ProviderResult{Output: "CEO accepted the implementation"},
+	}
 	co := startDelegationCompany(t, tenant, ceoProv, engineerProv, 0)
 
-	task := sendCEOTask(t, co.ceoSrv, tenant, "please delegate")
+	task := sendCEOTaskToEnd(t, co.ceoSrv, tenant, "please delegate")
 
 	if task.Status.State != sdka2a.TaskStateCompleted {
 		t.Fatalf("CEO task state = %v, want COMPLETED", task.Status.State)
 	}
-	if engineerProv.RunTaskCallCount() == 0 {
-		t.Error("expected the engineer's provider to run at least once")
+	if engineerProv.RunTaskCallCount() != 3 || ceoProv.RunTaskCallCount() != 4 {
+		t.Fatalf("peer/CEO calls = %d/%d, want 3/4", engineerProv.RunTaskCallCount(), ceoProv.RunTaskCallCount())
 	}
-	if got := textOf(task.Status.Message); !strings.Contains(got, "Done: implemented X") {
-		t.Errorf("CEO task output = %q, want it to contain the engineer's output", got)
+	// Identical delegations across rounds remain legitimate at the core/A2A
+	// seam. MCP's token-scoped dedupe still needs Slice 4 coverage separately.
+	for i, output := range []string{"draft ready", "implementation ready", "validation ready"} {
+		for turn := i + 1; turn < 4; turn++ {
+			if !strings.Contains(ceoProv.RunCalls[turn].Input, output) {
+				t.Errorf("CEO turn %d lacks prior peer output %q", turn+1, output)
+			}
+		}
+	}
+	if got := textOf(task.Status.Message); got != "CEO accepted the implementation" {
+		t.Errorf("CEO task output = %q, want CEO synthesis", got)
 	}
 }
 
-// TestIntegration_DelegatingCLIInvokedExactlyOnce proves the delegating agent's
-// own provider (its CLI subprocess) is invoked exactly once for a delegated
-// task — never a second time to "receive" or "react to" the peer's output, as
-// the delegating agent's own turn already ended before the peer answered.
-// Satisfies: agent-delegation "No second invocation of the delegating agent's
-// CLI occurs"; task 7.11.
-func TestIntegration_DelegatingCLIInvokedExactlyOnce(t *testing.T) {
+// Replacement behavior: the CEO's second invocation receives the peer output.
+// This deliberately overturns DelegatingCLIInvokedExactlyOnce (Slice 3 T7/T8).
+func TestIntegration_DelegatingCLIReceivesPeerFeedback(t *testing.T) {
 	tenant := "acme"
 	engineerProv := &fake.Provider{ReturnRunResult: port.ProviderResult{Output: "Done: implemented X"}}
-	ceoProv := &fake.Provider{ReturnRunResult: port.ProviderResult{
-		ActionIntents: []port.ActionIntent{delegateTaskIntentTo("engineer", "build X")},
-	}}
+	ceoProv := &fake.Provider{
+		ReturnRunResults: []port.ProviderResult{{ActionIntents: []port.ActionIntent{delegateTaskIntentTo("engineer", "build X")}}},
+		ReturnRunResult:  port.ProviderResult{Output: "CEO final answer"},
+	}
 	co := startDelegationCompany(t, tenant, ceoProv, engineerProv, 0)
 
-	task := sendCEOTask(t, co.ceoSrv, tenant, "please delegate")
+	task := sendCEOTaskToEnd(t, co.ceoSrv, tenant, "please delegate")
 	if task.Status.State != sdka2a.TaskStateCompleted {
 		t.Fatalf("CEO task state = %v, want COMPLETED", task.Status.State)
 	}
 
-	if got := ceoProv.RunTaskCallCount(); got != 1 {
-		t.Errorf("CEO provider RunTask call count = %d, want exactly 1", got)
+	if got := ceoProv.RunTaskCallCount(); got != 2 {
+		t.Fatalf("CEO provider RunTask call count = %d, want 2", got)
+	}
+	if !strings.Contains(ceoProv.RunCalls[1].Input, "Done: implemented X") {
+		t.Errorf("second CEO input lacks peer result: %q", ceoProv.RunCalls[1].Input)
 	}
 }
 
@@ -287,7 +334,10 @@ func TestIntegration_DelegationTimeoutLeavesPeerRunning(t *testing.T) {
 	const delegateTimeout = 100 * time.Millisecond
 	co := startDelegationCompany(t, tenant, ceoProv, engineerProv, delegateTimeout)
 
-	task := sendCEOTask(t, co.ceoSrv, tenant, "please delegate")
+	// Park/resume: the CEO parks while the peer works, and the watcher fails the
+	// task when the wait outlasts DelegateTimeout (design D10, now bounding the
+	// peer wait instead of a blocking call).
+	task := sendCEOTaskToEnd(t, co.ceoSrv, tenant, "please delegate")
 
 	if task.Status.State != sdka2a.TaskStateFailed {
 		t.Fatalf("CEO task state = %v, want FAILED (timeout)", task.Status.State)
